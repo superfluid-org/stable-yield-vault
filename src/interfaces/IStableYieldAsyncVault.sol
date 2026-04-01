@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.34;
+pragma solidity ^0.8.20;
 
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {IERC7540Deposit} from "./IERC7540Deposit.sol";
 import {IERC7540Redeem} from "./IERC7540Redeem.sol";
 import {IERC7540Operator} from "./IERC7540Operator.sol";
@@ -21,12 +22,38 @@ import {IERC7575} from "./IERC7575.sol";
 ///           - No request cancellation
 ///           - Forward pricing (all requests in an epoch get the same rate)
 ///           - requestId = 0 (single request per controller, aggregated)
+///
+///         Inherited from IERC4626:
+///           - asset(), totalAssets(), convertToShares(), convertToAssets()
+///           - deposit(assets, receiver), mint(shares, receiver)
+///           - withdraw(assets, receiver, owner), redeem(shares, receiver, owner)
+///           - maxDeposit(), maxMint(), maxWithdraw(), maxRedeem()
+///           - previewDeposit(), previewMint(), previewWithdraw(), previewRedeem()
+///
+///         Implementation notes:
+///           - The 2-param deposit/mint from IERC4626 should forward to the
+///             3-param overloads with controller = msg.sender
+///           - previewDeposit, previewMint, previewRedeem, previewWithdraw
+///             MUST revert per ERC-7540 for async flows
 interface IStableYieldAsyncVault is
+    IERC4626,
     IERC7540Deposit,
     IERC7540Redeem,
     IERC7540Operator,
     IERC7575
 {
+
+    // ──────────────────────────────────────────────
+    //  Errors
+    // ──────────────────────────────────────────────
+
+    /// @notice Error thrown when passing an invalid function parameter
+    error INVALID_PARAMETERS();
+
+    /// @notice Error thrown when the caller of a function is invalid
+    error INVALID_CALLER();
+
+
     // ──────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────
@@ -46,7 +73,9 @@ interface IStableYieldAsyncVault is
     );
 
     // ──────────────────────────────────────────────
-    //  ERC-4626 claim functions (overloaded per ERC-7540)
+    //  ERC-7540: 3-param claim overloads
+    //  These extend the 2-param ERC-4626 versions
+    //  to support controller-based claiming.
     // ──────────────────────────────────────────────
 
     /// @notice Claims shares from a claimable deposit request.
@@ -94,38 +123,6 @@ interface IStableYieldAsyncVault is
         returns (uint256 shares);
 
     // ──────────────────────────────────────────────
-    //  ERC-4626 view overrides (must revert per ERC-7540)
-    // ──────────────────────────────────────────────
-
-    /// @notice MUST revert for fully async vaults.
-    function previewDeposit(uint256 assets) external view returns (uint256);
-
-    /// @notice MUST revert for fully async vaults.
-    function previewMint(uint256 shares) external view returns (uint256);
-
-    /// @notice MUST revert for fully async vaults.
-    function previewRedeem(uint256 shares) external view returns (uint256);
-
-    /// @notice MUST revert for fully async vaults.
-    function previewWithdraw(uint256 assets) external view returns (uint256);
-
-    // ──────────────────────────────────────────────
-    //  ERC-4626 views (non-reverting)
-    // ──────────────────────────────────────────────
-
-    /// @notice Returns the address of the underlying asset (e.g. USDC).
-    function asset() external view returns (address);
-
-    /// @notice Returns the current total assets managed by the vault (last reported NAV).
-    function totalAssets() external view returns (uint256);
-
-    /// @notice Converts an asset amount to shares at the current exchange rate.
-    function convertToShares(uint256 assets) external view returns (uint256);
-
-    /// @notice Converts a share amount to assets at the current exchange rate.
-    function convertToAssets(uint256 shares) external view returns (uint256);
-
-    // ──────────────────────────────────────────────
     //  Vault-specific: epoch settlement
     // ──────────────────────────────────────────────
 
@@ -145,8 +142,10 @@ interface IStableYieldAsyncVault is
     /// @notice Returns the address of the YieldStrategy contract.
     function yieldStrategy() external view returns (address);
 
-    /// @notice Returns the vault operator address.
-    function operator() external view returns (address);
+    /// @notice Returns the vault operator address (the settlement authority).
+    /// @dev Not to be confused with ERC-7540 operators, which are user-approved
+    ///      delegates for managing requests.
+    function vaultOperator() external view returns (address);
 
     // ──────────────────────────────────────────────
     //  ERC-165
