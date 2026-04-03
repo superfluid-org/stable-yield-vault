@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-import {IERC7540Deposit} from "./IERC7540Deposit.sol";
-import {IERC7540Redeem} from "./IERC7540Redeem.sol";
-import {IERC7540Operator} from "./IERC7540Operator.sol";
-import {IERC7575} from "./IERC7575.sol";
+import { IERC7540Deposit } from "./IERC7540Deposit.sol";
+
+import { IERC7540Operator } from "./IERC7540Operator.sol";
+import { IERC7540Redeem } from "./IERC7540Redeem.sol";
+import { IERC7575 } from "./IERC7575.sol";
+import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 /// @title IStableYieldAsyncVault
 /// @notice Fully asynchronous ERC-7540 vault with 4-hour epoch-based settlement.
@@ -20,7 +21,7 @@ import {IERC7575} from "./IERC7575.sol";
 ///           - Fully async (both deposits and redemptions)
 ///           - Operator-reported NAV (trusted)
 ///           - No request cancellation
-///           - Forward pricing (all requests in an epoch get the same rate)
+///           - Forward pricing (all requests in an epoch get the same rate based on the NAV at epoch settlement)
 ///           - requestId = 0 (single request per controller, aggregated)
 ///
 ///         Inherited from IERC4626:
@@ -35,13 +36,7 @@ import {IERC7575} from "./IERC7575.sol";
 ///             3-param overloads with controller = msg.sender
 ///           - previewDeposit, previewMint, previewRedeem, previewWithdraw
 ///             MUST revert per ERC-7540 for async flows
-interface IStableYieldAsyncVault is
-    IERC4626,
-    IERC7540Deposit,
-    IERC7540Redeem,
-    IERC7540Operator,
-    IERC7575
-{
+interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, IERC7540Operator, IERC7575 {
 
     // ──────────────────────────────────────────────
     //  Errors
@@ -53,6 +48,8 @@ interface IStableYieldAsyncVault is
     /// @notice Error thrown when the caller of a function is invalid
     error INVALID_CALLER();
 
+    /// @notice Error thrown when attempting to call fucntions not supported by ERC-7540
+    error NOT_SUPPORTED_BY_ASYNC_VAULT();
 
     // ──────────────────────────────────────────────
     //  Events
@@ -85,9 +82,7 @@ interface IStableYieldAsyncVault is
     /// @param receiver Address that receives the minted shares
     /// @param controller Address whose claimable request is being consumed
     /// @return shares Amount of shares minted to receiver
-    function deposit(uint256 assets, address receiver, address controller)
-        external
-        returns (uint256 shares);
+    function deposit(uint256 assets, address receiver, address controller) external returns (uint256 shares);
 
     /// @notice Claims a specific number of shares from a claimable deposit request.
     /// @dev Does NOT transfer assets — they were already transferred on requestDeposit.
@@ -96,9 +91,7 @@ interface IStableYieldAsyncVault is
     /// @param receiver Address that receives the minted shares
     /// @param controller Address whose claimable request is being consumed
     /// @return assets Amount of assets consumed from the claimable balance
-    function mint(uint256 shares, address receiver, address controller)
-        external
-        returns (uint256 assets);
+    function mint(uint256 shares, address receiver, address controller) external returns (uint256 assets);
 
     /// @notice Claims assets from a claimable redemption request.
     /// @dev Does NOT transfer shares — they were already transferred on requestRedeem.
@@ -107,9 +100,7 @@ interface IStableYieldAsyncVault is
     /// @param receiver Address that receives the underlying assets
     /// @param controller Address whose claimable request is being consumed
     /// @return assets Amount of assets sent to receiver
-    function redeem(uint256 shares, address receiver, address controller)
-        external
-        returns (uint256 assets);
+    function redeem(uint256 shares, address receiver, address controller) external returns (uint256 assets);
 
     /// @notice Claims a specific amount of assets from a claimable redemption request.
     /// @dev Does NOT transfer shares — they were already transferred on requestRedeem.
@@ -118,9 +109,7 @@ interface IStableYieldAsyncVault is
     /// @param receiver Address that receives the underlying assets
     /// @param controller Address whose claimable request is being consumed
     /// @return shares Amount of shares consumed from the claimable balance
-    function withdraw(uint256 assets, address receiver, address controller)
-        external
-        returns (uint256 shares);
+    function withdraw(uint256 assets, address receiver, address controller) external returns (uint256 shares);
 
     // ──────────────────────────────────────────────
     //  Vault-specific: epoch settlement
@@ -158,4 +147,5 @@ interface IStableYieldAsyncVault is
     ///        - 0xce3bbe50 (async deposit)
     ///        - 0x620ee8e4 (async redeem)
     function supportsInterface(bytes4 interfaceId) external view returns (bool);
+
 }
