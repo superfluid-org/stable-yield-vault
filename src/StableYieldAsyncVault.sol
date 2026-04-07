@@ -200,6 +200,26 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         status = _isOperator[controller][operator];
     }
 
+    /// @inheritdoc IERC4626
+    function maxDeposit(address receiver) external view returns (uint256 maxAssets) {
+        maxAssets = _claimableDepositRequest[receiver];
+    }
+
+    /// @inheritdoc IERC4626
+    function maxMint(address receiver) external view returns (uint256 maxShares) {
+        maxShares = convertToShares(_claimableDepositRequest[receiver]);
+    }
+
+    /// @inheritdoc IERC4626
+    function maxRedeem(address owner) external view returns (uint256 maxShares) {
+        maxShares = _claimableRedeemRequest[owner];
+    }
+
+    /// @inheritdoc IERC4626
+    function maxWithdraw(address owner) external view returns (uint256 maxAssets) {
+        maxAssets = convertToAssets(_claimableRedeemRequest[owner]);
+    }
+
     /// @notice MUST revert for fully async vaults per ERC-7540 standard
     function previewDeposit(uint256) external view returns (uint256) {
         revert NOT_SUPPORTED_BY_ASYNC_VAULT();
