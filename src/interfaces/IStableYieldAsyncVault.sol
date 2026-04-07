@@ -116,14 +116,13 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     // ──────────────────────────────────────────────
 
     /// @notice Called by the vault operator to settle the current epoch.
-    /// @dev The operator must:
-    ///        1. Net deposit and redemption flows
-    ///        2. Rebalance with the YieldStrategy (deploy or liquidate)
-    ///        3. Call this function with the updated NAV
-    ///      All pending requests in the current epoch become claimable.
-    ///      The exchange rate is locked at newTotalAssets / totalSupply.
-    /// @param newTotalAssets The operator-reported NAV after rebalancing
-    function settleEpoch(uint256 newTotalAssets) external;
+    /// @dev Atomically:
+    ///        1. Computes fair rate from effective assets/supply (excludes pending flows)
+    ///        2. Converts pending redeems to asset terms at the epoch rate
+    ///        3. Nets deposit/redeem flows and moves funds to/from YieldStrategy
+    ///        4. Stores the epoch rate, resets pending totals, advances epoch
+    ///      All pending requests in the current epoch become claimable (lazily).
+    function settleEpoch() external;
 
     /// @notice Returns the current epoch number.
     function currentEpoch() external view returns (uint256);

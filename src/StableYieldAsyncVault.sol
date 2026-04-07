@@ -9,6 +9,7 @@ import {
     IERC7575,
     IStableYieldAsyncVault
 } from "./interfaces/IStableYieldAsyncVault.sol";
+import { IYieldStrategy } from "./interfaces/IYieldStrategy.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -37,7 +38,21 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     mapping(address controller => uint256 shares) private _pendingRedeemRequest;
     mapping(address controller => uint256 shares) private _claimableRedeemRequest;
 
+    /// @dev Tracks which epoch each controller's pending deposit belongs to
+    mapping(address controller => uint256 epoch) private _depositRequestEpoch;
+    /// @dev Tracks which epoch each controller's pending redeem belongs to
+    mapping(address controller => uint256 epoch) private _redeemRequestEpoch;
+
+    /// @dev Exchange rate snapshot per settled epoch (assetsPerShare, scaled by 1e18)
+    mapping(uint256 epoch => uint256 assetsPerShare) private _epochRate;
+
     IERC20 public underlyingAsset;
+    IYieldStrategy private _yieldStrategy;
+    address public vaultOperator;
+
+    uint256 public currentEpoch;
+    uint256 public totalPendingDepositAssets;
+    uint256 public totalPendingRedeemShares;
 
     //     ______                 __                  __
     //    / ____/___  ____  _____/ /________  _______/ /_____  _____
@@ -51,8 +66,16 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
      * @param name The name of the share token.
      * @param symbol The symbol of the share token.
      */
-    constructor(IERC20 _underlyingAsset, string memory name, string memory symbol) ERC20(name, symbol) {
+    constructor(
+        IERC20 _underlyingAsset,
+        IYieldStrategy yieldStrategy_,
+        address _vaultOperator,
+        string memory name,
+        string memory symbol
+    ) ERC20(name, symbol) {
         underlyingAsset = _underlyingAsset;
+        _yieldStrategy = yieldStrategy_;
+        vaultOperator = _vaultOperator;
     }
 
     //      ______     __                        __   ______                 __  _
@@ -69,11 +92,16 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // no requestId associated with this request
         requestId = 0;
 
+        // Lazy-settle any pending deposit from a previous epoch
+        _settleDepositIfNeeded(controller);
+
         // Transfer the underlying asset from the owner to this contract
         underlyingAsset.transferFrom(owner, address(this), assets);
 
         // Accrue the assets deposited by this controller
         _pendingDepositRequest[controller] += assets;
+        totalPendingDepositAssets += assets;
+        _depositRequestEpoch[controller] = currentEpoch;
 
         emit DepositRequest(controller, owner, requestId, msg.sender, assets);
     }
@@ -108,11 +136,16 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // no requestId associated with this request
         requestId = 0;
 
+        // Lazy-settle any pending redeem from a previous epoch
+        _settleRedeemIfNeeded(controller);
+
         // Transfer the shares from the owner to this contract
         transferFrom(owner, address(this), shares);
 
         // Accrue the shares pending to be redeemed by this controller
         _pendingRedeemRequest[controller] += shares;
+        totalPendingRedeemShares += shares;
+        _redeemRequestEpoch[controller] = currentEpoch;
 
         emit RedeemRequest(controller, owner, requestId, msg.sender, shares);
     }
@@ -127,6 +160,44 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function withdraw(uint256 assets, address receiver, address controller) external returns (uint256 shares) {
         if (controller != msg.sender && !_isOperator[controller][msg.sender]) revert INVALID_CALLER();
         shares = _withdraw(assets, receiver, controller);
+    }
+
+    /// @inheritdoc IStableYieldAsyncVault
+    function settleEpoch() external {
+        if (msg.sender != vaultOperator) revert INVALID_CALLER();
+
+        uint256 epoch = currentEpoch;
+
+        // Compute rate excluding pending flows
+        uint256 effectiveAssets =
+            _yieldStrategy.totalValue() + underlyingAsset.balanceOf(address(this)) - totalPendingDepositAssets;
+        uint256 effectiveSupply = totalSupply() - totalPendingRedeemShares;
+
+        // assetsPerShare scaled by 1e18; if no shares exist yet, 1:1
+        uint256 assetsPerShare = effectiveSupply == 0 ? 1e18 : effectiveAssets.mulDiv(1e18, effectiveSupply);
+        _epochRate[epoch] = assetsPerShare;
+
+        // Convert pending redeems to asset terms using the epoch rate
+        uint256 redeemAssets = totalPendingRedeemShares.mulDiv(assetsPerShare, 1e18);
+
+        // Net and move funds
+        if (totalPendingDepositAssets > redeemAssets) {
+            // Net inflow : deploy excess into strategy
+            uint256 toDeploy = totalPendingDepositAssets - redeemAssets;
+            underlyingAsset.approve(address(_yieldStrategy), toDeploy);
+            _yieldStrategy.deploy(toDeploy);
+        } else if (redeemAssets > totalPendingDepositAssets) {
+            // Net outflow : liquidate from strategy to cover redemptions
+            uint256 toLiquidate = redeemAssets - totalPendingDepositAssets;
+            _yieldStrategy.liquidate(toLiquidate);
+        }
+
+        emit EpochSettled(epoch, effectiveAssets, assetsPerShare, totalPendingDepositAssets, totalPendingRedeemShares);
+
+        // Update epoch accounting
+        totalPendingDepositAssets = 0;
+        totalPendingRedeemShares = 0;
+        currentEpoch = epoch + 1;
     }
 
     /// @inheritdoc IERC7540Operator
@@ -144,19 +215,14 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC4626
     function convertToShares(uint256 assets) public view returns (uint256 shares) {
-        /// NOTE : this assumes that shareToken and assetToken have the same decimals.
-        /// FIXME : to consider the totalAssets reported by the YieldStrategy at last epoch transition
-        /// instead of the instantaneous totalAssets which may fluctuate due to pending requests and unrealized yield.
-
-        shares = assets.mulDiv(totalSupply(), totalAssets() + 1);
+        uint256 rate = _lastSettledRate();
+        shares = assets.mulDiv(1e18, rate);
     }
 
     /// @inheritdoc IERC4626
     function convertToAssets(uint256 shares) public view returns (uint256 assets) {
-        /// NOTE : this assumes that shareToken and assetToken have the same decimals.
-        /// FIXME : to consider the totalAssets reported by the YieldStrategy at last epoch transition
-        /// instead of the instantaneous totalAssets which may fluctuate due to pending requests and unrealized yield.
-        assets = shares.mulDiv(totalAssets() + 1, totalSupply());
+        uint256 rate = _lastSettledRate();
+        assets = shares.mulDiv(rate, 1e18);
     }
 
     /// @inheritdoc IERC7540Deposit
@@ -191,13 +257,17 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC4626
     function totalAssets() public view returns (uint256 total) {
-        /// FIXME : shall be equal to YieldStrategy NAV + unutilized capital
-        total = underlyingAsset.balanceOf(address(this));
+        total = _yieldStrategy.totalValue() + underlyingAsset.balanceOf(address(this));
     }
 
     /// @inheritdoc IERC7540Operator
     function isOperator(address controller, address operator) public view returns (bool status) {
         status = _isOperator[controller][operator];
+    }
+
+    /// @inheritdoc IStableYieldAsyncVault
+    function yieldStrategy() external view returns (address) {
+        return address(_yieldStrategy);
     }
 
     /// @inheritdoc IERC4626
@@ -240,6 +310,14 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         revert NOT_SUPPORTED_BY_ASYNC_VAULT();
     }
 
+    /// @inheritdoc IStableYieldAsyncVault
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == 0xe3bc4e65 // IERC7540Operator
+            || interfaceId == 0x2f0a18c5 // IERC7575
+            || interfaceId == 0xce3bbe50 // IERC7540Deposit
+            || interfaceId == 0x620ee8e4; // IERC7540Redeem
+    }
+
     //      ____      __                        __   ______                 __  _
     //     /  _/___  / /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //     / // __ \/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
@@ -248,6 +326,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _deposit(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
+
+        // Lazy-settle any pending deposit from a previous epoch
+        _settleDepositIfNeeded(controller);
 
         // underflow would revert if not enough claimable assets
         _claimableDepositRequest[controller] -= assets;
@@ -262,9 +343,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function _mintShares(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
 
+        // Lazy-settle any pending deposit from a previous epoch
+        _settleDepositIfNeeded(controller);
+
         assets = convertToAssets(shares);
 
-        // underflow would revert if not enough claimable shares
+        // underflow would revert if not enough claimable assets
         _claimableDepositRequest[controller] -= assets;
 
         _mint(receiver, shares);
@@ -274,6 +358,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _redeem(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
+
+        // Lazy-settle any pending redeem from a previous epoch
+        _settleRedeemIfNeeded(controller);
 
         // underflow would revert if not enough claimable shares
         _claimableRedeemRequest[controller] -= shares;
@@ -292,9 +379,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function _withdraw(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
 
+        // Lazy-settle any pending redeem from a previous epoch
+        _settleRedeemIfNeeded(controller);
+
         shares = convertToShares(assets);
 
-        // underflow would revert if not enough claimable assets
+        // underflow would revert if not enough claimable shares
         _claimableRedeemRequest[controller] -= shares;
 
         // Burn shares pre-transferred to this contract in requestRedeem
@@ -304,6 +394,42 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         underlyingAsset.transfer(receiver, assets);
 
         emit Withdraw(controller, receiver, receiver, assets, shares);
+    }
+
+    /// @dev Returns the exchange rate from the last settled epoch.
+    ///      Before any epoch has settled (epoch 0), returns 1e18 (1:1).
+    function _lastSettledRate() internal view returns (uint256) {
+        if (currentEpoch == 0) return 1e18;
+        return _epochRate[currentEpoch - 1];
+    }
+
+    /// @dev If the controller has a pending deposit from a settled (past) epoch,
+    ///      convert it to claimable using the stored epoch rate.
+    function _settleDepositIfNeeded(address controller) internal {
+        uint256 pending = _pendingDepositRequest[controller];
+        if (pending == 0) return;
+
+        uint256 requestEpoch = _depositRequestEpoch[controller];
+        if (requestEpoch >= currentEpoch) return; // not yet settled
+
+        // Convert pending assets → claimable assets (stays in asset terms,
+        // the share conversion happens at claim time using the epoch rate)
+        _claimableDepositRequest[controller] += pending;
+        _pendingDepositRequest[controller] = 0;
+    }
+
+    /// @dev If the controller has a pending redeem from a settled (past) epoch,
+    ///      convert it to claimable using the stored epoch rate.
+    function _settleRedeemIfNeeded(address controller) internal {
+        uint256 pending = _pendingRedeemRequest[controller];
+        if (pending == 0) return;
+
+        uint256 requestEpoch = _redeemRequestEpoch[controller];
+        if (requestEpoch >= currentEpoch) return; // not yet settled
+
+        // Convert pending shares → claimable shares
+        _claimableRedeemRequest[controller] += pending;
+        _pendingRedeemRequest[controller] = 0;
     }
 
 }
