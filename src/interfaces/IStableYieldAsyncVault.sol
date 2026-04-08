@@ -9,30 +9,29 @@ import { IERC7575 } from "./IERC7575.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 /// @title IStableYieldAsyncVault
-/// @notice Fully asynchronous ERC-7540 vault with 4-hour epoch-based settlement.
+/// @notice Fully asynchronous ERC-7540 vault with epoch-based settlement.
 ///
 ///         Lifecycle:
 ///           1. Users call requestDeposit / requestRedeem during an epoch
-///           2. Epoch closes → operator nets flows, rebalances with YieldStrategy
-///           3. Operator calls settleEpoch() with the updated NAV
-///           4. Users call deposit/mint or redeem/withdraw to claim
+///           2. Operator calls settleEpoch() which atomically:
+///              a. Computes the fair exchange rate (excluding pending flows)
+///              b. Nets deposit/redeem flows and rebalances with YieldStrategy
+///              c. Stores the epoch rate and advances the epoch
+///           3. Users call deposit/mint or redeem/withdraw to claim
+///              (lazy settlement resolves pending → claimable on interaction)
 ///
 ///         Design decisions:
 ///           - Fully async (both deposits and redemptions)
-///           - Operator-reported NAV (trusted)
+///           - Forward pricing (all requests in an epoch get the same rate,
+///             computed from effective NAV at settlement, excluding pending flows)
+///           - Atomic settlement with fund movement to/from YieldStrategy
 ///           - No request cancellation
-///           - Forward pricing (all requests in an epoch get the same rate based on the NAV at epoch settlement)
 ///           - requestId = 0 (single request per controller, aggregated)
-///
-///         Inherited from IERC4626:
-///           - asset(), totalAssets(), convertToShares(), convertToAssets()
-///           - deposit(assets, receiver), mint(shares, receiver)
-///           - withdraw(assets, receiver, owner), redeem(shares, receiver, owner)
-///           - maxDeposit(), maxMint(), maxWithdraw(), maxRedeem()
-///           - previewDeposit(), previewMint(), previewWithdraw(), previewRedeem()
+///           - Claimable deposits stored internally as shares (pre-computed at epoch rate)
+///           - Claimable redeems stored internally as assets (pre-computed at epoch rate)
 ///
 ///         Implementation notes:
-///           - The 2-param deposit/mint from IERC4626 should forward to the
+///           - The 2-param deposit/mint from IERC4626 forward to the
 ///             3-param overloads with controller = msg.sender
 ///           - previewDeposit, previewMint, previewRedeem, previewWithdraw
 ///             MUST revert per ERC-7540 for async flows
