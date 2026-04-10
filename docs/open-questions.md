@@ -6,18 +6,40 @@
 
 Additionally, pending deposit assets in the WaitingRoom can partially offset redemptions (netting), reducing the amount needed from FundManager.
 
-**Proposed approach:**
+**Decision: Two-phase settlement with operator-ensured liquidity**
 
-### Operator-ensured liquidity
-The operator is responsible for ensuring FundManager has enough unutilized assets before calling `settleEpoch`. Flow:
-1. Operator computes net flow: `netOutflow = redeemAssets - depositAssets`
-2. If net outflow > FundManager unutilized balance, operator liquidates investments first (offchain or onchain, may take time)
-3. Operator deposits liquidated assets back into FundManager
-4. Operator calls `settleEpoch` — vault nets flows, pulls remainder from FundManager
+Settlement is split into two operator-triggered calls:
 
-**Tradeoff:** Simple and correct, but settlement can be delayed if liquidity is slow to free up. Depositors are blocked until the operator can cover redemptions.
+### Phase A: `preSettleEpoch()`
+- Snapshots `totalPendingDepositAssets` and `totalPendingRedeemShares`
+- Computes and locks the epoch rate from `FundManager.totalValue()` / effectiveSupply
+- Advances `currentEpoch` — new requests land in the next epoch
+- Sets `settlingEpoch` to the epoch being settled
+- Pending requests in `settlingEpoch` are frozen: they can't be claimed yet
 
-**Decision:** TBD
+### Between phases (operator responsibility)
+- Operator reads the exact locked snapshot (no estimation needed)
+- Computes `netOutflow = redeemAssets - depositAssets` using the locked rate
+- If `netOutflow > FundManager.unutilized`: liquidates working assets (onchain/offchain) and tops up FundManager
+
+### Phase B: `finalizeEpoch()`
+- Uses the locked snapshot and rate — no recomputation
+- Nets deposit/redeem flows, moves funds between WaitingRoom, FundManager, RedeemClaimingRoom
+- Stores the rate under `settlingEpoch`, clears snapshot
+- Requests in `settlingEpoch` become claimable via lazy settlement
+
+**Why two phases:**
+- Eliminates the race condition where new requests arrive between liquidity estimation and settlement
+- Operator has exact numbers for flows and rate → precise liquidation
+- Clean separation: snapshot/commit vs. execute
+
+**Tradeoffs:**
+- Two transactions instead of one
+- Requests in `settlingEpoch` cannot claim until `finalizeEpoch` completes
+- Lazy settlement needs to distinguish between "settled and finalized" vs "snapshotted but not finalized"
+- Rate is locked at preSettle time — yield accruing on working assets between preSettle and finalize accrues to remaining shareholders, not redeemers (arguably correct since redeemers committed to exit)
+
+**No cancellation:** Once `preSettleEpoch` is called, the operator must eventually call `finalizeEpoch`. Rollback is not supported.
 
 ---
 
