@@ -114,6 +114,9 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     //  Vault-specific: epoch settlement
     // ──────────────────────────────────────────────
 
+    /// @notice Freeze deposit/redeem requests for the current epoch and lock the epoch rate
+    function closeEpoch(uint256 totalFundAssets) external; 
+
     /// @notice Called by the vault operator to settle the current epoch.
     /// @dev Atomically:
     ///        1. Computes fair rate from effective assets/supply (excludes pending flows)
