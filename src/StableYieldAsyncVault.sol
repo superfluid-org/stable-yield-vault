@@ -164,8 +164,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @inheritdoc IStableYieldAsyncVault
-    function closeEpoch(uint256 _totalAssets) external {
-        if (msg.sender != address(fundManager)) revert INVALID_CALLER();
+    function closeEpoch(uint256 _totalAssets) external onlyFundManager {
         if (_snapshot.epoch != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
 
         uint256 shareSupply = totalSupply();
@@ -187,8 +186,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @inheritdoc IStableYieldAsyncVault
-    function settleEpoch() external {
-        if (msg.sender != address(fundManager)) revert INVALID_CALLER();
+    function settleEpoch() external onlyFundManager {
         if (_snapshot.epoch == 0) revert NO_EPOCH_TO_SETTLE();
 
         // Convert pending redeems to asset terms using the epoch rate
@@ -203,6 +201,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
             // 1- move `depositingAssets` amount from DepositWaitingRoom to RedeemClaimingRoom
             // 2- pull `deficit` amount from the FundManager to RedeemClaimingRoom
         }
+
+        // Commit the epoch rate for the settled epoch
+        _epochRate[_snapshot.epoch] = _snapshot.rate;
 
         emit EpochSettled(_snapshot.epoch, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares);
     }
@@ -469,6 +470,11 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         if (pending > 0 && _redeemRequestEpoch[controller] < currentEpoch) {
             assets += pending.mulDiv(_epochRate[_redeemRequestEpoch[controller]], 1e18);
         }
+    }
+
+    modifier onlyFundManager() {
+        if (msg.sender != address(fundManager)) revert INVALID_CALLER();
+        _;
     }
 
 }
