@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import {
-    IERC4626,
-    IERC7540Deposit,
-    IERC7540Operator,
-    IERC7540Redeem,
-    IERC7575,
-    IStableYieldAsyncVault
-} from "./interfaces/IStableYieldAsyncVault.sol";
-
+import { IFundManager } from "./interfaces/IFundManager.sol";
 import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
 
 contract FundManager is IFundManager, AccessControl {
 
@@ -23,7 +16,7 @@ contract FundManager is IFundManager, AccessControl {
     //  /___/_/ /_/ /_/_/ /_/ /_/\__,_/\__/\__,_/_.___/_/\___/   /____/\__/\__,_/\__/\___/____/
 
     /// @notice Role identifier for fund operators
-    byte32 public constant FUND_OPERATOR_ROLE = keccak256("FUND_OPERATOR_ROLE");
+    bytes32 public constant FUND_OPERATOR_ROLE = keccak256("FUND_OPERATOR_ROLE");
 
     /// @notice Reference to the StableYieldAsyncVault contract
     IStableYieldAsyncVault public immutable VAULT;
