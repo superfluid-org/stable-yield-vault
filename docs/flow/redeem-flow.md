@@ -45,7 +45,7 @@ sequenceDiagram
 
     rect rgb(255, 245, 230)
     Note over FO, RCR: Phase 2 — Settlement (two-phase)
-    FO->>AV: (2.1) preSettleEpoch()
+    FO->>AV: (2.1) closeEpoch()
     Note right of AV: Snapshot pending flows<br/>Lock epoch rate from FM.totalValue()<br/>Advance currentEpoch<br/>settlingEpoch = snapshotted epoch
     Note right of FO: Exact numbers now known:<br/>redeemAssets = snapshot.redeemShares * snapshot.rate<br/>netOutflow = redeemAssets - snapshot.depositAssets
     end
@@ -61,12 +61,12 @@ sequenceDiagram
 
     rect rgb(255, 245, 230)
     Note over FO, RCR: Phase 3 — Finalize
-    FO->>AV: (3.1) finalizeEpoch()
+    FO->>AV: (3.1) settleEpoch()
     Note right of AV: Use locked snapshot/rate<br/>Net deposit/redeem flows
     AV->>FM: pull redeemable assets
     FM->>RCR: (3.2) transfer redeemable assets
     Note right of RCR: Assets escrowed for claimants<br/>Operator cannot touch
-    Note right of AV: Store rate under settlingEpoch,<br/>clear snapshot, mark finalized
+    Note right of AV: Store rate under settlingEpoch,<br/>clear snapshot, mark settled
     end
 
     rect rgb(230, 255, 230)
@@ -100,18 +100,18 @@ sequenceDiagram
       - OPEN QUESTION: same timing dependency as (1.2)
 ```
 
-### Phase 2: Settlement — preSettleEpoch
+### Phase 2: Settlement — closeEpoch
 
 Settlement is two-phase. See `open-questions.md #1` for rationale.
 
 ```
-(2.1) Fund Operator → AsyncVault: preSettleEpoch()
+(2.1) Fund Operator → AsyncVault: closeEpoch()
       - AsyncVault snapshots the pending flows:
         snapshot.depositAssets = totalPendingDepositAssets
         snapshot.redeemShares  = totalPendingRedeemShares
       - AsyncVault computes and locks the epoch rate:
         effectiveAssets = FundManager.totalValue()
-        effectiveSupply = totalSupply() - totalPendingRedeemShares
+        effectiveSupply = totalSupply()
         snapshot.rate = effectiveAssets / effectiveSupply
       - AsyncVault advances currentEpoch (new requests land in the next epoch)
       - settlingEpoch = the snapshotted epoch
@@ -138,22 +138,22 @@ Settlement is two-phase. See `open-questions.md #1` for rationale.
       is exactly known from the locked snapshot.
 ```
 
-### Phase 3: Settlement — finalizeEpoch
+### Phase 3: Settlement — settleEpoch
 
 ```
-(3.1) Fund Operator → AsyncVault: finalizeEpoch()
+(3.1) Fund Operator → AsyncVault: settleEpoch()
       - Uses the locked snapshot and rate (no recomputation)
       - Nets deposit and redeem flows (see settlement-flow.md for details)
 
 (3.2) FundManager → RedeemClaimingRoom: transfer redeemable assets
-      - Orchestrated by AsyncVault during finalizeEpoch
+      - Orchestrated by AsyncVault during settleEpoch
       - The total redeemable amount is transferred to RedeemClaimingRoom
       - In a mixed epoch, some of this may come from DepositWaitingRoom
         (netting) and the remainder from FundManager
       - Reverts if FundManager cannot cover the net outflow
 
       AsyncVault stores the rate under settlingEpoch, clears the snapshot,
-      marks the epoch as finalized.
+      marks the epoch as settled.
 ```
 
 ### Phase 4: Claim
@@ -161,8 +161,8 @@ Settlement is two-phase. See `open-questions.md #1` for rationale.
 ```
 (4.1) Investor → AsyncVault: redeem(shares, receiver, controller)
       or withdraw(assets, receiver, controller)
-      - Only possible once the investor's epoch has been FINALIZED
-        (not just preSettled — see two-phase rationale)
+      - Only possible once the investor's epoch has been SETTLED
+        (not just closed — see two-phase rationale)
       - Lazy settlement resolves pending → claimable if needed
       - Pending redeem shares are converted to claimable assets
         at the epoch rate from when the request was settled
@@ -191,18 +191,18 @@ Settlement is two-phase. See `open-questions.md #1` for rationale.
 1. **RedeemClaimingRoom balance >= sum of all claimable redeem assets.**
    The operator cannot touch these funds. Only claimants can withdraw.
 
-2. **finalizeEpoch reverts if FundManager cannot cover the net outflow.**
+2. **settleEpoch reverts if FundManager cannot cover the net outflow.**
    All requests in an epoch settle together — no partial settlement.
 
-3. **Once preSettleEpoch is called, finalizeEpoch must eventually be called.**
-   No rollback. Requests in the snapshotted epoch are frozen until finalize.
+3. **Once closeEpoch is called, settleEpoch must eventually be called.**
+   No rollback. Requests in the closed epoch are frozen until settleEpoch.
 
 4. **Shares are burned at claim time, not settlement time** (per ERC-7540).
    Shares remain locked in the vault between settlement and claim.
 
 5. **Epoch rate is computed solely from FundManager.totalValue() / effectiveSupply,
-   and is locked at preSettleEpoch time.**
+   and is locked at closeEpoch time.**
    RedeemClaimingRoom and DepositWaitingRoom assets are excluded from NAV.
 
 6. **Forward pricing:** all redeem requests within an epoch receive the same
-   exchange rate, determined at preSettleEpoch.
+   exchange rate, determined at closeEpoch.

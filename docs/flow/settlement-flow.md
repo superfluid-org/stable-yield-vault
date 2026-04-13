@@ -22,11 +22,11 @@ sequenceDiagram
     participant INV as Underlying Investment
 
     rect rgb(255, 245, 230)
-    Note over FO, RCR: Phase A — preSettleEpoch() (snapshot & lock)
-    FO->>AV: preSettleEpoch()
+    Note over FO, RCR: Phase 1 — closeEpoch() (snapshot & lock)
+    FO->>AV: closeEpoch()
     Note right of AV: (1) Snapshot pending flows:<br/>snapshot.depositAssets = totalPendingDepositAssets<br/>snapshot.redeemShares = totalPendingRedeemShares
 
-    Note right of AV: (2) Lock epoch rate:<br/>effectiveAssets = FM.totalValue()<br/>effectiveSupply = totalSupply - pendingRedeemShares<br/>snapshot.rate = effectiveAssets / effectiveSupply
+    Note right of AV: (2) Lock epoch rate:<br/>effectiveAssets = FM.totalValue()<br/>effectiveSupply = totalSupply<br/>snapshot.rate = effectiveAssets / effectiveSupply
 
     Note right of AV: (3) Advance currentEpoch<br/>settlingEpoch = snapshotted epoch<br/>New requests go to the new currentEpoch
     end
@@ -41,8 +41,8 @@ sequenceDiagram
     end
 
     rect rgb(255, 245, 230)
-    Note over FO, RCR: Phase B — finalizeEpoch() (execute)
-    FO->>AV: finalizeEpoch()
+    Note over FO, RCR: Phase 2 — settleEpoch() (execute)
+    FO->>AV: settleEpoch()
     Note right of AV: Use locked snapshot/rate (no recomputation)
 
     alt Case A: Net inflow (depositAssets >= redeemAssets)
@@ -61,16 +61,16 @@ sequenceDiagram
         DWR->>RCR: transfer all (perfect netting)
     end
 
-    Note right of AV: Store rate under settlingEpoch<br/>Clear snapshot, mark epoch finalized
+    Note right of AV: Store rate under settlingEpoch<br/>Clear snapshot, mark epoch settled
     end
 
     rect rgb(230, 255, 230)
     Note over AV, RCR: Post-settlement — Claims
-    Note right of AV: Depositors call deposit() → mint shares<br/>Redeemers call redeem() → burn shares + release from RCR<br/>Only possible once epoch is FINALIZED
+    Note right of AV: Depositors call deposit() → mint shares<br/>Redeemers call redeem() → burn shares + release from RCR<br/>Only possible once epoch is SETTLED
     end
 ```
 
-## Phase A: preSettleEpoch()
+## Phase 1: closeEpoch()
 
 Called by the operator on AsyncVault. Takes a snapshot and locks the rate.
 No fund movements.
@@ -82,7 +82,7 @@ No fund movements.
 
 (A.2) Compute and lock the epoch rate:
       effectiveAssets = FundManager.totalValue()
-      effectiveSupply = totalSupply() - totalPendingRedeemShares
+      effectiveSupply = totalSupply()
       snapshot.rate   = effectiveAssets / effectiveSupply
       (If no shares exist, snapshot.rate = 1:1)
 
@@ -93,7 +93,7 @@ No fund movements.
       totalPendingRedeemShares  = 0
 
       Pending requests in settlingEpoch are frozen:
-      they cannot be claimed until finalizeEpoch completes.
+      they cannot be claimed until settleEpoch completes.
 ```
 
 ## Between phases: Operator ensures liquidity
@@ -112,7 +112,7 @@ If netOutflow > FundManager.unutilized:
 
 No buffer needed — the numbers are exact.
 
-## Phase B: finalizeEpoch()
+## Phase 2: settleEpoch()
 
 Uses the locked snapshot, nets flows, and moves funds atomically.
 
@@ -153,19 +153,19 @@ Uses the locked snapshot, nets flows, and moves funds atomically.
 (B.3) Finalize the epoch:
       _epochRate[settlingEpoch] = snapshot.rate
       clear snapshot
-      mark settlingEpoch as finalized
+      mark settlingEpoch as settled
 ```
 
 ## Post-settlement: Claims
 
-Only possible once the epoch is **finalized** (not just preSettled).
+Only possible once the epoch is **settled** (not just closed).
 
 ```
 Depositors:
   - Investor calls deposit(assets, receiver, controller) on AsyncVault
   - Lazy settlement converts pending assets → claimable shares at epoch rate
   - AsyncVault mints shares to receiver
-  - No asset movement (assets already moved during finalizeEpoch)
+  - No asset movement (assets already moved during settleEpoch)
 
 Redeemers:
   - Investor calls redeem(shares, receiver, controller) on AsyncVault
@@ -180,7 +180,7 @@ Alice requests deposit: 100 USDC (in DepositWaitingRoom)
 Bob requests redeem: 80 shares
 Carol requests redeem: 50 shares
 
-**preSettleEpoch:**
+**closeEpoch:**
 1. Rate locked: snapshot.rate = FundManager.totalValue() / effectiveSupply
 2. Snapshot: depositAssets=100, redeemShares=130
 3. redeemAssets = 130 * snapshot.rate (e.g. = 130 USDC if rate is 1:1)
@@ -190,11 +190,11 @@ Carol requests redeem: 50 shares
 **Between phases:**
 6. Operator sees FundManager.unutilized < 30 → liquidates 30 USDC, tops up
 
-**finalizeEpoch:**
+**settleEpoch:**
 7. 100 USDC from DepositWaitingRoom → RedeemClaimingRoom
 8. 30 USDC from FundManager → RedeemClaimingRoom
 9. RedeemClaimingRoom now holds 130 USDC (Bob: 80, Carol: 50)
-10. Epoch is finalized, rate stored
+10. Epoch is settled, rate stored
 
 **Post-settlement:**
 11. Alice claims her shares from AsyncVault
@@ -205,16 +205,16 @@ Carol requests redeem: 50 shares
 1. **RedeemClaimingRoom balance >= sum of all claimable redeem assets.**
    Operator cannot touch these funds.
 
-2. **finalizeEpoch reverts if FundManager cannot cover net outflow.**
+2. **settleEpoch reverts if FundManager cannot cover net outflow.**
    No partial settlements — all requests in an epoch settle together.
 
-3. **Once preSettleEpoch is called, finalizeEpoch must eventually be called.**
-   No rollback. Requests in the snapshotted epoch are frozen until finalize.
+3. **Once closeEpoch is called, settleEpoch must eventually be called.**
+   No rollback. Requests in the closed epoch are frozen until settleEpoch.
 
 4. **Rate is computed solely from FundManager.totalValue() / effectiveSupply,
-   and is locked at preSettleEpoch time.**
+   and is locked at closeEpoch time.**
    DepositWaitingRoom and RedeemClaimingRoom assets are excluded from NAV.
 
 5. **Shares are burned at claim time, not settlement time** (per ERC-7540).
 
-6. **Claims are only possible after finalizeEpoch**, not just preSettleEpoch.
+6. **Claims are only possible after settleEpoch**, not just closeEpoch.

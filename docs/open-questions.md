@@ -10,9 +10,9 @@ Additionally, pending deposit assets in the WaitingRoom can partially offset red
 
 Settlement is split into two operator-triggered calls:
 
-### Phase A: `preSettleEpoch()`
+### Phase 1: `closeEpoch()`
 - Snapshots `totalPendingDepositAssets` and `totalPendingRedeemShares`
-- Computes and locks the epoch rate from `FundManager.totalValue()` / effectiveSupply
+- Computes and locks the epoch rate from `FundManager.totalValue()` / `totalSupply()`
 - Advances `currentEpoch` — new requests land in the next epoch
 - Sets `settlingEpoch` to the epoch being settled
 - Pending requests in `settlingEpoch` are frozen: they can't be claimed yet
@@ -22,7 +22,7 @@ Settlement is split into two operator-triggered calls:
 - Computes `netOutflow = redeemAssets - depositAssets` using the locked rate
 - If `netOutflow > FundManager.unutilized`: liquidates working assets (onchain/offchain) and tops up FundManager
 
-### Phase B: `finalizeEpoch()`
+### Phase 2: `settleEpoch()`
 - Uses the locked snapshot and rate — no recomputation
 - Nets deposit/redeem flows, moves funds between WaitingRoom, FundManager, RedeemClaimingRoom
 - Stores the rate under `settlingEpoch`, clears snapshot
@@ -35,11 +35,11 @@ Settlement is split into two operator-triggered calls:
 
 **Tradeoffs:**
 - Two transactions instead of one
-- Requests in `settlingEpoch` cannot claim until `finalizeEpoch` completes
-- Lazy settlement needs to distinguish between "settled and finalized" vs "snapshotted but not finalized"
-- Rate is locked at preSettle time — yield accruing on working assets between preSettle and finalize accrues to remaining shareholders, not redeemers (arguably correct since redeemers committed to exit)
+- Requests in `settlingEpoch` cannot claim until `settleEpoch` completes
+- Lazy settlement needs to distinguish between "fully settled" vs "closed but not yet settled"
+- Rate is locked at closeEpoch time — yield accruing on working assets between closeEpoch and settleEpoch accrues to remaining shareholders, not redeemers (arguably correct since redeemers committed to exit)
 
-**No cancellation:** Once `preSettleEpoch` is called, the operator must eventually call `finalizeEpoch`. Rollback is not supported.
+**No cancellation:** Once `closeEpoch` is called, the operator must eventually call `settleEpoch` to complete the settlement. Rollback is not supported.
 
 ---
 

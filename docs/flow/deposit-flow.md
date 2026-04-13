@@ -47,14 +47,14 @@ sequenceDiagram
 
     rect rgb(255, 245, 230)
     Note over FO, FM: Phase 2 — Settlement (two-phase)
-    FO->>AV: (2.1) preSettleEpoch()
+    FO->>AV: (2.1) closeEpoch()
     Note right of AV: Snapshot pending flows<br/>Lock epoch rate from FM.totalValue()<br/>Advance currentEpoch (new requests go to next)<br/>settlingEpoch = snapshotted epoch
     Note right of FO: Operator reads exact snapshot,<br/>no estimation needed
-    FO->>AV: (2.2) finalizeEpoch()
+    FO->>AV: (2.2) settleEpoch()
     AV->>DWR: (2.3) unlock funds
     DWR->>FM: (2.4) transfer unlocked underlying
     Note right of FM: Assets become UNUTILIZED
-    Note right of AV: Store rate under settlingEpoch,<br/>clear snapshot, mark finalized
+    Note right of AV: Store rate under settlingEpoch,<br/>clear snapshot, mark settled
     end
 
     rect rgb(230, 255, 230)
@@ -105,13 +105,13 @@ Settlement is split into two operator-triggered calls. See `open-questions.md #1
 for rationale.
 
 ```
-(2.1) Fund Operator → AsyncVault: preSettleEpoch()
+(2.1) Fund Operator → AsyncVault: closeEpoch()
       - AsyncVault snapshots the pending flows:
         snapshot.depositAssets = totalPendingDepositAssets
         snapshot.redeemShares  = totalPendingRedeemShares
       - AsyncVault computes and locks the epoch rate:
         effectiveAssets = FundManager.totalValue()
-        effectiveSupply = totalSupply() - totalPendingRedeemShares
+        effectiveSupply = totalSupply()
         snapshot.rate = effectiveAssets / effectiveSupply
       - AsyncVault advances currentEpoch (new requests go to next epoch)
       - settlingEpoch = the snapshotted epoch
@@ -121,7 +121,7 @@ for rationale.
 Between (2.1) and (2.2): Operator has exact numbers, no estimation needed.
                         This is the window to ensure FundManager liquidity.
 
-(2.2) Fund Operator → AsyncVault: finalizeEpoch()
+(2.2) Fund Operator → AsyncVault: settleEpoch()
       - Uses the locked snapshot — no recomputation
 
 (2.3) AsyncVault → DepositWaitingRoom: unlock funds
@@ -134,7 +134,7 @@ Between (2.1) and (2.2): Operator has exact numbers, no estimation needed.
         may flow to RedeemClaimingRoom instead (netting — see settlement-flow.md)
 
       AsyncVault stores the rate under settlingEpoch, clears the snapshot,
-      marks the epoch as finalized.
+      marks the epoch as settled.
 ```
 
 ### Phase 3: Claim
@@ -178,14 +178,14 @@ Between (2.1) and (2.2): Operator has exact numbers, no estimation needed.
    They are pending inflows that haven't generated shares yet.
 
 2. **Epoch rate is computed solely from FundManager.totalValue() / effectiveSupply,
-   and is locked at preSettleEpoch time.**
+   and is locked at closeEpoch time.**
    Clean separation between pending flows and settled capital.
 
 3. **Shares are minted at claim time, not settlement time** (per ERC-7540).
-   The epoch rate is locked at preSettleEpoch; the actual minting happens when
-   the investor calls deposit/mint after finalizeEpoch.
+   The epoch rate is locked at closeEpoch; the actual minting happens when
+   the investor calls deposit/mint after settleEpoch.
 
-4. **Claims are only possible after the epoch is FINALIZED**, not just preSettled.
+4. **Claims are only possible after the epoch is SETTLED**, not just closed.
 
 5. **Forward pricing:** all deposit requests within an epoch receive the same
-   exchange rate, determined at preSettleEpoch.
+   exchange rate, determined at closeEpoch.
