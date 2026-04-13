@@ -38,6 +38,17 @@ import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, IERC7540Operator, IERC7575 {
 
     // ──────────────────────────────────────────────
+    //  Datatypes
+    // ──────────────────────────────────────────────
+
+    struct Snapshot {
+        uint256 epoch;
+        uint256 depositingAssets;
+        uint256 redeemingShares;
+        uint256 rate;
+    }
+
+    // ──────────────────────────────────────────────
     //  Errors
     // ──────────────────────────────────────────────
 
@@ -49,6 +60,9 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
 
     /// @notice Error thrown when attempting to call fucntions not supported by ERC-7540
     error NOT_SUPPORTED_BY_ASYNC_VAULT();
+
+    error PREVIOUS_EPOCH_NOT_SETTLED();
+    error NO_EPOCH_TO_SETTLE();
 
     // ──────────────────────────────────────────────
     //  Events
@@ -115,7 +129,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     // ──────────────────────────────────────────────
 
     /// @notice Freeze deposit/redeem requests for the current epoch and lock the epoch rate
-    function closeEpoch(uint256 totalFundAssets) external; 
+    function closeEpoch(uint256 totalFundAssets) external;
 
     /// @notice Called by the vault operator to settle the current epoch.
     /// @dev Atomically:
@@ -129,14 +143,6 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     /// @notice Returns the current epoch number.
     function currentEpoch() external view returns (uint256);
 
-    /// @notice Returns the address of the YieldStrategy contract.
-    function yieldStrategy() external view returns (address);
-
-    /// @notice Returns the vault operator address (the settlement authority).
-    /// @dev Not to be confused with ERC-7540 operators, which are user-approved
-    ///      delegates for managing requests.
-    function vaultOperator() external view returns (address);
-
     // ──────────────────────────────────────────────
     //  ERC-165
     // ──────────────────────────────────────────────
@@ -148,5 +154,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     ///        - 0xce3bbe50 (async deposit)
     ///        - 0x620ee8e4 (async redeem)
     function supportsInterface(bytes4 interfaceId) external view returns (bool);
+
+    function getSnapshot() external view returns (Snapshot memory);
 
 }
