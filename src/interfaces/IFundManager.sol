@@ -39,6 +39,14 @@ interface IFundManager {
      */
     function take(uint256 amount) external;
 
+    /**
+     * @notice Move assets from the FundManager.
+     * @dev This operation can only be performed by an account with the VAULT_ROLE
+     * @param recipient The address to transfer assets to
+     * @param amount The amount of assets to move.
+     */
+    function move(address recipient, uint256 amount) external;
+
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
     //  | | / / / _ \ | /| / /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/

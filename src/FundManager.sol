@@ -18,6 +18,9 @@ contract FundManager is IFundManager, AccessControl {
     /// @notice Role identifier for fund operators
     bytes32 public constant FUND_OPERATOR_ROLE = keccak256("FUND_OPERATOR_ROLE");
 
+    /// @notice Role identifier for the vault contract
+    bytes32 public constant VAULT_ROLE = keccak256("VAULT_ROLE");
+
     /// @notice Reference to the StableYieldAsyncVault contract
     IStableYieldAsyncVault public immutable VAULT;
 
@@ -48,6 +51,7 @@ contract FundManager is IFundManager, AccessControl {
 
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(FUND_OPERATOR_ROLE, _fundOperator);
+        _grantRole(VAULT_ROLE, address(_vault));
     }
 
     //      ______     __                        __   ______                 __  _
@@ -81,6 +85,11 @@ contract FundManager is IFundManager, AccessControl {
     function take(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) {
         // Transfer the specified amount of assets from this contract to the caller
         ASSET.transfer(msg.sender, amount);
+    }
+
+    /// @inheritdoc IFundManager
+    function move(address recipient, uint256 amount) external onlyRole(VAULT_ROLE) {
+        ASSET.transfer(recipient, amount);
     }
 
     //   _    ___                 ______                 __  _
