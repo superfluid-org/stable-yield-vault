@@ -206,6 +206,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         _epochRate[_snapshot.epoch] = _snapshot.rate;
 
         emit EpochSettled(_snapshot.epoch, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares);
+
+        // Clear the snapshot as it has been settled
+        delete _snapshot;
     }
 
     /// @inheritdoc IERC7540Operator
