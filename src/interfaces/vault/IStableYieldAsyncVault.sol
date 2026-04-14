@@ -63,6 +63,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
 
     error PREVIOUS_EPOCH_NOT_SETTLED();
     error NO_EPOCH_TO_SETTLE();
+    error EPOCH_SETTLEMENT_IN_PROGRESS();
 
     // ──────────────────────────────────────────────
     //  Events
