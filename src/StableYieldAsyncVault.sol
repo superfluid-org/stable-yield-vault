@@ -2,6 +2,8 @@
 pragma solidity ^0.8.34;
 
 import { IFundManager } from "./interfaces/IFundManager.sol";
+
+import { IRedeemClaimingRoom } from "./interfaces/IRedeemClaimingRoom.sol";
 import {
     IERC4626,
     IERC7540Deposit,
@@ -58,6 +60,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     Snapshot private _snapshot;
     IERC20 public underlyingAsset;
     IFundManager public fundManager;
+    IRedeemClaimingRoom public redeemClaimingRoom;
 
     uint256 public currentEpoch;
     uint256 public totalPendingDepositAssets;
@@ -73,14 +76,20 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
      * @notice Initializes the vault with the underlying asset and share token metadata.
      * @param _underlyingAsset The address of the underlying ERC-20 asset.
      * @param _fundManager The address of the FundManager contract
+     * @param _redeemClaimingRoom The address of the RedeemClaimingRoom contract
      * @param name The name of the share token.
      * @param symbol The symbol of the share token.
      */
-    constructor(IERC20 _underlyingAsset, address _fundManager, string memory name, string memory symbol)
-        ERC20(name, symbol)
-    {
+    constructor(
+        IERC20 _underlyingAsset,
+        address _fundManager,
+        address _redeemClaimingRoom,
+        string memory name,
+        string memory symbol
+    ) ERC20(name, symbol) {
         underlyingAsset = _underlyingAsset;
         fundManager = IFundManager(_fundManager);
+        redeemClaimingRoom = IRedeemClaimingRoom(_redeemClaimingRoom);
     }
 
     //      ______     __                        __   ______                 __  _
@@ -212,7 +221,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         _epochRate[_snapshot.epoch] = _snapshot.rate;
 
         uint256 totalAssetValue = _snapshot.rate.mulDiv(totalSupply(), 1e18);
-        emit EpochSettled(_snapshot.epoch, totalAssetValue, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares);
+        emit EpochSettled(
+            _snapshot.epoch, totalAssetValue, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares
+        );
 
         // Clear the snapshot as it has been settled
         delete _snapshot;
@@ -395,8 +406,8 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
 
-        // Transfer assets to the receiver
-        underlyingAsset.transfer(receiver, assets);
+        // Redeem assets for the receiver from the RedeemClaimingRoom
+        redeemClaimingRoom.redeemFor(receiver, assets);
 
         emit Withdraw(controller, receiver, receiver, assets, shares);
     }
@@ -415,8 +426,8 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
 
-        // Transfer assets to the receiver
-        underlyingAsset.transfer(receiver, assets);
+        // Redeem assets for the receiver from the RedeemClaimingRoom
+        redeemClaimingRoom.redeemFor(receiver, assets);
 
         emit Withdraw(controller, receiver, receiver, assets, shares);
     }
