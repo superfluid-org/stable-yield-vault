@@ -34,12 +34,16 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     mapping(address controller => uint256 assets) private _pendingDepositRequest;
 
-    /// @dev Claimable deposits stored as shares (pre-computed at the epoch settlement rate)
+    /// @dev Claimable deposits stored in both units (pre-computed at the epoch settlement rate)
+    ///      deposit() deducts from assets, mint() deducts from shares, both proportionally adjust the other
+    mapping(address controller => uint256 assets) private _claimableDepositAssets;
     mapping(address controller => uint256 shares) private _claimableDepositShares;
 
     mapping(address controller => uint256 shares) private _pendingRedeemRequest;
 
-    /// @dev Claimable redeems stored as assets (pre-computed at the epoch settlement rate)
+    /// @dev Claimable redeems stored in both units (pre-computed at the epoch settlement rate)
+    ///      redeem() deducts from shares, withdraw() deducts from assets, both proportionally adjust the other
+    mapping(address controller => uint256 shares) private _claimableRedeemShares;
     mapping(address controller => uint256 assets) private _claimableRedeemAssets;
 
     /// @dev Tracks which epoch each controller's pending deposit belongs to
@@ -255,8 +259,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC7540Deposit
     function claimableDepositRequest(uint256, address controller) external view returns (uint256 assets) {
-        // Convert internal shares to assets for ERC-7540 view
-        assets = _effectiveClaimableDepositShares(controller).mulDiv(_lastSettledRate(), 1e18);
+        assets = _effectiveClaimableDepositAssets(controller);
     }
 
     /// @inheritdoc IERC7540Redeem
@@ -269,8 +272,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC7540Redeem
     function claimableRedeemRequest(uint256, address controller) external view returns (uint256 shares) {
-        // Convert internal assets to shares for ERC-7540 view
-        shares = _effectiveClaimableRedeemAssets(controller).mulDiv(1e18, _lastSettledRate());
+        shares = _effectiveClaimableRedeemShares(controller);
     }
 
     /// @inheritdoc IERC7575
@@ -295,7 +297,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC4626
     function maxDeposit(address controller) external view returns (uint256 maxAssets) {
-        maxAssets = _effectiveClaimableDepositShares(controller).mulDiv(_lastSettledRate(), 1e18);
+        maxAssets = _effectiveClaimableDepositAssets(controller);
     }
 
     /// @inheritdoc IERC4626
@@ -305,7 +307,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC4626
     function maxRedeem(address controller) external view returns (uint256 maxShares) {
-        maxShares = _effectiveClaimableRedeemAssets(controller).mulDiv(1e18, _lastSettledRate());
+        maxShares = _effectiveClaimableRedeemShares(controller);
     }
 
     /// @inheritdoc IERC4626
@@ -353,9 +355,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Lazy-settle any pending deposit from a previous epoch
         _settleDepositIfNeeded(controller);
 
-        shares = convertToShares(assets);
-
-        // underflow would revert if not enough claimable shares
+        // Proportional deduction: assets is the native unit, derive shares
+        shares = assets.mulDiv(_claimableDepositShares[controller], _claimableDepositAssets[controller]);
+        _claimableDepositAssets[controller] -= assets;
         _claimableDepositShares[controller] -= shares;
 
         _mint(receiver, shares);
@@ -369,10 +371,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Lazy-settle any pending deposit from a previous epoch
         _settleDepositIfNeeded(controller);
 
-        // underflow would revert if not enough claimable shares
+        // Proportional deduction: shares is the native unit, derive assets
+        assets = shares.mulDiv(_claimableDepositAssets[controller], _claimableDepositShares[controller]);
         _claimableDepositShares[controller] -= shares;
-
-        assets = convertToAssets(shares);
+        _claimableDepositAssets[controller] -= assets;
 
         _mint(receiver, shares);
 
@@ -385,9 +387,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Lazy-settle any pending redeem from a previous epoch
         _settleRedeemIfNeeded(controller);
 
-        assets = convertToAssets(shares);
-
-        // underflow would revert if not enough claimable assets
+        // Proportional deduction: shares is the native unit, derive assets
+        assets = shares.mulDiv(_claimableRedeemAssets[controller], _claimableRedeemShares[controller]);
+        _claimableRedeemShares[controller] -= shares;
         _claimableRedeemAssets[controller] -= assets;
 
         // Burn shares pre-transferred to this contract in requestRedeem
@@ -405,10 +407,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Lazy-settle any pending redeem from a previous epoch
         _settleRedeemIfNeeded(controller);
 
-        // underflow would revert if not enough claimable assets
+        // Proportional deduction: assets is the native unit, derive shares
+        shares = assets.mulDiv(_claimableRedeemShares[controller], _claimableRedeemAssets[controller]);
         _claimableRedeemAssets[controller] -= assets;
-
-        shares = convertToShares(assets);
+        _claimableRedeemShares[controller] -= shares;
 
         // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
@@ -432,35 +434,45 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @dev If the controller has a pending deposit from a settled (past) epoch,
-    ///      convert pending assets → claimable shares at the epoch's settlement rate.
+    ///      convert pending assets → claimable (both assets and shares) at the epoch's settlement rate.
     function _settleDepositIfNeeded(address controller) internal {
-        uint256 pending = _pendingDepositRequest[controller];
-        if (pending == 0) return;
+        uint256 pendingAssets = _pendingDepositRequest[controller];
+        if (pendingAssets == 0) return;
 
         uint256 epochRate = _epochRate[_depositRequestEpoch[controller]];
         if (epochRate == 0) return; // epoch not yet settled
 
-        uint256 shares = pending.mulDiv(1e18, epochRate);
-        _claimableDepositShares[controller] += shares;
+        uint256 pendingShares = pendingAssets.mulDiv(1e18, epochRate);
+        _claimableDepositAssets[controller] += pendingAssets;
+        _claimableDepositShares[controller] += pendingShares;
         _pendingDepositRequest[controller] = 0;
     }
 
     /// @dev If the controller has a pending redeem from a settled (past) epoch,
-    ///      convert pending shares → claimable assets at the epoch's settlement rate.
+    ///      convert pending shares → claimable (both shares and assets) at the epoch's settlement rate.
     function _settleRedeemIfNeeded(address controller) internal {
-        uint256 pending = _pendingRedeemRequest[controller];
-        if (pending == 0) return;
+        uint256 pendingShares = _pendingRedeemRequest[controller];
+        if (pendingShares == 0) return;
 
         uint256 epochRate = _epochRate[_redeemRequestEpoch[controller]];
         if (epochRate == 0) return; // epoch not yet settled
 
-        uint256 assets = pending.mulDiv(epochRate, 1e18);
-        _claimableRedeemAssets[controller] += assets;
+        uint256 pendingAssets = pendingShares.mulDiv(epochRate, 1e18);
+        _claimableRedeemShares[controller] += pendingShares;
+        _claimableRedeemAssets[controller] += pendingAssets;
         _pendingRedeemRequest[controller] = 0;
     }
 
-    /// @dev Read-only version of claimable deposit shares (for view functions).
-    ///      Accounts for unsettled pending that has become claimable.
+    /// @dev Read-only: claimable deposit assets, including unsettled pending that has become claimable.
+    function _effectiveClaimableDepositAssets(address controller) internal view returns (uint256 assets) {
+        assets = _claimableDepositAssets[controller];
+        uint256 pending = _pendingDepositRequest[controller];
+        if (pending > 0 && _epochRate[_depositRequestEpoch[controller]] != 0) {
+            assets += pending;
+        }
+    }
+
+    /// @dev Read-only: claimable deposit shares, including unsettled pending that has become claimable.
     function _effectiveClaimableDepositShares(address controller) internal view returns (uint256 shares) {
         shares = _claimableDepositShares[controller];
         uint256 pending = _pendingDepositRequest[controller];
@@ -472,8 +484,16 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         }
     }
 
-    /// @dev Read-only version of claimable redeem assets (for view functions).
-    ///      Accounts for unsettled pending that has become claimable.
+    /// @dev Read-only: claimable redeem shares, including unsettled pending that has become claimable.
+    function _effectiveClaimableRedeemShares(address controller) internal view returns (uint256 shares) {
+        shares = _claimableRedeemShares[controller];
+        uint256 pending = _pendingRedeemRequest[controller];
+        if (pending > 0 && _epochRate[_redeemRequestEpoch[controller]] != 0) {
+            shares += pending;
+        }
+    }
+
+    /// @dev Read-only: claimable redeem assets, including unsettled pending that has become claimable.
     function _effectiveClaimableRedeemAssets(address controller) internal view returns (uint256 assets) {
         assets = _claimableRedeemAssets[controller];
         uint256 pending = _pendingRedeemRequest[controller];
