@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { IRedeemClaimingRoom } from "./interfaces/IRedeemClaimingRoom.sol";
+import { IWaitingRoom } from "./interfaces/IWaitingRoom.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract RedeemClaimingRoom is IRedeemClaimingRoom {
+contract WaitingRoom is IWaitingRoom {
 
     address public immutable VAULT;
     IERC20 public immutable ASSET;
@@ -14,9 +14,9 @@ contract RedeemClaimingRoom is IRedeemClaimingRoom {
         ASSET = IERC20(asset);
     }
 
-    /// @inheritdoc IRedeemClaimingRoom
-    function redeemFor(address redeemer, uint256 amount) external onlyVault {
-        ASSET.transfer(redeemer, amount);
+    /// @inheritdoc IWaitingRoom
+    function move(address recipient, uint256 amount) external onlyVault {
+        ASSET.transfer(recipient, amount);
     }
 
     modifier onlyVault() {
