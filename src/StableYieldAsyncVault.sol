@@ -57,6 +57,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     /// @dev Exchange rate snapshot per settled epoch (assetsPerShare, scaled by 1e18)
     mapping(uint256 epoch => uint256 assetsPerShare) private _epochRate;
 
+    /// @dev Cache of the last settled epoch total assets
+    uint256 private _lastReportedTotalAssets;
+
     Snapshot private _snapshot;
     IERC20 public underlyingAsset;
     IFundManager public fundManager;
@@ -205,6 +208,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
         // Increment current epoch (future requests will be included in the new epoch)
         currentEpoch++;
+
+        // Persist the last reported total assets for view functions
+        _lastReportedTotalAssets = _totalAssets;
     }
 
     /// @inheritdoc IStableYieldAsyncVault
@@ -320,7 +326,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC4626
     function totalAssets() public view returns (uint256 total) {
-        /// FIXME
+        /**
+         * NOTE:
+         *      this value is not necessarily up-to-date with the current on-chain state as it relies
+         *      on the last reported total assets from the FundManager at the last epoch settlement.
+         */
+        total = _lastReportedTotalAssets;
     }
 
     /// @inheritdoc IERC7540Operator
@@ -537,6 +548,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
             }
         }
     }
+
+    //      __  ___          ___ _____
+    //     /  |/  /___  ____/ (_) __(_)__  __________
+    //    / /|_/ / __ \/ __  / / /_/ / _ \/ ___/ ___/
+    //   / /  / / /_/ / /_/ / / __/ /  __/ /  (__  )
+    //  /_/  /_/\____/\__,_/_/_/ /_/\___/_/  /____/
 
     modifier onlyFundManager() {
         if (msg.sender != address(fundManager)) revert INVALID_CALLER();
