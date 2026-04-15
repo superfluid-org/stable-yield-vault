@@ -197,10 +197,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function closeEpoch(uint256 _totalAssets) external onlyFundManager {
         if (_snapshot.rate != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
 
-        uint256 shareSupply = totalSupply();
+        // Compute effective supply: actual supply + phantom deposit shares - dead redeem shares.
+        // This corrects for the lag between settlement (assets move) and claim (shares mint/burn).
+        uint256 effectiveSupply = totalSupply() + _unclaimedDepositShares - _unclaimedRedeemShares;
 
         // Calculate the epoch rate (assets per share) using the total assets reported by the FundManager
-        uint256 epochRate = shareSupply == 0 ? 1e18 : _totalAssets.mulDiv(1e18, shareSupply);
+        uint256 epochRate = effectiveSupply == 0 ? 1e18 : _totalAssets.mulDiv(1e18, effectiveSupply);
 
         // Take a snapshot of the epoch's pending deposits and redeems to be used during settlement
         _snapshot = Snapshot({
@@ -252,6 +254,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
             // Move deficit from FundManager to RedeemWaitingRoom
             fundManager.move(address(redeemWaitingRoom), deficit);
         }
+
+        // Track unclaimed positions for effective supply adjustment in future closeEpoch calls
+        _unclaimedDepositShares += _snapshot.depositingAssets.mulDiv(1e18, _snapshot.rate);
+        _unclaimedRedeemShares += _snapshot.redeemingShares;
 
         // Commit the epoch rate for the settled epoch
         _epochRate[_snapshot.epoch] = _snapshot.rate;
@@ -411,6 +417,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         shares = assets.mulDiv(_claimableDepositShares[controller], _claimableDepositAssets[controller]);
         _claimableDepositAssets[controller] -= assets;
         _claimableDepositShares[controller] -= shares;
+        _unclaimedDepositShares -= shares;
 
         _mint(receiver, shares);
 
@@ -427,6 +434,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         assets = shares.mulDiv(_claimableDepositAssets[controller], _claimableDepositShares[controller]);
         _claimableDepositShares[controller] -= shares;
         _claimableDepositAssets[controller] -= assets;
+        _unclaimedDepositShares -= shares;
 
         _mint(receiver, shares);
 
@@ -443,6 +451,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         assets = shares.mulDiv(_claimableRedeemAssets[controller], _claimableRedeemShares[controller]);
         _claimableRedeemShares[controller] -= shares;
         _claimableRedeemAssets[controller] -= assets;
+        _unclaimedRedeemShares -= shares;
 
         // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
@@ -463,6 +472,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         shares = assets.mulDiv(_claimableRedeemShares[controller], _claimableRedeemAssets[controller]);
         _claimableRedeemAssets[controller] -= assets;
         _claimableRedeemShares[controller] -= shares;
+        _unclaimedRedeemShares -= shares;
 
         // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
