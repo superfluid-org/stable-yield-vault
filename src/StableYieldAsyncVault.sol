@@ -34,12 +34,18 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     mapping(address controller => mapping(address operator => bool)) private _isOperator;
 
+    /// @dev Tracks which epoch each controller's pending deposit belongs to
+    mapping(address controller => uint256 epoch) private _depositRequestEpoch;
+
     mapping(address controller => uint256 assets) private _pendingDepositRequest;
 
     /// @dev Claimable deposits stored in both units (pre-computed at the epoch settlement rate)
     ///      deposit() deducts from assets, mint() deducts from shares, both proportionally adjust the other
     mapping(address controller => uint256 assets) private _claimableDepositAssets;
     mapping(address controller => uint256 shares) private _claimableDepositShares;
+
+    /// @dev Tracks which epoch each controller's pending redeem belongs to
+    mapping(address controller => uint256 epoch) private _redeemRequestEpoch;
 
     mapping(address controller => uint256 shares) private _pendingRedeemRequest;
 
@@ -48,17 +54,19 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     mapping(address controller => uint256 shares) private _claimableRedeemShares;
     mapping(address controller => uint256 assets) private _claimableRedeemAssets;
 
-    /// @dev Tracks which epoch each controller's pending deposit belongs to
-    mapping(address controller => uint256 epoch) private _depositRequestEpoch;
-
-    /// @dev Tracks which epoch each controller's pending redeem belongs to
-    mapping(address controller => uint256 epoch) private _redeemRequestEpoch;
-
     /// @dev Exchange rate snapshot per settled epoch (assetsPerShare, scaled by 1e18)
     mapping(uint256 epoch => uint256 assetsPerShare) private _epochRate;
 
     /// @dev Cache of the last settled epoch total assets
     uint256 private _lastReportedTotalAssets;
+
+    /// @dev Total shares owed to settled depositors who haven't claimed yet.
+    ///      These "phantom" shares don't exist in totalSupply but represent committed positions.
+    uint256 private _unclaimedDepositShares;
+
+    /// @dev Total shares held by the vault for settled redeemers who haven't claimed yet.
+    ///      These "dead" shares are still in totalSupply but their backing assets have left NAV.
+    uint256 private _unclaimedRedeemShares;
 
     Snapshot private _snapshot;
     IERC20 public underlyingAsset;
