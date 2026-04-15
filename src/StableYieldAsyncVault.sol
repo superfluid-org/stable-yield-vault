@@ -406,7 +406,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
         _mint(receiver, shares);
 
-        emit Deposit(controller, receiver, assets, shares);
+        emit Deposit(msg.sender, receiver, assets, shares);
     }
 
     function _mintShares(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
@@ -422,7 +422,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
         _mint(receiver, shares);
 
-        emit Deposit(controller, receiver, assets, shares);
+        emit Deposit(msg.sender, receiver, assets, shares);
     }
 
     function _redeem(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
@@ -442,7 +442,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Redeem assets for the receiver from the RedeemWaitingRoom
         redeemWaitingRoom.move(receiver, assets);
 
-        emit Withdraw(controller, receiver, receiver, assets, shares);
+        emit Withdraw(msg.sender, receiver, receiver, assets, shares);
     }
 
     function _withdraw(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
@@ -462,7 +462,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Redeem assets for the receiver from the RedeemWaitingRoom
         redeemWaitingRoom.move(receiver, assets);
 
-        emit Withdraw(controller, receiver, receiver, assets, shares);
+        emit Withdraw(msg.sender, receiver, receiver, assets, shares);
     }
 
     /// @dev Returns the exchange rate from the last settled epoch.
