@@ -202,6 +202,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IStableYieldAsyncVault
     function closeEpoch(uint256 _totalAssets) external onlyFundManager {
+        // Reject total-loss scenarios
+        if (_totalAssets == 0) revert INVALID_PARAMETERS();
+
+        // Ensure previous epoch has been settled before allowing close of a new epoch
         if (_snapshot.epoch != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
 
         // Compute effective supply: actual supply + phantom deposit shares - dead redeem shares.
@@ -424,6 +428,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _deposit(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
+        if (_claimableDepositAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending deposit from a previous epoch
         _settleDepositIfNeeded(controller);
@@ -441,6 +446,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _mintShares(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
+        if (_claimableDepositAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending deposit from a previous epoch
         _settleDepositIfNeeded(controller);
@@ -458,6 +464,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _redeem(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
+        if (_claimableRedeemAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending redeem from a previous epoch
         _settleRedeemIfNeeded(controller);
@@ -479,12 +486,14 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _withdraw(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
+        if (_claimableRedeemAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending redeem from a previous epoch
         _settleRedeemIfNeeded(controller);
 
         // Proportional deduction: assets is the native unit, derive shares
-        shares = assets.mulDiv(_claimableRedeemShares[controller], _claimableRedeemAssets[controller]);
+        // Round up so at least 1 share is burned per non-zero withdrawal (favors vault)
+        shares = assets.mulDiv(_claimableRedeemShares[controller], _claimableRedeemAssets[controller], Math.Rounding.Ceil);
         _claimableRedeemAssets[controller] -= assets;
         _claimableRedeemShares[controller] -= shares;
         _unclaimedRedeemShares -= shares;
@@ -507,7 +516,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
             lastSettledRate = _epochRate[currentEpoch - 1];
         }
         // Previous epoch closed but not yet settled — try the one before
-        if (currentEpoch >= 3 && isEpochSettled(currentEpoch - 2)) {
+        else if (currentEpoch >= 3 && isEpochSettled(currentEpoch - 2)) {
             lastSettledRate = _epochRate[currentEpoch - 2];
         } else {
             // Bootstrap: no epochs settled yet
