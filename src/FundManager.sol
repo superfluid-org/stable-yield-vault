@@ -4,10 +4,14 @@ pragma solidity ^0.8.34;
 import { IFundManager } from "./interfaces/IFundManager.sol";
 import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
 
 contract FundManager is IFundManager, AccessControl {
+
+    using SafeERC20 for IERC20;
 
     //      ____                          __        __    __        _____ __        __
     //     /  _/___ ___  ____ ___  __  __/ /_____ _/ /_  / /__     / ___// /_____ _/ /____  _____
@@ -78,18 +82,18 @@ contract FundManager is IFundManager, AccessControl {
     /// @inheritdoc IFundManager
     function give(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) {
         // Transfer the specified amount of assets from the caller to this contract
-        ASSET.transferFrom(msg.sender, address(this), amount);
+        ASSET.safeTransferFrom(msg.sender, address(this), amount);
     }
 
     /// @inheritdoc IFundManager
     function take(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) {
         // Transfer the specified amount of assets from this contract to the caller
-        ASSET.transfer(msg.sender, amount);
+        ASSET.safeTransfer(msg.sender, amount);
     }
 
     /// @inheritdoc IFundManager
     function move(address recipient, uint256 amount) external onlyRole(VAULT_ROLE) {
-        ASSET.transfer(recipient, amount);
+        ASSET.safeTransfer(recipient, amount);
     }
 
     //   _    ___                 ______                 __  _

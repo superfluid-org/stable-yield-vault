@@ -14,11 +14,14 @@ import {
 } from "./interfaces/vault/IStableYieldAsyncVault.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     using Math for uint256;
+    using SafeERC20 for IERC20;
 
     //      ____                          __        __    __        _____ __        __
     //     /  _/___ ___  ____ ___  __  __/ /_____ _/ /_  / /__     / ___// /_____ _/ /____  _____
@@ -130,7 +133,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         _settleDepositIfNeeded(controller);
 
         // Transfer the underlying asset from the owner to the DepositWaitingRoom contract
-        underlyingAsset.transferFrom(owner, address(depositWaitingRoom), assets);
+        underlyingAsset.safeTransferFrom(owner, address(depositWaitingRoom), assets);
 
         // Accrue the assets deposited by this controller
         _pendingDepositRequest[controller] += assets;
@@ -506,9 +509,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Previous epoch closed but not yet settled — try the one before
         if (currentEpoch >= 3 && isEpochSettled(currentEpoch - 2)) {
             lastSettledRate = _epochRate[currentEpoch - 2];
+        } else {
+            // Bootstrap: no epochs settled yet
+            lastSettledRate = 1e18;
         }
-        // Bootstrap: no epochs settled yet
-        lastSettledRate = 1e18;
     }
 
     /// @dev If the controller has a pending deposit from a settled (past) epoch,

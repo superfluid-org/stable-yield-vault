@@ -3,8 +3,11 @@ pragma solidity ^0.8.34;
 
 import { IWaitingRoom } from "./interfaces/IWaitingRoom.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract WaitingRoom is IWaitingRoom {
+
+    using SafeERC20 for IERC20;
 
     address public immutable VAULT;
     IERC20 public immutable ASSET;
@@ -16,7 +19,7 @@ contract WaitingRoom is IWaitingRoom {
 
     /// @inheritdoc IWaitingRoom
     function move(address recipient, uint256 amount) external onlyVault {
-        ASSET.transfer(recipient, amount);
+        ASSET.safeTransfer(recipient, amount);
     }
 
     modifier onlyVault() {

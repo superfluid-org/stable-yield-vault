@@ -9,26 +9,29 @@ import { IERC7575 } from "./IERC7575.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 /// @title IStableYieldAsyncVault
-/// @notice Fully asynchronous ERC-7540 vault with epoch-based settlement.
+/// @notice Fully asynchronous ERC-7540 vault with epoch-based, two-phase settlement.
 ///
 ///         Lifecycle:
 ///           1. Users call requestDeposit / requestRedeem during an epoch
-///           2. Operator calls settleEpoch() which atomically:
-///              a. Computes the fair exchange rate (excluding pending flows)
-///              b. Nets deposit/redeem flows and rebalances with YieldStrategy
-///              c. Stores the epoch rate and advances the epoch
-///           3. Users call deposit/mint or redeem/withdraw to claim
+///           2. Operator calls closeEpoch() to snapshot pending flows and lock the epoch rate
+///           3. Operator ensures FundManager liquidity (may liquidate working assets)
+///           4. Operator calls settleEpoch() to net deposit/redeem flows and move funds
+///              between DepositWaitingRoom, RedeemWaitingRoom, and FundManager
+///           5. Users call deposit/mint or redeem/withdraw to claim
 ///              (lazy settlement resolves pending → claimable on interaction)
 ///
 ///         Design decisions:
 ///           - Fully async (both deposits and redemptions)
 ///           - Forward pricing (all requests in an epoch get the same rate,
-///             computed from effective NAV at settlement, excluding pending flows)
-///           - Atomic settlement with fund movement to/from YieldStrategy
-///           - No request cancellation
+///             computed from effective NAV at closeEpoch, excluding pending flows)
+///           - Two-phase settlement (closeEpoch + settleEpoch) to allow the operator
+///             to ensure liquidity between phases with exact numbers
+///           - No request cancellation — once closeEpoch is called, settleEpoch must follow
 ///           - requestId = 0 (single request per controller, aggregated)
-///           - Claimable deposits stored internally as shares (pre-computed at epoch rate)
-///           - Claimable redeems stored internally as assets (pre-computed at epoch rate)
+///           - Claimable deposits stored internally in both asset and share units
+///             (pre-computed at the epoch rate)
+///           - Claimable redeems stored internally in both share and asset units
+///             (pre-computed at the epoch rate)
 ///
 ///         Implementation notes:
 ///           - The 2-param deposit/mint from IERC4626 forward to the
@@ -58,7 +61,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     /// @notice Error thrown when the caller of a function is invalid
     error INVALID_CALLER();
 
-    /// @notice Error thrown when attempting to call fucntions not supported by ERC-7540
+    /// @notice Error thrown when attempting to call functions not supported by ERC-7540
     error NOT_SUPPORTED_BY_ASYNC_VAULT();
 
     error PREVIOUS_EPOCH_NOT_SETTLED();
@@ -132,13 +135,13 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     /// @notice Freeze deposit/redeem requests for the current epoch and lock the epoch rate
     function closeEpoch(uint256 totalFundAssets) external;
 
-    /// @notice Called by the vault operator to settle the current epoch.
-    /// @dev Atomically:
-    ///        1. Computes fair rate from effective assets/supply (excludes pending flows)
-    ///        2. Converts pending redeems to asset terms at the epoch rate
-    ///        3. Nets deposit/redeem flows and moves funds to/from YieldStrategy
-    ///        4. Stores the epoch rate, resets pending totals, advances epoch
-    ///      All pending requests in the current epoch become claimable (lazily).
+    /// @notice Finalize the settlement of a previously closed epoch.
+    /// @dev Must be called after closeEpoch(). Uses the locked snapshot and rate to:
+    ///        1. Convert pending redeems to asset terms at the epoch rate
+    ///        2. Net deposit/redeem flows and move funds between
+    ///           DepositWaitingRoom, RedeemWaitingRoom, and FundManager
+    ///        3. Store the epoch rate and mark the epoch as settled
+    ///      Pending requests from the closed epoch become claimable (lazily) after this call.
     function settleEpoch() external;
 
     /// @notice Returns the current epoch number.
