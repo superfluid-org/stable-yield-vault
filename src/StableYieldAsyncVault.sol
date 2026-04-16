@@ -56,6 +56,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @dev Exchange rate snapshot per settled epoch (assetsPerShare, scaled by 1e18)
     mapping(uint256 epoch => uint256 assetsPerShare) private _epochRate;
+    mapping(uint256 epoch => bool isSettled) private _epochSettled;
 
     /// @dev Cache of the last settled epoch total assets
     uint256 private _lastReportedTotalAssets;
@@ -105,6 +106,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         fundManager = IFundManager(_fundManager);
         redeemWaitingRoom = IWaitingRoom(_redeemWaitingRoom);
         depositWaitingRoom = IWaitingRoom(_depositWaitingRoom);
+
+        // Initialize the first epoch to 1
+        currentEpoch = 1;
     }
 
     //      ______     __                        __   ______                 __  _
@@ -117,7 +121,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function requestDeposit(uint256 assets, address controller, address owner) external returns (uint256 requestId) {
         if (assets == 0) revert INVALID_PARAMETERS();
         if (owner != msg.sender && !_isOperator[owner][msg.sender]) revert INVALID_CALLER();
-        if (_snapshot.rate != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
+        if (_snapshot.epoch != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
 
         // no requestId associated with this request
         requestId = 0;
@@ -162,7 +166,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function requestRedeem(uint256 shares, address controller, address owner) external returns (uint256 requestId) {
         if (shares == 0) revert INVALID_PARAMETERS();
         if (owner != msg.sender && !_isOperator[owner][msg.sender]) revert INVALID_CALLER();
-        if (_snapshot.rate != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
+        if (_snapshot.epoch != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
 
         // no requestId associated with this request
         requestId = 0;
@@ -195,7 +199,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IStableYieldAsyncVault
     function closeEpoch(uint256 _totalAssets) external onlyFundManager {
-        if (_snapshot.rate != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
+        if (_snapshot.epoch != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
 
         // Compute effective supply: actual supply + phantom deposit shares - dead redeem shares.
         // This corrects for the lag between settlement (assets move) and claim (shares mint/burn).
@@ -225,7 +229,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IStableYieldAsyncVault
     function settleEpoch() external onlyFundManager {
-        if (_snapshot.rate == 0) revert NO_EPOCH_TO_SETTLE();
+        uint256 settlingEpoch = _snapshot.epoch;
+
+        if (settlingEpoch == 0) revert NO_EPOCH_TO_SETTLE();
 
         // Convert pending redeeming shares to asset terms using the epoch rate
         uint256 redeemingAssets = _snapshot.redeemingShares.mulDiv(_snapshot.rate, 1e18);
@@ -260,11 +266,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         _unclaimedRedeemShares += _snapshot.redeemingShares;
 
         // Commit the epoch rate for the settled epoch
-        _epochRate[_snapshot.epoch] = _snapshot.rate;
+        _epochRate[settlingEpoch] = _snapshot.rate;
+        _epochSettled[settlingEpoch] = true;
 
         uint256 totalAssetValue = _snapshot.rate.mulDiv(totalSupply(), 1e18);
         emit EpochSettled(
-            _snapshot.epoch, totalAssetValue, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares
+            settlingEpoch, totalAssetValue, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares
         );
 
         // Clear the snapshot as it has been settled
@@ -284,9 +291,13 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     //  | |/ / /  __/ |/ |/ /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
+    function isEpochSettled(uint256 epoch) public view returns (bool isSettled) {
+        isSettled = _epochSettled[epoch];
+    }
+
     /// @inheritdoc IStableYieldAsyncVault
-    function getSnapshot() external view returns (Snapshot memory) {
-        return _snapshot;
+    function getSnapshot() external view returns (Snapshot memory snapshot) {
+        snapshot = _snapshot;
     }
 
     /// @inheritdoc IERC4626
@@ -306,7 +317,8 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         uint256 pending = _pendingDepositRequest[controller];
 
         // If the epoch has been settled, this is no longer truly pending (it's claimable)
-        if (pending > 0 && _epochRate[_depositRequestEpoch[controller]] != 0) return 0;
+        if (pending > 0 && isEpochSettled(_depositRequestEpoch[controller])) return 0;
+
         assets = pending;
     }
 
@@ -319,7 +331,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function pendingRedeemRequest(uint256, address controller) external view returns (uint256 shares) {
         uint256 pending = _pendingRedeemRequest[controller];
         // If the epoch has been settled, this is no longer truly pending (it's claimable)
-        if (pending > 0 && _epochRate[_redeemRequestEpoch[controller]] != 0) return 0;
+        if (pending > 0 && isEpochSettled(_redeemRequestEpoch[controller])) return 0;
         shares = pending;
     }
 
@@ -459,7 +471,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Redeem assets for the receiver from the RedeemWaitingRoom
         redeemWaitingRoom.move(receiver, assets);
 
-        emit Withdraw(msg.sender, controller, receiver, assets, shares);
+        emit Withdraw(msg.sender, receiver, controller, assets, shares);
     }
 
     function _withdraw(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
@@ -480,19 +492,23 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Redeem assets for the receiver from the RedeemWaitingRoom
         redeemWaitingRoom.move(receiver, assets);
 
-        emit Withdraw(msg.sender, controller, receiver, assets, shares);
+        emit Withdraw(msg.sender, receiver, controller, assets, shares);
     }
 
     /// @dev Returns the exchange rate from the last settled epoch.
     ///      Before any epoch has settled, returns 1e18 (1:1).
     ///      During close/settle window, falls back to the epoch before.
-    function _lastSettledRate() internal view returns (uint256) {
-        if (currentEpoch == 0) return 1e18;
-        uint256 rate = _epochRate[currentEpoch - 1];
-        if (rate != 0) return rate;
-        // Previous epoch is closed but not yet settled — use the one before
-        if (currentEpoch <= 1) return 1e18;
-        return _epochRate[currentEpoch - 2];
+    function _lastSettledRate() internal view returns (uint256 lastSettledRate) {
+        // Try the most recent epoch
+        if (currentEpoch >= 2 && isEpochSettled(currentEpoch - 1)) {
+            lastSettledRate = _epochRate[currentEpoch - 1];
+        }
+        // Previous epoch closed but not yet settled — try the one before
+        if (currentEpoch >= 3 && isEpochSettled(currentEpoch - 2)) {
+            lastSettledRate = _epochRate[currentEpoch - 2];
+        }
+        // Bootstrap: no epochs settled yet
+        lastSettledRate = 1e18;
     }
 
     /// @dev If the controller has a pending deposit from a settled (past) epoch,
@@ -501,8 +517,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         uint256 pendingAssets = _pendingDepositRequest[controller];
         if (pendingAssets == 0) return;
 
-        uint256 epochRate = _epochRate[_depositRequestEpoch[controller]];
-        if (epochRate == 0) return; // epoch not yet settled
+        uint256 depositRequestEpoch = _depositRequestEpoch[controller];
+        if (!isEpochSettled(depositRequestEpoch)) return; // epoch not yet settled
+
+        uint256 epochRate = _epochRate[depositRequestEpoch];
 
         uint256 pendingShares = pendingAssets.mulDiv(1e18, epochRate);
         _claimableDepositAssets[controller] += pendingAssets;
@@ -516,8 +534,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         uint256 pendingShares = _pendingRedeemRequest[controller];
         if (pendingShares == 0) return;
 
-        uint256 epochRate = _epochRate[_redeemRequestEpoch[controller]];
-        if (epochRate == 0) return; // epoch not yet settled
+        uint256 redeemRequestEpoch = _redeemRequestEpoch[controller];
+        if (!isEpochSettled(redeemRequestEpoch)) return; // epoch not yet settled
+
+        uint256 epochRate = _epochRate[redeemRequestEpoch];
 
         uint256 pendingAssets = pendingShares.mulDiv(epochRate, 1e18);
         _claimableRedeemShares[controller] += pendingShares;
@@ -529,7 +549,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function _effectiveClaimableDepositAssets(address controller) internal view returns (uint256 assets) {
         assets = _claimableDepositAssets[controller];
         uint256 pending = _pendingDepositRequest[controller];
-        if (pending > 0 && _epochRate[_depositRequestEpoch[controller]] != 0) {
+        if (pending > 0 && isEpochSettled(_depositRequestEpoch[controller])) {
             assets += pending;
         }
     }
@@ -538,11 +558,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function _effectiveClaimableDepositShares(address controller) internal view returns (uint256 shares) {
         shares = _claimableDepositShares[controller];
         uint256 pending = _pendingDepositRequest[controller];
-        if (pending > 0) {
-            uint256 epochRate = _epochRate[_depositRequestEpoch[controller]];
-            if (epochRate != 0) {
-                shares += pending.mulDiv(1e18, epochRate);
-            }
+
+        uint256 depositRequestEpoch = _depositRequestEpoch[controller];
+
+        if (pending > 0 && isEpochSettled(depositRequestEpoch)) {
+            uint256 epochRate = _epochRate[depositRequestEpoch];
+            shares += pending.mulDiv(1e18, epochRate);
         }
     }
 
@@ -550,7 +571,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function _effectiveClaimableRedeemShares(address controller) internal view returns (uint256 shares) {
         shares = _claimableRedeemShares[controller];
         uint256 pending = _pendingRedeemRequest[controller];
-        if (pending > 0 && _epochRate[_redeemRequestEpoch[controller]] != 0) {
+        if (pending > 0 && isEpochSettled(_redeemRequestEpoch[controller])) {
             shares += pending;
         }
     }
@@ -559,11 +580,12 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     function _effectiveClaimableRedeemAssets(address controller) internal view returns (uint256 assets) {
         assets = _claimableRedeemAssets[controller];
         uint256 pending = _pendingRedeemRequest[controller];
-        if (pending > 0) {
-            uint256 epochRate = _epochRate[_redeemRequestEpoch[controller]];
-            if (epochRate != 0) {
-                assets += pending.mulDiv(epochRate, 1e18);
-            }
+
+        uint256 redeemRequestEpoch = _redeemRequestEpoch[controller];
+
+        if (pending > 0 && isEpochSettled(redeemRequestEpoch)) {
+            uint256 epochRate = _epochRate[redeemRequestEpoch];
+            assets += pending.mulDiv(epochRate, 1e18);
         }
     }
 
