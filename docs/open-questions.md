@@ -1,48 +1,5 @@
 # Open Design Questions
 
-## 1. Settlement Preconditions & Liquidity
-
-**Problem:** `settleEpoch` needs to transfer assets to cover net redemptions, but the FundManager may not have sufficient liquidity — investments can be offchain, illiquid, or slow to liquidate. We cannot assume atomic liquidation.
-
-Additionally, pending deposit assets in the WaitingRoom can partially offset redemptions (netting), reducing the amount needed from FundManager.
-
-**Decision: Two-phase settlement with operator-ensured liquidity**
-
-Settlement is split into two operator-triggered calls:
-
-### Phase 1: `closeEpoch()`
-- Snapshots `totalPendingDepositAssets` and `totalPendingRedeemShares`
-- Computes and locks the epoch rate from `FundManager.totalValue()` / `totalSupply()`
-- Advances `currentEpoch` — new requests land in the next epoch
-- Sets `settlingEpoch` to the epoch being settled
-- Pending requests in `settlingEpoch` are frozen: they can't be claimed yet
-
-### Between phases (operator responsibility)
-- Operator reads the exact locked snapshot (no estimation needed)
-- Computes `netOutflow = redeemAssets - depositAssets` using the locked rate
-- If `netOutflow > FundManager.unutilized`: liquidates working assets (onchain/offchain) and tops up FundManager
-
-### Phase 2: `settleEpoch()`
-- Uses the locked snapshot and rate — no recomputation
-- Nets deposit/redeem flows, moves funds between WaitingRoom, FundManager, RedeemClaimingRoom
-- Stores the rate under `settlingEpoch`, clears snapshot
-- Requests in `settlingEpoch` become claimable via lazy settlement
-
-**Why two phases:**
-- Eliminates the race condition where new requests arrive between liquidity estimation and settlement
-- Operator has exact numbers for flows and rate → precise liquidation
-- Clean separation: snapshot/commit vs. execute
-
-**Tradeoffs:**
-- Two transactions instead of one
-- Requests in `settlingEpoch` cannot claim until `settleEpoch` completes
-- Lazy settlement needs to distinguish between "fully settled" vs "closed but not yet settled"
-- Rate is locked at closeEpoch time — yield accruing on working assets between closeEpoch and settleEpoch accrues to remaining shareholders, not redeemers (arguably correct since redeemers committed to exit)
-
-**No cancellation:** Once `closeEpoch` is called, the operator must eventually call `settleEpoch` to complete the settlement. Rollback is not supported.
-
----
-
 ## 2. GDA Units: Request Time vs. Claim Time
 
 **Problem:** Should investors start receiving streaming yield when they `requestDeposit` (and stop at `requestRedeem`), or when they `deposit`/claim (and stop at `redeem`/claim)?
