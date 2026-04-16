@@ -428,13 +428,17 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _deposit(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
-        if (_claimableDepositAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending deposit from a previous epoch
         _settleDepositIfNeeded(controller);
 
+        if (_claimableDepositAssets[controller] == 0) revert NOTHING_TO_CLAIM();
+
         // Proportional deduction: assets is the native unit, derive shares
         shares = assets.mulDiv(_claimableDepositShares[controller], _claimableDepositAssets[controller]);
+
+        if (shares == 0) revert INVALID_PARAMETERS();
+
         _claimableDepositAssets[controller] -= assets;
         _claimableDepositShares[controller] -= shares;
         _unclaimedDepositShares -= shares;
@@ -446,13 +450,16 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _mintShares(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
-        if (_claimableDepositAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending deposit from a previous epoch
         _settleDepositIfNeeded(controller);
 
+        if (_claimableDepositAssets[controller] == 0) revert NOTHING_TO_CLAIM();
+
         // Proportional deduction: shares is the native unit, derive assets
-        assets = shares.mulDiv(_claimableDepositAssets[controller], _claimableDepositShares[controller]);
+        assets =
+            shares.mulDiv(_claimableDepositAssets[controller], _claimableDepositShares[controller], Math.Rounding.Ceil);
+
         _claimableDepositShares[controller] -= shares;
         _claimableDepositAssets[controller] -= assets;
         _unclaimedDepositShares -= shares;
@@ -464,13 +471,17 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _redeem(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
-        if (_claimableRedeemAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending redeem from a previous epoch
         _settleRedeemIfNeeded(controller);
 
+        if (_claimableRedeemAssets[controller] == 0) revert NOTHING_TO_CLAIM();
+
         // Proportional deduction: shares is the native unit, derive assets
         assets = shares.mulDiv(_claimableRedeemAssets[controller], _claimableRedeemShares[controller]);
+
+        if (assets == 0) revert INVALID_PARAMETERS();
+
         _claimableRedeemShares[controller] -= shares;
         _claimableRedeemAssets[controller] -= assets;
         _unclaimedRedeemShares -= shares;
@@ -486,14 +497,17 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _withdraw(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
-        if (_claimableRedeemAssets[controller] == 0) revert NOTHING_TO_CLAIM();
 
         // Lazy-settle any pending redeem from a previous epoch
         _settleRedeemIfNeeded(controller);
 
+        if (_claimableRedeemAssets[controller] == 0) revert NOTHING_TO_CLAIM();
+
         // Proportional deduction: assets is the native unit, derive shares
         // Round up so at least 1 share is burned per non-zero withdrawal (favors vault)
-        shares = assets.mulDiv(_claimableRedeemShares[controller], _claimableRedeemAssets[controller], Math.Rounding.Ceil);
+        shares =
+            assets.mulDiv(_claimableRedeemShares[controller], _claimableRedeemAssets[controller], Math.Rounding.Ceil);
+
         _claimableRedeemAssets[controller] -= assets;
         _claimableRedeemShares[controller] -= shares;
         _unclaimedRedeemShares -= shares;
