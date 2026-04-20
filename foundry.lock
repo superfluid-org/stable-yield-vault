@@ -1,4 +1,7 @@
 {
+  "lib/ERC-7540-Reference": {
+    "rev": "1ea70ccf3accbcd6724816ded8ed88f10ba4fce8"
+  },
   "lib/forge-std": {
     "tag": {
       "name": "v1.15.0",
