@@ -1,426 +1,382 @@
-# StableYieldReserve (SYR) — Design
+# Stable Yield Streaming — Design
 
 ## Overview
 
-The StableYieldReserve funds continuous yield streaming to vault shareholders via a Superfluid GDA pool. Yield is **prepaid** — a fraction of each deposit is carved out upfront and sent to the Reserve, which streams it to GDA unit holders every second.
+The StableYieldAsyncVault streams yield continuously to shareholders via a Superfluid GDA pool. The **FundManager (FM)** is the GDA pool admin and the flow sender: yield is paid directly from FM's on-chain balance to pool members in real time, at a rate set by the operator based on strategy performance.
 
-The yield rate is **stable within an era** and **recalibrated at era boundaries** based on actual strategy performance.
+There is no separate reserve contract, no carve-out at deposit, and no refund on exit. Yield flows out of FM's balance continuously as strategy returns flow in. The share price drifts accordingly — up when the strategy outperforms the committed rate, down when it lags.
 
 ## Key Parameters
 
 | Parameter | Description | Example |
 |---|---|---|
-| `eraDuration` | Length of one era | 6 months |
-| `flowRate` | GDA flow rate (tokens/second streamed from Reserve) | Derived from Reserve balance |
+| `annualRate` | Target APR committed to per-unit streaming, set by the operator | 5% |
+| `actualFlowRate` | GDA flow rate in super-token units/second. Derived: `pool.totalUnits * annualRate / 1y` | — |
+| `GUARANTEED_FLOW_DURATION` | Minimum forward stream-solvency horizon FM must maintain. Set at deployment; operator-adjustable. | 7 days |
 
-The effective yield rate is **not a stored parameter** — it is an emergent property of the Reserve balance and era duration:
-```
-effectiveFlowRate = Reserve.balance / eraDuration
-effectiveYieldPerUnit = effectiveFlowRate / totalGDAUnits
-```
+The per-unit stream rate is always exactly `annualRate / 1y`. `annualRate` is a governance parameter; `actualFlowRate` is derived.
 
 ## Core Mechanism
 
-### Deposit: Carve-Out + GDA Units
+### Roles
 
-When an investor calls `requestDeposit(assets)`:
+FM owns a GDA pool over a wrapped **super-token** of the underlying asset.
 
-1. Compute the carve-out based on remaining time in the current era:
-   ```
-   carveOut = assets * annualRate * remainingAtEntry / 1 year
-   ```
-2. Transfer `carveOut` from DepositWaitingRoom → StableYieldReserve
-3. Record `assets - carveOut` as the investor's pending deposit (this is what settlement and share minting are based on)
-4. Assign GDA units to the investor — streaming starts immediately
-5. Store a `YieldPosition` for the investor:
-   ```
-   YieldPosition {
-       carvedAmount:    carveOut
-       eraOfEntry:      currentEra
-       entryTimestamp:  block.timestamp
-   }
-   ```
+- FM is the pool **admin** — it is the sole caller for `updateMemberUnits` and `distributeFlow`.
+- FM is also a **member** of its own pool, holding units on behalf of settled-but-unclaimed deposits (see [D3](#d3-fm-as-pending-member-of-its-own-pool)).
+- FM is **connected** to the pool (`connectPool()` called at init), so its self-slice of the stream lands directly in its real-time super-token balance — no `claimAll` step needed.
 
-### Redeem: Unit Removal + Pro-Rata Refund
+### Deposit path
 
-When an investor calls `requestRedeem(shares)`:
+```
+requestDeposit(assets):
+  assets -> DepositWaitingRoom
+  record pending request
+  // no unit allocation, no pool interaction
 
-1. Remove the investor's GDA units — streaming stops immediately
-2. Compute refund based on whether the investor is still in their entry era:
-   - **Same era** (`currentEra == position.eraOfEntry`):
-     ```
-     refund = carvedAmount * remainingAtExit / remainingAtEntry
-     ```
-   - **Later era** (`currentEra > position.eraOfEntry`):
-     ```
-     refund = 0
-     ```
-3. Transfer `refund` from StableYieldReserve → investor (or add to their redeem claim)
-4. Reduce or clear the investor's `YieldPosition`
+settleEpoch (deposit leg):
+  DepositWaitingRoom -> FundManager  (net epoch deposit)
+  pool.updateMemberUnits(FM, FMUnits + totalEpochDepositAssets)
+  pool.distributeFlow(pool.totalUnits * annualRate / 1y)
+  require(invariant)
+
+claimDeposit(controller):
+  delta = pendingDepositAssets[controller]
+  pool.updateMemberUnits(FM,         FMUnits   - delta)
+  pool.updateMemberUnits(controller, userUnits + delta)
+  // pool.totalUnits unchanged; flowRate unchanged
+```
+
+Units are asset-basis (see [D1](#d1-units-are-allocated-on-an-asset-basis)): one unit per one unit of underlying deposited. The same asset amount that the user wrote into `requestDeposit` becomes their unit count at claim.
+
+### Redeem path
+
+```
+requestRedeem(shares, controller):
+  delta = userUnits * shares / totalSharesOwned
+  pool.updateMemberUnits(controller, userUnits - delta)
+  pool.distributeFlow(pool.totalUnits * annualRate / 1y)
+  // standard ERC-7540: shares locked in vault, record pending request
+
+settleEpoch (redeem leg):
+  FundManager -> RedeemWaitingRoom  (net epoch redeem)
+  require(invariant)
+
+claimRedeem(controller):
+  standard withdrawal, no pool interaction
+```
+
+Stream stops at `requestRedeem`, not at settle or claim (see [D2](#d2-unit-administration-timing-claimdeposit--requestredeem)).
+
+### Flow rate adjustment
+
+The operator adjusts `annualRate` as strategy performance dictates:
+
+```
+setAnnualRate(newRate):                        // FUND_OPERATOR_ROLE
+  annualRate = newRate
+  pool.distributeFlow(pool.totalUnits * annualRate / 1y)
+  require(invariant)
+```
+
+By convention the operator holds `annualRate` stable for a commitment window (e.g. 6 months) for UX predictability. There is no hard on-chain boundary — commitments are operational, not enforced. See [D5](#d5-flow-rate-governance-is-operational-not-era-boundaried).
 
 ### Settlement
 
-Settlement remains an **aggregate operation** — it does not interact with GDA units or the Reserve. It operates on post-carve-out amounts:
-- `totalPendingDepositAssets` reflects deposits minus carve-outs
-- Netting, fund movement, and share minting proceed unchanged
+Aggregate ERC-7540 settlement is unchanged in shape. The one new constraint: settlement must respect the stream-solvency invariant. If a redeem-heavy settle would leave FM below the required forward-coverage, `settleEpoch` reverts, and the operator must `give` from the strategy (or cut `annualRate`) before reattempting.
 
-### Era Transition
+**Harvest cadence.** By convention, the operator couples strategy harvesting to each `settleEpoch` cycle. The `give` call is sized depending on the epoch's net deposit/redeem ratio:
 
-At the end of each era, strategy profits are harvested from the FundManager into the Reserve to fund the next era's streaming. See [Era Transition](#era-transition) for full details.
+- **Net-inflow epoch:** fresh deposits arrive into FM at settle. `give` may be minimal or zero; the operator optionally harvests excess strategy profit to keep NAV aligned with the committed rate.
+- **Net-outflow epoch:** the operator must unwind strategy positions to fund the outbound redeem *and* maintain the invariant against the new (slightly lower) flow rate.
 
-## Symmetry
+Settle is the natural moment to harvest because it is the one transaction that changes both `actualFlowRate` (via unit count movement) and `availableBalanceOf(FM)` (via net asset movement) — co-locating the harvest keeps the invariant check coherent.
 
-| Event | GDA Units | Reserve Interaction | Timing |
+## Stream Solvency Invariant
+
+FM must always be able to fund at least `GUARANTEED_FLOW_DURATION` of forward streaming from its liquid balance:
+
+```
+unutilized(FM) = superToken.availableBalanceOf(FM)
+                 // SF's mandatory stream deposit is already excluded from availableBalance
+
+invariant:  unutilized(FM) >= actualFlowRate * GUARANTEED_FLOW_DURATION
+```
+
+`availableBalanceOf` already nets: (i) FM's outbound `distributeFlow`, (ii) FM's self-slice coming back via its pool membership, (iii) SF's own mandatory liquidation deposit. No separate accounting is needed ([D4](#d4-stream-solvency-invariant-is-enforced-on-chain)).
+
+### Enforcement points
+
+| Operation | Effect on `unutilized` | Effect on `actualFlowRate` | Check |
 |---|---|---|---|
-| `requestDeposit` | Assigned | Carve-out in | Request time |
-| `requestRedeem` | Removed | Pro-rata refund out | Request time |
+| `FundOperator.give(amount)` | ↑ | — | trivially safe |
+| `FundOperator.take(amount)` | ↓ | — | must hold after |
+| `setAnnualRate(newRate)` (up) | — | ↑ | must hold after |
+| `setAnnualRate(newRate)` (down) | — | ↓ | trivially safe |
+| `settleEpoch` (deposit leg) | ↑ | ↑ | must hold after |
+| `settleEpoch` (redeem leg) | ↓ | — | must hold after |
+| `claimDeposit` | — | — | no-op |
+| `requestRedeem` | — | ↓ | trivially safe |
 
-Both entry and exit happen at **request time**, not settlement or claim time. This avoids iterating over controllers during settlement and gives immediate UX feedback.
+Violations revert. The operator is responsible for restoring coverage before reattempting the offending operation.
+
+## NAV Dynamics
+
+NAV drifts continuously: the stream drains it at `actualFlowRate`; strategy returns (harvested back to FM via `give`) replenish it. There is no discrete end-of-era dividend step.
+
+| Regime | Strategy return vs. stream | NAV behaviour | Operator action |
+|---|---|---|---|
+| Best case | return > stream | NAV grows; share price appreciates | none required; buffer builds |
+| Steady state | return ≈ stream | NAV flat; rate is self-sustaining | none |
+| Soft miss | return < stream | NAV drifts down | cut `annualRate` |
+| Hard loss | return ≤ 0 | NAV falls fast | cut `annualRate` (possibly to 0) |
+
+Economically, the stream transfers value from the share-NAV pool to unit-holders continuously. Since units and shares track the same set of holders (modulo the ERC-7540 request/claim windows — see [D2](#d2-unit-administration-timing-claimdeposit--requestredeem)), this is approximately a self-transfer, leaving net holder value unchanged in steady state.
+
+Principal loss (strategy loss that outpaces the stream) is socialized via share price — same mechanism as any ERC-4626 vault. It is independent of the yield-streaming mechanism.
 
 ## Edge Cases
 
-### Multiple deposits within the same era
+### Multiple deposits from the same user
 
-Each deposit has a different `entryTimestamp` and `carvedAmount`. To avoid per-deposit arrays, positions are merged using a weighted average:
+Additive. Each `requestDeposit` records a new pending amount; each `claimDeposit` transfers the corresponding units from FM to the user. No per-position storage, no merging logic needed.
+
+### Partial redeems
+
+Unit removal at `requestRedeem` is proportional to shares redeemed:
 
 ```
-merged.carvedAmount = existing.carvedAmount + newCarveOut
-merged.entryTimestamp = (existing.carvedAmount * existing.entryTimestamp
-                       + newCarveOut * block.timestamp)
-                       / merged.carvedAmount
+delta = userUnits * sharesRedeemed / totalSharesOwned
 ```
 
-This keeps storage and refund calculation O(1) per controller per era.
+This keeps the user's units proportional to their remaining share balance throughout the redemption lifecycle.
 
-### Multiple deposits across eras
+### Bootstrap (first deposit)
 
-Positions are tracked per era:
+Before any settlement, `pool.totalUnits = 0` and `actualFlowRate = 0`. The invariant holds trivially. The first `settleEpoch` (deposit leg) is the first state-changing call against the pool:
+
 ```
-mapping(address controller => mapping(uint256 era => YieldPosition)) positions
-```
-
-On withdrawal, only the current-era position (if any) is eligible for a refund.
-
-Past-era entries are never touched after the era boundary passes (they are ineligible for refund by definition) and are left in storage. The map therefore grows over time, bounded by `distinct controllers × eras`. This is functionally correct and not a solvency concern — old entries cannot be replayed since refund eligibility is gated on `currentEra == eraOfEntry`.
-
-### Partial withdrawals
-
-Refund is proportional to shares redeemed:
-```
-refund = fullRefund * sharesRedeemed / totalSharesOwned
+pool.updateMemberUnits(FM, totalEpochDepositAssets)
+pool.distributeFlow(pool.totalUnits * annualRate / 1y)
 ```
 
-The `carvedAmount` in the position is reduced proportionally.
+SF's mandatory buffer deposit is locked at this moment. The invariant must hold against the deposited super-tokens net of the SF buffer.
 
-### Reserve solvency on mass early exit
+### Mass redeem / liquidity shortage
 
-The refund math is self-consistent with GDA streaming. The refunded portion corresponds to yield that hasn't been streamed yet. Example:
+If a redeem epoch requires more assets than FM can release while preserving the invariant, `settleEpoch` reverts. The operator must `give` from the strategy (unwinding positions as needed) before retrying. This is symmetric with existing ERC-7540 settlement semantics — the operator is responsible for pre-funding outflows.
 
-- 1000 USDC total deposits, 25 USDC total carved out
-- After 1 month: ~4.17 USDC streamed, ~20.83 remaining in Reserve
-- Half the depositors leave. Their refund: 12.5 * 5/6 = ~10.42 USDC
-- Reserve after refunds: ~10.41 USDC
-- Remaining depositors need: ~10.42 USDC over 5 months
+### Lazy claimer
 
-The numbers balance because refunds mirror unstreamed yield.
+A user who never calls `claimDeposit` keeps their units with FM indefinitely. FM continues to receive that slice of the stream via its own pool membership — the tokens round-trip back to FM's balance. No garbage collection is required; no value is lost to the system; the lazy claimer simply forgoes yield they could have earned.
 
 ## Worked Examples
 
-### Example 1: Full era participation
+### Example 1: Happy path — full lifecycle
 
-- Era: 6 months, rate: 5% annualized
-- Alice deposits 100 USDC on Jan 1 (era start)
-- Carve-out: `100 * 0.05 * 6/12 = 2.5 USDC`
-- 97.5 USDC recorded as pending deposit → goes to FundManager at settlement
-- Alice streams yield for 6 months, receives ~2.5 USDC via GDA
-- Era ends. No refund owed. Her carve-out was fully consumed.
+- `annualRate = 5%`. Alice deposits 100 USDC at T0.
+- At the next `settleEpoch`, FM gains 100 units to its own membership; `pool.totalUnits` increases by 100; `distributeFlow` is recalibrated.
+- Alice calls `claimDeposit` at T1. 100 units transfer FM → Alice. `totalUnits` unchanged; `flowRate` unchanged.
+- Alice holds for 6 months. Her super-token balance grows by ~2.5 USDC via the GDA stream.
+- Alice calls `requestRedeem(allShares)`. Her units → 0; `distributeFlow` recalibrates downward.
+- At the next `settleEpoch`, her redeem amount moves FM → RedeemWaitingRoom.
+- Alice calls `claimRedeem` to receive her principal.
 
-### Example 2: Mid-era entry
+Total received: ~2.5 USDC stream + principal (share-price-adjusted).
 
-- Bob deposits 100 USDC on April 1 (3 months into the era)
-- Carve-out: `100 * 0.05 * 3/12 = 1.25 USDC`
-- 98.75 USDC recorded as pending deposit
-- Bob streams for the remaining 3 months
+### Example 2: Strategy outperforms
 
-### Example 3: Early exit with refund
+- Strategy yields 8% annualized; committed `annualRate = 5%`.
+- Operator `give`s strategy returns back to FM periodically.
+- FM's `unutilized` grows faster than the stream drains it → NAV rises → share price appreciates.
+- Committed rate holds. Buffer builds, creating room for a future rate increase or for absorbing a later soft miss.
 
-- Alice (from Example 1) decides to leave on April 1 (3 months in)
-- Remaining time in era: 3 months. Time since entry: 6 months window, 3 months elapsed.
-- Refund: `2.5 * 3/6 = 1.25 USDC`
-- Alice receives: share redemption value + 1.25 USDC refund
+### Example 3: Strategy underperforms
 
-### Example 4: Cross-era exit (no refund)
+- Strategy yields 2% annualized; committed `annualRate = 5%`.
+- NAV drifts down as stream outpaces returns.
+- Operator calls `setAnnualRate(2%)`. `distributeFlow` drops to match. Invariant relaxes.
+- Remaining NAV drift is absorbed by share price (principal cost of the miss).
 
-- Alice deposits in ERA 1, leaves in ERA 2
-- Her ERA 1 carve-out was fully consumed (streamed over 6 months)
-- ERA 2 yield is funded by strategy returns (era top-up), not a new carve-out from Alice
-- Refund: 0. Alice receives only her share redemption value.
+### Example 4: Invariant gates an operator `take`
 
-## Era Transition
+- FM has `unutilized = 1000 USDC`. `actualFlowRate * GUARANTEED_FLOW_DURATION = 600 USDC`.
+- Operator calls `take(500)` → would leave 500 < 600. **Reverts.**
+- Operator calls `take(400)` → leaves 600 ≥ 600. Succeeds.
 
-### Concept
+### Example 5: Settle blocked by mass redeem
 
-During an era, the strategy generates returns inside the FundManager (NAV increases as working assets grow). At era boundaries, these profits are harvested and transferred to the Reserve to fund the next era's streaming.
-
-The yield rate is not an explicit parameter — it emerges from the Reserve balance and era duration. Topping up the Reserve with more profit = higher effective yield next era. Less profit = lower yield. The mechanism is self-adjusting.
-
-### Share price dynamics
-
-When profits are moved from FundManager → Reserve, the FundManager's NAV drops by that amount. This means **share price drops after era transition** — economically identical to a dividend distribution:
-
-- During an era: share price slowly rises as strategy accrues returns
-- At era transition: profits harvested, share price returns to ~baseline
-- Net effect: share price oscillates around a stable baseline; gains are streamed out rather than compounding
-
-This is what makes the yield "stable" — returns are distributed rather than accumulated.
-
-### Flow
-
-The fund operator triggers era transition, passing in the reported strategy NAV and the committed `annualRate` for the next era (see [D3](#d3-annualrate-is-a-per-era-committed-rate-resolves-i3-and-i9)):
-
-```
-eraTransition(reportedNAV, newAnnualRate):
-  1. Require: current era has ended (block.timestamp >= eraEnd)
-  2. Require: vault.getSnapshot().epoch == 0
-             (no epoch in the closeEpoch → settleEpoch window)
-  3. Compute profit for the ending era:
-       profit = reportedNAV - baselineNAV - netFlowsDuringEra
-  4. Compute top-up for the new era (Policy ⓐ):
-       requiredTopUp = totalAssets * newAnnualRate * eraDuration / 1 year
-  5. Determine actual top-up:
-       - profit >= requiredTopUp → topUp = requiredTopUp
-                                    (excess stays in FundManager as NAV buffer)
-       - 0 < profit < requiredTopUp → topUp = profit,
-                                    operator may optionally add NAV buffer draw
-       - profit <= 0              → topUp = 0,
-                                    operator may optionally add NAV buffer draw
-  6. Transfer topUp from FundManager → Reserve
-  7. Advance era and set committed rate:
-       currentEra++
-       eraEnd          = block.timestamp + eraDuration
-       annualRate      = newAnnualRate
-  8. Reset era-scoped tracking:
-       baselineNAV          = reportedNAV - topUp
-       netFlowsDuringEra    = 0
-  9. Initialize Reserve flow for the new era:
-       Reserve.flowRate = Reserve.balance / eraDuration
-       (per D4, flowRate is recomputed on every subsequent deposit/redeem)
-```
-
-### Funding source per era
-
-| Era | Existing holders funded by | New deposits funded by |
-|---|---|---|
-| ERA 1 | Their own carve-outs | Their own carve-outs |
-| ERA 2+ | Strategy profits (harvested at era transition) | Their own carve-outs (pro-rata to remaining time in era) |
-
-Existing holders do **not** pay a new carve-out at era boundaries. Their yield for ERA N+1 comes entirely from what the strategy earned during ERA N. Only new deposits within an era pay a carve-out (to fund their pro-rata stream until the next era boundary).
-
-### Strategy performance scenarios
-
-Under the per-era commitment model (see [D3](#d3-annualrate-is-a-per-era-committed-rate-resolves-i3-and-i9)), the operator commits to an `annualRate` for the coming era at each `eraTransition()`. The required Reserve top-up is:
-
-```
-requiredTopUp = totalAssets * annualRate * eraDuration / 1 year
-```
-
-What happens depends on how strategy profit compares to `requiredTopUp`.
-
-**Performed as expected (profit ≈ requiredTopUp):**
-```
-Strategy returned ~2.5% over 6 months (matching committed 5% annualized)
-→ Operator moves requiredTopUp to Reserve
-→ Committed rate holds for the next era
-→ No NAV buffer change
-```
-
-**Outperformed (profit > requiredTopUp):**
-```
-Strategy returned 4% over 6 months (8% annualized), committed rate = 5%
-→ Operator moves only requiredTopUp to Reserve
-→ Excess stays in FundManager as NAV buffer → share price ticks up
-→ Committed rate for the next era holds
-→ Buffer can later absorb a soft-miss era without forcing a rate cut
-```
-
-**Soft miss (0 < profit < requiredTopUp):**
-```
-Strategy returned 1% over 6 months (committed rate implied 5%)
-→ Operator moves profit to Reserve, and may top up the shortfall from
-  accumulated NAV buffer (if available) to hit requiredTopUp
-→ If buffer is sufficient: committed rate holds, buffer drained accordingly
-→ If buffer is insufficient: operator reduces annualRate for the next era
-  to match whatever the Reserve can fund
-```
-
-**Hard miss / loss (profit ≤ 0):**
-```
-Strategy lost value or was flat
-→ No strategy profit to harvest
-→ Operator may use accumulated NAV buffer to fund the next era's Reserve
-→ If no buffer (or not enough): annualRate is reduced (possibly to 0) for
-  the next era, matching the Reserve's actual balance
-→ Loss itself is socialized via share price (NAV drop), independent of yield
-```
-
-In all cases, the commitment is **per-era**: holders are guaranteed `annualRate` for the current era only. Adjustments happen at era boundaries, never intra-era.
-
-### Epoch/era interaction
-
-Era transitions and epoch settlements operate on different cycles but must not overlap. The vault exposes `getSnapshot()` which returns a `Snapshot` with `epoch == 0` when no settlement is in progress and `epoch == N` between `closeEpoch(N)` and `settleEpoch(N)`. Era transition must therefore require:
-
-```solidity
-require(vault.getSnapshot().epoch == 0, "epoch settlement in progress");
-```
-
-This prevents NAV changes mid-settlement that would invalidate the locked epoch rate.
-
-### baselineNAV tracking
-
-`baselineNAV` is recorded at the end of each era transition. It represents the FundManager's value after profits have been extracted. This is the reference point for computing profits in the next era:
-
-```
-profit(ERA N) = FundManager.totalValue() at ERA N end - baselineNAV set at ERA N start
-```
-
-Note: `baselineNAV` must account for net fund flows during the era (new deposits adding to FundManager, redeems withdrawing from it). Otherwise normal inflows/outflows would be counted as "profit." The adjusted formula:
-
-```
-profit = FundManager.totalValue() - baselineNAV - netFlowsDuringEra
-```
-
-Where `netFlowsDuringEra` = total assets deposited into FundManager via settlement - total assets withdrawn from FundManager via settlement during the era.
-
-## Required Contract Changes
-
-The StableYieldReserve feature is not yet integrated into the contracts. The items below list the state and functions that will need to be added or modified when implementation starts. They are expected scope, not open design questions.
-
-### New contract: `StableYieldReserve`
-
-A new contract holding the yield buffer and managing the GDA distribution:
-- Custody of carved-out assets (held until streamed or refunded).
-- Superfluid GDA pool instance — manages unit allocation per investor.
-- Public/restricted API to update `flowRate` and move/refund assets out of the Reserve.
-- Access control: `VAULT_ROLE` for carve-out credits and refunds; operator role (or via the vault) for era-transition top-ups.
-
-### `FundManager`
-
-- **NAV reporting for era transitions.** `eraTransition` needs to compute profit from total fund value. The simplest shape is to accept operator-reported `workingAssets` at era transition (mirroring how `closeEpoch(workingAssets)` already works) rather than adding an on-chain `totalValue()` — working assets live off-chain in the strategy.
-- **`netFlowsDuringEra` state.** Track cumulative assets deposited into / withdrawn from the FundManager via settlement within the current era. Reset to zero at each `eraTransition`. Required input for the profit formula:
-  ```
-  profit = reportedNAV - baselineNAV - netFlowsDuringEra
-  ```
-- **FundManager → Reserve transfer path.** `FundManager.move` is currently `VAULT_ROLE`-only and `take` is `FUND_OPERATOR_ROLE`-only. The era-transition top-up needs either a new operator-callable function (e.g. `topUpReserve(uint256 amount)`) or routing the transfer through the vault. Access-control choice to be made at implementation.
-- **Era-transition entry point.** A new function (e.g. `closeEra(workingAssets, newAnnualRate)`) that performs profit computation, Reserve top-up, Reserve flowRate update, era advance, baseline reset.
-
-### `StableYieldAsyncVault`
-
-- **Carve-out in `requestDeposit`.** Compute `carveOut = assets * annualRate * remainingAtEntry / 1 year`, instruct `DepositWaitingRoom.move(Reserve, carveOut)`, and record `assets - carveOut` (not `assets`) in `_pendingDepositRequest[controller]` and `totalPendingDepositAssets`. Settlement math stays unchanged because it operates on post-carve-out amounts.
-- **Reserve unit management.** Call Reserve to assign units at `requestDeposit` (asset-basis) and remove them at `requestRedeem` (proportional to `sharesRedeemed / totalSharesOwned`). Recompute `flowRate` on both paths.
-- **Refund trigger at `requestRedeem`.** Invoke Reserve to compute and deliver the same-era refund (per [D2](#d2-time-variable-naming-convention-resolves-i2)).
-- **Era bookkeeping.** Expose `currentEra`, `eraEnd`, and the per-controller per-era `YieldPosition` storage described in [Edge Cases](#edge-cases).
-
-### Refund delivery path
-
-The same-era refund computed at `requestRedeem` needs a transport path from the Reserve to the investor. Today, `_redeem` / `_withdraw` pull assets via `redeemWaitingRoom.move(...)`. Two implementation shapes are possible depending on the refund delivery mechanism (see Open Questions):
-
-- **Direct transfer on `requestRedeem`:** Reserve sends the refund straight to the investor (or owner). Simpler, but splits the investor's redemption into two token transfers across two settlement moments (refund now, share value later).
-- **Bundled with the redeem claim:** Reserve transfers the refund into `RedeemWaitingRoom` at request time; the investor receives principal + refund in a single transfer at claim. Requires a new Reserve→RedeemWaitingRoom path.
-
-The choice will be made when the refund delivery mechanism is decided; both are small additions.
-
-### `WaitingRoom` / `DepositWaitingRoom`
-
-- No interface changes expected — `move(recipient, amount)` is already `onlyVault` and can target the Reserve as a recipient. The new flow only uses existing primitives.
+- FM has `unutilized = 700 USDC`. Required buffer = 600 USDC.
+- Pending redeem epoch net-out = 200 USDC. Post-settle `unutilized` would be 500 < 600. **Reverts.**
+- Operator `give`s 100 USDC from strategy. Post-settle `unutilized` = 600. Settle succeeds.
 
 ## Design Decisions
 
-### D1. Weighted-average position merging is accepted (resolves I1)
+### D1. Units are allocated on an asset basis
 
-When multiple deposits within the same era are merged via weighted average (see [Multiple deposits within the same era](#multiple-deposits-within-the-same-era)), the refund on early exit is **always less than or equal to** the sum of per-deposit refunds. The drift is strictly in favor of the Reserve.
+Units are counted in underlying-asset denominations, not shares.
 
-**Proof.** For merged positions with carve-outs `C_i` and remaining-time-at-entry `a_i = eraEnd − t_i`, exiting with remaining time `R = eraEnd − exitTime`:
+- On `settleEpoch` (deposit leg): FM's units incremented by the total epoch deposit **assets**.
+- On `claimDeposit`: delta equals the user's originally-requested deposit asset amount.
+- On `requestRedeem` / share transfer: delta is proportional to shares moved, applied against the user's current unit balance.
+
+**Why.** Share price drifts with NAV. A share-basis unit would make per-unit stream rate drift with share price. Asset-basis units keep the per-unit rate exactly `annualRate / 1y` across all share-price movements — which is the UX commitment.
+
+### D2. Unit administration timing: `claimDeposit` / `requestRedeem`
+
+Units are **added at `claimDeposit`** (not at `requestDeposit`) and **removed at `requestRedeem`** (not at `claimRedeem`).
+
+| Window | Share state | Unit state | Rationale |
+|---|---|---|---|
+| `requestDeposit → settleEpoch` | none | none | capital not yet in FM |
+| `settleEpoch → claimDeposit` | claimable (vault-held) | held by FM as pending | capital in FM; user earns only once they claim |
+| steady state | held | held | aligned |
+| `requestRedeem → settleEpoch` | locked in vault | none | user has relinquished shares; stream must stop |
+| `settleEpoch → claimRedeem` | burned | none | capital has left FM |
+
+**Why these exact boundaries.** Each side is chosen to close a gameable subsidy:
+
+- If units were added at `requestDeposit`: the user would receive stream on capital that hasn't yet joined FM. Existing holders would subsidize entrants, and entrants could time deposits right after `closeEpoch` to maximize the free window.
+- If units were removed at `claimRedeem`: a user could delay `claimRedeem` to keep receiving stream on capital that has already left FM (sitting in the RedeemWaitingRoom). Effectively extraction from remaining holders.
+
+Choosing `claimDeposit` / `requestRedeem` eliminates both attacks while preserving O(1) per operation.
+
+**Residual asymmetries.** Both small, both favour stayers, neither gameable:
+
+- *Settle → claim-deposit window:* claimable user has no units yet. Self-penalty for delayed claim; the pending stream slice flows to FM (via [D3](#d3-fm-as-pending-member-of-its-own-pool)), strengthening the buffer.
+- *Request-redeem → settle window:* user has no units but capital still sits in FM. Remaining unit-holders briefly over-earn. Not exploitable in reverse — shares are already locked.
+
+### D3. FM as pending-member of its own pool
+
+FM is both the **admin** and a **connected member** of its GDA pool. Units for aggregate settled-but-unclaimed deposits are held on FM's own membership; at `claimDeposit` they transfer from FM to the user.
+
+**Why.**
+
+- Aggregate unit commitment at `settleEpoch` is O(1): `pool.updateMemberUnits(FM, ...)` handles all new depositors with a single call.
+- The pool itself tracks the committed obligation — no auxiliary `pendingUnits` scalar needed.
+- FM's connection means the self-slice of the stream lands in `availableBalanceOf(FM)` in real time. No `getClaimable` reads, no periodic `claimAll` calls.
+- Unclaimed commitments naturally revert value to the system: the stream destined for FM-held units round-trips into FM's balance, strengthening the buffer. Lazy claimers self-penalize; no GC required.
+- The invariant formula collapses to a single expression: `availableBalanceOf(FM) >= actualFlowRate * GUARANTEED_FLOW_DURATION`.
+
+**Implementation notes.**
+
+- FM must call `pool.connectPool()` during initialization.
+- FM's super-token balance holds both the outbound stream funding source and the inbound self-slice credit — SF handles the netting natively via the connection.
+- `distributeFlow(rate)` is always set against `pool.totalUnits` (which includes FM's pending units), so the on-pool flow rate always reflects the full committed obligation.
+
+### D4. Stream solvency invariant is enforced on-chain
 
 ```
-refund_correct = R · Σ (C_i / a_i)
-refund_merged  = R · (Σ C_i)² / Σ (C_i · a_i)
+invariant:  availableBalanceOf(FM) >= actualFlowRate * GUARANTEED_FLOW_DURATION
 ```
 
-By Cauchy–Schwarz: `(Σ C_i / a_i) · (Σ C_i · a_i) ≥ (Σ C_i)²`, with equality iff all `a_i` are equal. Therefore `refund_merged ≤ refund_correct` unconditionally.
+Enforced on every path that can disturb either side (see [enforcement table](#enforcement-points)). Prevents the operator from over-`take`ing FM's liquid balance into the strategy.
 
-**Consequences.**
-- Reserve solvency is preserved — the Reserve never underpays streaming, and retains the merge surplus as buffer.
-- Storage stays O(1) per `(controller, era)`.
-- Users who stack deposits within an era and exit early receive slightly less refund than strict per-deposit accounting would give. This is the cost of the simplification and is considered acceptable.
-- The drift is zero when deposits share an entry timestamp and grows with the spread of entry times within the era.
+**Why duration-based, not balance-based.**
 
-### D2. Time-variable naming convention (resolves I2)
+- Scales automatically with rate and total units — no re-sizing on every rate or deposit change.
+- Expresses the guarantee in the user-facing quantity: "the stream cannot fail sooner than `GUARANTEED_FLOW_DURATION`."
+- Composes cleanly with SF's own liquidation semantics (which are also duration-denominated in the form of a 4-hour-plus-patrician window).
 
-To avoid the overloaded `remainingTimeInEra` symbol previously used in both carve-out and refund formulas, the doc standardizes on two explicit names:
+**Relation to SF's mandatory buffer.** `availableBalanceOf` already excludes SF's own liquidation deposit. `GUARANTEED_FLOW_DURATION` is intentionally larger than SF's deposit horizon — if the custom invariant is violated, the operator has time to act before SF-level liquidation becomes a risk.
 
-| Variable | Definition |
+### D5. Flow rate governance is operational, not era-boundaried
+
+There are no hard on-chain era boundaries. The operator may call `setAnnualRate` at any time, subject to the invariant.
+
+**Rationale.** Under the direct-stream model, the old motivation for eras (discrete profit-harvest moments to top up a separate Reserve) no longer exists. Rate changes follow strategy-performance signals, which are continuous, not quantized.
+
+**Operational convention.** The operator communicates a commitment window (e.g. 6 months) to users and aims to hold `annualRate` stable across it. Mid-window cuts are reserved for material strategy deviations. Rate increases can be applied at any time without UX cost.
+
+**No timelock on rate changes.** Rate adjustments — both up and down — apply immediately on `setAnnualRate`. The operator is trusted to exercise this discretion only when strategy performance warrants it; the on-chain invariant ensures that a rate change cannot render the stream insolvent. A timelock on cuts was considered and rejected as unnecessary ceremony at this stage — it can be added later if the governance model needs to harden.
+
+### D6. Shares are non-transferable
+
+Share tokens minted by the vault are **soul-bound**: users cannot transfer shares to other addresses. Exit is available only via `requestRedeem`.
+
+**Why.**
+
+- Keeps shares and units in lockstep ownership trivially — one holder at a time, always. No drift between the two ledgers.
+- Removes the need for an `_update` transfer hook and the proportional unit-move math that would come with it.
+- Eliminates stream-routing anomalies where shares held by an external protocol would redirect the GDA stream away from the intended beneficiary.
+- Matches the vault profile — a stable-yield fund product with a committed operator and committed rate, not a DeFi primitive where secondary-market liquidity is the value proposition.
+
+**What is given up.** DeFi composability (shares-as-collateral, LP deposits, meta-vault wrapping) and OTC transfers. These can be re-enabled later via an opt-in wrapper token if demand emerges; non-transferability at the core level does not foreclose this path.
+
+**Implementation.** Override public `ERC20.transfer` and `ERC20.transferFrom` to revert. Mint/burn (`claimDeposit`, redeem flow) go through `_update` internally and are unaffected. If the redeem flow moves shares user → vault at `requestRedeem`, use an internal bypass path (not `transferFrom`) — or switch to a "locked balance" accounting pattern where shares stay on the user's balance but are marked as pending-redeem.
+
+## Required Contract Changes
+
+### `FundManager`
+
+**New responsibilities.**
+
+- Own the GDA pool (create at construction, set FM as admin).
+- Be a member of its own pool, connected at init.
+- Hold the super-token wrapper of the underlying; wrap on `give`, unwrap on `take`.
+- Hold `annualRate` and `GUARANTEED_FLOW_DURATION` state.
+- Recalibrate `distributeFlow` on every event that changes `pool.totalUnits` or `annualRate`.
+- Enforce the stream solvency invariant on every in-scope operation.
+
+**Vault-gated entry points (VAULT_ROLE):**
+
+- `onSettleDeposit(uint256 totalDepositAssets)` — aggregate increase of FM's pool units; recalibrate flow; assert invariant.
+- `onSettleRedeem(uint256 totalRedeemAssets)` — asset outflow to RedeemWaitingRoom; assert invariant.
+- `onClaimDeposit(address controller, uint256 depositAssets)` — transfer units FM → controller; no flow change.
+- `onRequestRedeem(address controller, uint256 sharesRedeemed, uint256 totalSharesOwned)` — decrement controller's units proportionally; recalibrate flow.
+
+**Operator-gated entry points (FUND_OPERATOR_ROLE):**
+
+- `setAnnualRate(uint256 newRate)` — update rate, recalibrate flow, assert invariant.
+- `setGuaranteedFlowDuration(uint256 newDuration)` — update duration, assert invariant (growing forces a `give` first; shrinking is trivially safe).
+- `take(uint256 amount)` — unwrap super-token → underlying → operator; assert invariant.
+- `give(uint256 amount)` — operator → underlying → wrap super-token; trivially safe.
+
+### `StableYieldAsyncVault`
+
+**Removed.** All carve-out, refund, `YieldPosition`, and per-era storage. None carry over.
+
+**Added.** Wiring into FM on each lifecycle event:
+
+| Vault function | Calls into FM |
 |---|---|
-| `remainingAtEntry` | `eraEnd − entryTimestamp` — measured at deposit time |
-| `remainingAtExit`  | `eraEnd − block.timestamp` — measured at exit time |
+| `requestDeposit` | none |
+| `settleEpoch` (deposit leg) | `FM.onSettleDeposit(netAssetsIn)` |
+| `claimDeposit` / `mint` | `FM.onClaimDeposit(controller, depositAssets)` |
+| `requestRedeem` | `FM.onRequestRedeem(controller, shares, totalSharesOwned)` |
+| `settleEpoch` (redeem leg) | `FM.onSettleRedeem(netAssetsOut)` |
+| `claimRedeem` / `withdraw` | none |
 
-Storage is unchanged: `YieldPosition.entryTimestamp` remains the source of truth, and `remainingAtEntry` is derived as `eraEnd − entryTimestamp` whenever needed.
+The full deposit amount is recorded in `_pendingDepositRequest` and `totalPendingDepositAssets`. Settlement operates on these directly — no carve-out adjustment.
 
-Formulas now read unambiguously:
-```
-carveOut = assets * annualRate * remainingAtEntry / 1 year
-refund   = carvedAmount * remainingAtExit / remainingAtEntry   (same-era exit)
-```
+**Share non-transferability.** Override public `ERC20.transfer` and `ERC20.transferFrom` to revert (see [D6](#d6-shares-are-non-transferable)). Mint and burn continue to go through `_update` internally as part of the claim/redeem flows. If the existing redeem flow transfers shares via `transferFrom(user, vault)` at `requestRedeem`, switch it to an internal move (bypassing the public lock) or to a locked-balance accounting pattern.
 
-### D3. `annualRate` is a per-era committed rate (resolves I3 and I9)
+### `WaitingRoom` / `DepositWaitingRoom` / `RedeemWaitingRoom`
 
-`annualRate` is the annualized APR that the protocol **commits to stream** to all yield-earning units for the duration of a given era. The commitment is per-era — it is fixed at era start and can be adjusted (up or down) at the next `eraTransition()`.
+No interface changes. Existing `move(recipient, amount)` primitives handle the asset flow. Reserve routing is no longer needed.
 
-**Who sets it.** The fund operator, via a parameter passed to `eraTransition()`. For the very first era, the operator sets it at deployment or via a first-era-only setter.
+### Super-token handling
 
-**How it's chosen.** Informed by the prior era's realized strategy performance, adjusted for available NAV buffer (see Policy below). The operator is trusted to choose a rate the Reserve can actually fund.
+The pool streams in the wrapped super-token of the underlying (e.g. USDCx for USDC).
 
-**GDA unit allocation.**
-- On `requestDeposit`, units are incremented in proportion to the **deposited asset amount** (asset-basis).
-- On `requestRedeem`, units are decremented in proportion to `sharesRedeemed / totalSharesOwned` of the holder's current unit balance.
-- Total units therefore track a stable "asset-basis" denominator that is independent of share-price drift across eras.
-
-**Intra-era rate consistency.** `flowRate` is recomputed on every `requestDeposit` and `requestRedeem` so that `flowRate = Reserve.balance / remainingAtExit` always holds. Combined with correctly-sized carve-outs and proportional unit allocation, this preserves the committed `annualRate` across all units for the full era.
-
-**Excess profit policy (Policy ⓐ — NAV buffer).** At each `eraTransition()`, let:
-```
-requiredTopUp = totalAssets * annualRate * eraDuration / 1 year
-```
-- If `profit ≥ requiredTopUp`: transfer exactly `requiredTopUp` to the Reserve; the surplus stays in FundManager as NAV buffer (share price appreciates).
-- If `0 < profit < requiredTopUp`: transfer `profit`; operator *may* top up the shortfall from accumulated NAV buffer to preserve the committed rate. If the buffer is exhausted, `annualRate` is reduced for the next era.
-- If `profit ≤ 0`: no profit to harvest. Operator may still fund the Reserve from NAV buffer; otherwise `annualRate` is reduced (possibly to zero) for the next era. The principal loss itself is socialized via share price, independent of the yield mechanism.
-
-**Why B over A (pure emergent rate).** Under B, users see a predictable rate within an era. Under A, the rate would drift with every deposit/redeem. B is a stronger UX commitment at the cost of operator discretion at era boundaries.
-
-**What this resolves.**
-- **I3:** `annualRate` is now precisely defined — who sets it, when, with what policy on divergence from strategy performance.
-- **I9:** Units are asset-basis, not share-basis. Partial-withdrawal proportionality is expressed in terms of shares owned (`sharesRedeemed / totalSharesOwned`) rather than requiring shares to exist at request time.
-
-### D4. No separate bootstrap for `flowRate` (resolves I8)
-
-The Reserve's `flowRate` starts at `0` whenever the Reserve is empty — at era 1 start, and at the start of any era where the top-up was zero (hard-miss scenario). No separate bootstrap code is required.
-
-**Why it's self-bootstrapping.** Under [D3](#d3-annualrate-is-a-per-era-committed-rate-resolves-i3-and-i9), `flowRate` is recomputed on every `requestDeposit` and `requestRedeem` as `Reserve.balance / remainingAtExit`. The first deposit of an empty-Reserve era makes the math line up on its own:
-
-```
-Deposit of A assets at time t, remaining-in-era = r
-  carveOut           = A · annualRate · r / year       → Reserve
-  unitsAssigned      = A                                (asset-basis)
-  flowRate (after)   = (A · annualRate · r / year) / r = A · annualRate / year
-  per-unit rate      = flowRate / totalUnits           = annualRate / year  ✓
-```
-
-The committed `annualRate` holds from the very first deposit onward.
-
-**Era 1 seeding.** The operator sets the initial `annualRate` at deployment (or via a first-era-only setter before deposits open). No Reserve pre-funding is required — era 1 is funded entirely by depositors' own carve-outs, as already documented in [Funding source per era](#funding-source-per-era).
-
-**Post-loss era.** When the previous era's transition could not top up the Reserve (hard miss, no NAV buffer), the operator sets `annualRate` for the new era to match whatever the Reserve can fund — often zero. If zero, both carve-outs and `flowRate` remain zero for that era, which is the correct behavior: no commitment made, no commitment owed.
+- FM holds super-tokens as its liquid balance.
+- Wrap on `give` (pulled in from strategy or settlement).
+- Unwrap on `take` (pushed out to strategy).
+- Settlement to/from waiting rooms may operate in underlying or super-token — to be decided at implementation. Staying in super-token throughout FM minimizes wrap/unwrap overhead.
 
 ## Open Questions
 
-- **Refund delivery mechanism:** Transfer directly on `requestRedeem`, or bundle into the redeem claim settled via RedeemClaimingRoom?
-- **Era duration governance:** Fixed at deployment, or adjustable by the fund operator?
+All prior design-level open questions are resolved:
+
+| Question | Resolution |
+|---|---|
+| `GUARANTEED_FLOW_DURATION` sizing | Set at deployment (default 7 days), operator-adjustable via `setGuaranteedFlowDuration` with post-check on the invariant. |
+| Rate-cut timelock | None — rate changes apply immediately in both directions ([D5](#d5-flow-rate-governance-is-operational-not-era-boundaried)). |
+| Strategy harvest cadence | Coupled to each `settleEpoch` cycle, sized by the epoch's deposit/redeem ratio (see [Settlement → Harvest cadence](#settlement)). |
+| Super-token choice | Canonical wrapper of the underlying (e.g. USDC → USDCx). FM operates in super-token internally; wrap/unwrap brackets `give` / `take`. |
+| Share transferability | Non-transferable ([D6](#d6-shares-are-non-transferable)). |
+
+Remaining items are implementation-detail choices, not design questions:
+
+- **Minimum floor on `GUARANTEED_FLOW_DURATION`.** A sanity guard (e.g. 1 day) against operator error when calling `setGuaranteedFlowDuration` — not strictly needed under the trusted-operator model, but cheap.
+- **ERC-7540 share-lock mechanism at `requestRedeem`.** Given non-transferability, choose between an internal move to the vault vs. a locked-balance accounting pattern. Both are viable; implementation will pick based on minimal change to the existing redeem flow.
