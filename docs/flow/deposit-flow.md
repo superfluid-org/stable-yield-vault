@@ -4,71 +4,77 @@
 
 | Contract | Role |
 |---|---|
-| **AsyncVault** | Accepts deposit requests, share accounting, orchestrates settlement |
-| **DepositWaitingRoom** | Escrows pending deposit assets. Not counted in `totalAssets` |
-| **FundManager** | Holds unutilized assets + working asset receipts. Sole source of NAV |
-| **StableYieldReserve** | Manages GDA yield distribution, updates units |
-| **GDA** | Superfluid General Distribution Agreement — streams yield to unit holders |
-| **Fund Operator** | EOA/bot that triggers epoch settlement and capital allocation |
+| **StableYieldAsyncVault** | ERC-7540 vault. Accepts deposit requests, custodies pending deposit assets, mints shares at claim time |
+| **FundManager** | Holds unutilized assets (as super-token), reports NAV, drives epoch settlement, operates the GDA pool |
+| **GDA Pool** | Superfluid pool owned by the FundManager. Streams yield (in super-token) to unit holders |
+| **Fund Operator** | EOA/bot holding `FUND_OPERATOR_ROLE`. Triggers epoch settlement and manages capital in/out of the FundManager |
+
+Note: `DepositWaitingRoom` and `StableYieldReserve` are no longer separate contracts. The vault itself escrows pending deposit assets, and the FundManager owns the GDA pool.
 
 ## Asset states
 
 | State | Location | Description |
 |---|---|---|
 | ASSETS | Investor wallet | Underlying tokens held by the investor |
-| DEPOSITING ASSETS | DepositWaitingRoom | Pending deposit, awaiting epoch settlement. Not part of NAV |
-| UNUTILIZED ASSETS | FundManager | Settled assets, not yet deployed to investment |
-| WORKING ASSETS | Underlying Investment | Deployed capital, generating yield (onchain or offchain) |
+| PENDING DEPOSIT ASSETS | StableYieldAsyncVault | Pending deposits awaiting settlement. Tracked by `totalPendingDepositAssets`. Not part of NAV |
+| UNUTILIZED ASSETS | FundManager (super-token) | Settled assets available to cover redeems or be taken out for investment. Equals `unutilizedAssetsBalance()` |
+| WORKING ASSETS | External investment | Assets taken out of the FundManager (via `take`) and deployed; reported back to `closeEpoch` as `workingAssets` |
 
 ## Sequence diagram
 
 ```mermaid
 sequenceDiagram
     participant I as Investor
-    participant AV as AsyncVault
-    participant DWR as DepositWaitingRoom
-    participant SYR as StableYieldReserve
-    participant GDA as GDA
+    participant AV as StableYieldAsyncVault
     participant FM as FundManager
+    participant POOL as GDA Pool
     participant FO as Fund Operator
-    participant INV as Underlying Investment
+    participant INV as External Investment
 
     rect rgb(230, 245, 255)
-    Note over I, GDA: Phase 1 — Request
+    Note over I, AV: Phase 1 — Request
     I->>AV: (1.1) requestDeposit(assets, controller, owner)
-    Note right of I: Transfer underlying assets
-    AV->>DWR: (1.2) transfer pending underlying
-    Note right of DWR: Assets held in escrow<br/>Not counted in NAV
-    AV-->>SYR: (1.3) transfer yield provision (?)
-    Note right of SYR: OPEN QUESTION: timing
-    SYR-->>GDA: (1.4) increase units
-    Note right of GDA: Investor starts streaming yield
+    Note right of I: Transfer underlying to vault
+    Note right of AV: Custody in vault balance<br/>totalPendingDepositAssets += assets<br/>Not part of NAV<br/>No GDA units granted yet (D2)
     end
 
     rect rgb(255, 245, 230)
-    Note over FO, FM: Phase 2 — Settlement (two-phase)
-    FO->>AV: (2.1) closeEpoch()
-    Note right of AV: Snapshot pending flows<br/>Lock epoch rate from FM.totalValue()<br/>Advance currentEpoch (new requests go to next)<br/>settlingEpoch = snapshotted epoch
-    Note right of FO: Operator reads exact snapshot,<br/>no estimation needed
-    FO->>AV: (2.2) settleEpoch()
-    AV->>DWR: (2.3) unlock funds
-    DWR->>FM: (2.4) transfer unlocked underlying
-    Note right of FM: Assets become UNUTILIZED
-    Note right of AV: Store rate under settlingEpoch,<br/>clear snapshot, mark settled
+    Note over FO, AV: Phase 2 — closeEpoch (snapshot & lock)
+    FO->>FM: (2.1) closeEpoch(workingAssets)
+    FM->>AV: closeEpoch(workingAssets + unutilizedAssetsBalance())
+    Note right of AV: Snapshot pending flows<br/>Lock epoch rate = totalFundAssets / effectiveSupply<br/>Advance currentEpoch (new requests rejected while snapshot open)
+    end
+
+    rect rgb(255, 245, 230)
+    Note over FO, POOL: Phase 3 — settleEpoch (net flows)
+    FO->>FM: (3.1) settleEpoch()
+    FM->>AV: settleEpoch()
+    Note right of AV: Uses locked snapshot
+    alt depositing >= redeeming
+        AV->>FM: (3.2) transfer surplus = depositing - redeeming
+        Note right of FM: Wrap arriving underlying into super-token
+    else depositing < redeeming
+        Note right of AV: No deposit-side asset movement in this branch
+    end
+    FM->>POOL: (3.3) FM.units += depositingAssets (scaled)<br/>recalibrate flow rate
     end
 
     rect rgb(230, 255, 230)
-    Note over I, AV: Phase 3 — Claim
-    I->>AV: (3) deposit(assets, receiver, controller)
-    AV->>I: mint shares
-    Note right of I: No asset movement<br/>Assets already in FundManager
+    Note over I, POOL: Phase 4 — Claim
+    I->>AV: (4.1) deposit(assets, receiver, controller)<br/>or mint(shares, receiver, controller)
+    Note right of AV: Lazy-settle pending → claimable at epoch rate<br/>Mint shares to receiver (no asset movement)
+    AV->>FM: (4.2) onClaimDeposit(receiver, assets)
+    FM->>POOL: Transfer units from FM → receiver
+    Note right of POOL: Investor now receives the yield stream
     end
 
     rect rgb(245, 240, 255)
-    Note over FO, INV: Phase 4 — Capital allocation (independent)
-    FO->>FM: (4.1) allocate
-    FM->>INV: deploy assets
-    Note right of INV: Assets become WORKING
+    Note over FO, INV: Operator capital management (independent of settlement)
+    FO->>FM: take(amount)  %% pull underlying out to deploy
+    FM->>FO: underlying
+    FO->>INV: deploy
+    INV-->>FO: returns / rewards
+    FO->>FM: give(amount)  %% return underlying to FM
     end
 ```
 
@@ -77,115 +83,158 @@ sequenceDiagram
 ### Phase 1: Request
 
 ```
-(1.1) Investor → AsyncVault: requestDeposit(assets, controller, owner)
-      - Underlying assets transferred from investor to AsyncVault
-      - AsyncVault accrues pending deposit for controller
-      - totalPendingDepositAssets increased
-
-(1.2) AsyncVault → DepositWaitingRoom: transfer pending underlying
-      - Assets moved from AsyncVault to DepositWaitingRoom
-      - These assets are NOT counted in totalAssets / NAV
-      - They are held in escrow until epoch settlement
-
-(1.3) AsyncVault → StableYieldReserve: transfer yield provision (?)
-      - A fraction of the deposit (annualized yield) is sent to
-        StableYieldReserve to fund the GDA stream
-      - OPEN QUESTION: timing of this step — see open-questions.md #2
-        (may happen at request time, settlement time, or claim time)
-
-(1.4) StableYieldReserve → GDA: increase units
-      - Controller's GDA units are increased
-      - Investor begins receiving streaming yield
-      - OPEN QUESTION: same timing dependency as (1.3)
+(1.1) Investor → Vault: requestDeposit(assets, controller, owner)
+      - Reverts if a settlement is in progress (snapshot.epoch != 0)
+      - Reverts if assets == 0
+      - msg.sender must be owner or an approved operator of owner
+      - Lazy-settles any prior pending deposit this controller has from a settled epoch
+      - Transfers `assets` from owner → vault (vault custodies directly)
+      - totalPendingDepositAssets += assets
+      - _pendingDepositRequest[controller] += assets
+      - _depositRequestEpoch[controller] = currentEpoch
+      - Emits DepositRequest; returns requestId = 0
 ```
 
-### Phase 2: Settlement (two-phase)
+No GDA units are granted at this step. Per design decision D2, the yield stream
+commences at claim time, not at request time.
 
-Settlement is split into two operator-triggered calls. See `open-questions.md #1`
-for rationale.
-
-```
-(2.1) Fund Operator → AsyncVault: closeEpoch()
-      - AsyncVault snapshots the pending flows:
-        snapshot.depositAssets = totalPendingDepositAssets
-        snapshot.redeemShares  = totalPendingRedeemShares
-      - AsyncVault computes and locks the epoch rate:
-        effectiveAssets = FundManager.totalValue()
-        effectiveSupply = totalSupply()
-        snapshot.rate = effectiveAssets / effectiveSupply
-      - AsyncVault advances currentEpoch (new requests go to next epoch)
-      - settlingEpoch = the snapshotted epoch
-      - Pending requests in settlingEpoch are frozen:
-        they cannot be claimed yet
-
-Between (2.1) and (2.2): Operator has exact numbers, no estimation needed.
-                        This is the window to ensure FundManager liquidity.
-
-(2.2) Fund Operator → AsyncVault: settleEpoch()
-      - Uses the locked snapshot — no recomputation
-
-(2.3) AsyncVault → DepositWaitingRoom: unlock funds
-      - AsyncVault instructs DepositWaitingRoom to release the
-        pending deposit assets for the settling epoch
-
-(2.4) DepositWaitingRoom → FundManager: transfer unlocked underlying
-      - Deposit assets move to FundManager as UNUTILIZED ASSETS
-      - NOTE: In a mixed deposit/redeem epoch, some of these assets
-        may flow to RedeemClaimingRoom instead (netting — see settlement-flow.md)
-
-      AsyncVault stores the rate under settlingEpoch, clears the snapshot,
-      marks the epoch as settled.
-```
-
-### Phase 3: Claim
+### Phase 2: closeEpoch (snapshot & lock)
 
 ```
-(3) Investor → AsyncVault: deposit(assets, receiver, controller)
-    or mint(shares, receiver, controller)
-    - Lazy settlement resolves pending → claimable if needed
-    - Pending deposit assets are converted to claimable shares
-      at the epoch rate from when the request was settled
-    - AsyncVault mints shares to receiver
-    - No asset movement at this step (assets already moved during settlement)
+(2.1) Operator → FundManager: closeEpoch(workingAssets)
+      - Only callable by an account with FUND_OPERATOR_ROLE
+      - FM computes totalFundAssets = workingAssets + unutilizedAssetsBalance()
+      - FM calls Vault.closeEpoch(totalFundAssets)
+      - Vault reverts if totalFundAssets == 0 (total-loss scenarios rejected)
+      - Vault reverts if the previous snapshot has not been settled
+      - Vault computes effectiveSupply
+            = totalSupply + _unclaimedDepositShares - _unclaimedRedeemShares
+        (phantom shares for settled-but-unclaimed deposits are added;
+         dead shares still in totalSupply for settled-but-unclaimed redeems
+         are subtracted)
+      - Vault locks epoch rate
+            = effectiveSupply == 0 ? 1e18 : totalFundAssets * 1e18 / effectiveSupply
+      - Vault snapshots
+            { epoch, depositingAssets, redeemingShares, rate }
+      - Vault zeroes totalPendingDepositAssets and totalPendingRedeemShares
+      - Vault increments currentEpoch (new requests land in the next epoch)
+      - While a snapshot is open, requestDeposit / requestRedeem revert
+        with EPOCH_SETTLEMENT_IN_PROGRESS
 ```
 
-### Phase 4: Capital allocation (independent of settlement)
+### Phase 3: settleEpoch (net flows & credit units)
 
 ```
-(4.1) Fund Operator → FundManager: allocate
-      - Operator deploys unutilized assets into the underlying investment
-      - Can be onchain (via an adapter interface exposing deposit/withdraw)
-        or offchain (operator withdraws from FundManager and invests manually)
-      - Assets transition from UNUTILIZED to WORKING
-      - This step is decoupled from epoch settlement — operator decides
-        when and how much to allocate
+(3.1) Operator → FundManager: settleEpoch()
+      - Only callable by an account with FUND_OPERATOR_ROLE
+      - FM reads the snapshot from the vault (must be read before the vault
+        deletes it inside settleEpoch)
+      - FM snapshots its underlying balance, then calls Vault.settleEpoch()
+
+      Inside Vault.settleEpoch():
+        - redeemingAssets = snap.redeemingShares * snap.rate / 1e18
+        - totalClaimableRedeemAssets += redeemingAssets   (earmark in vault)
+        - If depositing >= redeeming:
+            surplus = depositing - redeeming
+            vault.safeTransfer(fundManager, surplus)       (3.2)
+          Else:
+            deficit = redeeming - depositing
+            fundManager.move(vault, deficit)
+              → FM downgrades super-token and transfers underlying to vault
+        - _unclaimedDepositShares += depositing / rate
+        - _unclaimedRedeemShares  += redeemingShares
+        - _epochRate[settlingEpoch] = rate
+        - _epochSettled[settlingEpoch] = true
+        - Emit EpochSettled; clear snapshot
+
+      Back in FM.settleEpoch():
+        - Any underlying that arrived (net-inflow surplus) is upgraded
+          to super-token
+        - If snap.depositingAssets > 0:                     (3.3)
+            FM grants itself pool units equal to
+              depositingAssets * SUPER_TOKEN_SCALE
+            Then _recalibrateFlow(): flowRate = totalUnits * annualRate / YEAR
+        - _assertInvariant(): superToken.availableBalance must cover
+            totalFlowRate * guaranteedFlowDuration
 ```
+
+The freshly-minted units belong to FM until individual depositors claim. FM
+"self-receives" its own unit share of the flow during this interim.
+
+### Phase 4: Claim
+
+```
+(4.1) Investor → Vault: deposit(assets, receiver, controller)
+      or        mint(shares, receiver, controller)
+      or the 2-arg ERC-4626 overloads (msg.sender becomes the controller)
+      - msg.sender must be controller or an approved operator
+      - Lazy-settles pending → claimable at the settled epoch's rate
+      - Reverts with NOTHING_TO_CLAIM if nothing is claimable
+      - Proportional deduction from _claimableDepositAssets / _claimableDepositShares
+      - Vault mints shares to receiver (no asset movement — assets were
+        pushed to FM during settlement, or kept to cover redeems)
+
+(4.2) Vault → FundManager: onClaimDeposit(receiver, assets)
+      - FM transfers `assets * SUPER_TOKEN_SCALE` units from its own
+        pool slot to `receiver` (no flow-rate change, no totalUnits change)
+      - Investor now receives the yield stream in the underlying's super-token
+```
+
+### Operator capital management (independent of settlement)
+
+```
+FO → FM: take(amount)
+      - Downgrades super-token → underlying, transfers to operator
+      - Asserts the forward-solvency invariant post-move
+      - Used to deploy assets into external / offchain investments
+         (these become WORKING assets; their value is reported back via
+          workingAssets on the next closeEpoch)
+
+FO → FM: give(amount)
+      - Pulls underlying from operator, upgrades to super-token
+      - Used to return realized gains / liquidated principal to the FM
+```
+
+`take` / `give` are not gated by the settlement lifecycle — the operator can
+move capital in/out at any time, provided the forward-solvency invariant holds.
 
 ## ERC-7540 compliance
 
-- `requestDeposit` transfers assets from the investor (ERC-7540 compliant)
-- Assets are forwarded to DepositWaitingRoom — internal implementation detail,
-  invisible to the ERC-7540 interface
-- `deposit`/`mint` claim shares from claimable requests without transferring
-  assets (assets were already transferred on requestDeposit)
-- `pendingDepositRequest` returns pending assets for a controller
-- `claimableDepositRequest` returns claimable assets (converted from internal
-  claimable shares at the last settled rate)
+- `requestDeposit` transfers assets from the owner to the vault.
+- `deposit` / `mint` (2-arg and 3-arg) consume claimable balances without
+  transferring assets — assets were already transferred at request time.
+- `pendingDepositRequest` returns the pending assets (zero once the request's
+  epoch has been settled; the balance moves to `claimableDepositRequest`).
+- `claimableDepositRequest` returns claimable assets, including pending that
+  has become claimable by virtue of the epoch having been settled.
+- `previewDeposit` / `previewMint` revert — required for async vaults.
+- Shares are ERC-20 but non-transferable: `transfer` / `transferFrom` revert
+  with `SHARES_NON_TRANSFERABLE`.
 
 ## Key invariants
 
-1. **DepositWaitingRoom assets are never counted in NAV.**
-   They are pending inflows that haven't generated shares yet.
+1. **Vault underlying balance partition.** At quiescent state,
+   `underlyingAsset.balanceOf(vault) == totalPendingDepositAssets + totalClaimableRedeemAssets`.
+   Pending deposit assets and claimable redeem assets coexist in the vault's
+   balance; the two counters keep them separable.
 
-2. **Epoch rate is computed solely from FundManager.totalValue() / effectiveSupply,
-   and is locked at closeEpoch time.**
-   Clean separation between pending flows and settled capital.
+2. **Pending deposit assets are not counted in NAV.** `closeEpoch` prices the
+   epoch using `totalFundAssets` (working + unutilized at the FM) and
+   `effectiveSupply`, both of which exclude pending deposits.
 
-3. **Shares are minted at claim time, not settlement time** (per ERC-7540).
-   The epoch rate is locked at closeEpoch; the actual minting happens when
-   the investor calls deposit/mint after settleEpoch.
+3. **effectiveSupply correction.** `effectiveSupply = totalSupply +
+   unclaimedDepositShares − unclaimedRedeemShares`. This corrects for the lag
+   between settlement (assets move) and claim (shares mint/burn).
 
-4. **Claims are only possible after the epoch is SETTLED**, not just closed.
+4. **Rate is locked at closeEpoch.** All requests in a given epoch settle at
+   the same `assetsPerShare` (forward pricing).
 
-5. **Forward pricing:** all deposit requests within an epoch receive the same
-   exchange rate, determined at closeEpoch.
+5. **Shares mint at claim time, not settlement time** (ERC-7540).
+
+6. **Stream starts at claim time** (D2). Units are transferred from FM to the
+   controller only when they call `deposit` / `mint`.
+
+7. **Settlement serialized.** Between `closeEpoch` and `settleEpoch`, new
+   `requestDeposit` / `requestRedeem` calls revert with
+   `EPOCH_SETTLEMENT_IN_PROGRESS`. A previous epoch must be settled before a
+   new one can close.
