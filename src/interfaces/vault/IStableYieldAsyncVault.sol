@@ -52,6 +52,29 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
         uint256 rate;
     }
 
+    /**
+     * @notice State of a controller's vaults interactions
+     * @dev Used to track the epoch of pending deposit and redeem requests
+     * @param depositRequestEpoch Tracks which epoch the controller's pending deposit request belongs to (0 is none)
+     * @param pendingDepositAssets Assets that the controller has requested to deposit (not yet settled)
+     * @param claimableDepositAssets Assets corresponding to the controller's claimable shares (already settled)
+     * @param claimableDepositShares Shares that the controller can claim from settled deposits (already settled)
+     * @param redeemRequestEpoch Tracks which epoch the controller's pending redeem request belongs to (0 is none)
+     * @param pendingRedeemShares Shares that the controller has requested to redeem (not yet settled)
+     * @param claimableRedeemShares Shares corresponding to the controller's claimable assets (already settled)
+     * @param claimableRedeemAssets Assets that the controller can claim from settled redeems (already settled)
+     */
+    struct ControllerState {
+        uint256 depositRequestEpoch;
+        uint256 pendingDepositAssets;
+        uint256 claimableDepositAssets;
+        uint256 claimableDepositShares;
+        uint256 redeemRequestEpoch;
+        uint256 pendingRedeemShares;
+        uint256 claimableRedeemShares;
+        uint256 claimableRedeemAssets;
+    }
+
     // ──────────────────────────────────────────────
     //  Errors
     // ──────────────────────────────────────────────
@@ -69,6 +92,15 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     error NO_EPOCH_TO_SETTLE();
     error EPOCH_SETTLEMENT_IN_PROGRESS();
     error NOTHING_TO_CLAIM();
+
+    /// @notice Thrown when attempting to set a reference that has already been wired post-deploy.
+    error ALREADY_SET();
+
+    /// @notice Thrown when share transfers are attempted. Shares are non-transferable by design (D6).
+    error SHARES_NON_TRANSFERABLE();
+
+    /// @notice Thrown when an operation requires the FundManager to be set but it has not been.
+    error FUND_MANAGER_NOT_SET();
 
     // ──────────────────────────────────────────────
     //  Events
