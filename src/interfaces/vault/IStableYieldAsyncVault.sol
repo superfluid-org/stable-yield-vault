@@ -15,8 +15,9 @@ import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 ///           1. Users call requestDeposit / requestRedeem during an epoch
 ///           2. Operator calls closeEpoch() to snapshot pending flows and lock the epoch rate
 ///           3. Operator ensures FundManager liquidity (may liquidate working assets)
-///           4. Operator calls settleEpoch() to net deposit/redeem flows and move funds
-///              between DepositWaitingRoom, RedeemWaitingRoom, and FundManager
+///           4. Operator calls settleEpoch() to net deposit/redeem flows — surplus deposits
+///              are pushed to the FundManager, or a deficit is pulled from it to cover redeems.
+///              Pending deposits and claimable redeems are both custodied by the vault itself.
 ///           5. Users call deposit/mint or redeem/withdraw to claim
 ///              (lazy settlement resolves pending → claimable on interaction)
 ///
@@ -139,9 +140,10 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     /// @notice Finalize the settlement of a previously closed epoch.
     /// @dev Must be called after closeEpoch(). Uses the locked snapshot and rate to:
     ///        1. Convert pending redeems to asset terms at the epoch rate
-    ///        2. Net deposit/redeem flows and move funds between
-    ///           DepositWaitingRoom, RedeemWaitingRoom, and FundManager
-    ///        3. Store the epoch rate and mark the epoch as settled
+    ///        2. Net deposit/redeem flows: push surplus deposits to the FundManager,
+    ///           or pull a deficit from the FundManager to cover redeems
+    ///        3. Earmark redeemable assets inside the vault for later claims
+    ///        4. Store the epoch rate and mark the epoch as settled
     ///      Pending requests from the closed epoch become claimable (lazily) after this call.
     function settleEpoch() external;
 

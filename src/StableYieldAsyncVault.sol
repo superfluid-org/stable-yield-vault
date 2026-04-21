@@ -3,7 +3,6 @@ pragma solidity ^0.8.34;
 
 import { IFundManager } from "./interfaces/IFundManager.sol";
 
-import { IWaitingRoom } from "./interfaces/IWaitingRoom.sol";
 import {
     IERC4626,
     IERC7540Deposit,
@@ -75,12 +74,27 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     Snapshot private _snapshot;
     IERC20 public underlyingAsset;
     IFundManager public fundManager;
-    IWaitingRoom public redeemWaitingRoom;
-    IWaitingRoom public depositWaitingRoom;
+
+    /// @notice Address permitted to wire the FundManager post-deploy.
+    ///         Required to break the construction cycle between Vault and FundManager.
+    address public immutable DEPLOYER;
 
     uint256 public currentEpoch;
     uint256 public totalPendingDepositAssets;
     uint256 public totalPendingRedeemShares;
+
+    /// @notice Asset balance the vault holds as earmark for settled-but-unclaimed redeems.
+    ///         Invariant: `underlyingAsset.balanceOf(vault) == totalPendingDepositAssets + totalClaimableRedeemAssets`.
+    uint256 public totalClaimableRedeemAssets;
+
+    /// @notice Thrown when attempting to set a reference that has already been wired post-deploy.
+    error ALREADY_SET();
+
+    /// @notice Thrown when share transfers are attempted. Shares are non-transferable by design (D6).
+    error SHARES_NON_TRANSFERABLE();
+
+    /// @notice Thrown when an operation requires the FundManager to be set but it has not been.
+    error FUND_MANAGER_NOT_SET();
 
     //     ______                 __                  __
     //    / ____/___  ____  _____/ /________  _______/ /_____  _____
@@ -90,28 +104,28 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /**
      * @notice Initializes the vault with the underlying asset and share token metadata.
+     * @dev    The FundManager address must be wired via `setFundManager` after deployment.
+     *         This breaks the construction cycle between Vault and FundManager (FM needs Vault).
      * @param _underlyingAsset The address of the underlying ERC-20 asset.
-     * @param _fundManager The address of the FundManager contract
-     * @param _redeemWaitingRoom The address of the Redeem WaitingRoom contract
-     * @param _depositWaitingRoom The address of the Deposit WaitingRoom contract
      * @param name The name of the share token.
      * @param symbol The symbol of the share token.
      */
-    constructor(
-        IERC20 _underlyingAsset,
-        address _fundManager,
-        address _redeemWaitingRoom,
-        address _depositWaitingRoom,
-        string memory name,
-        string memory symbol
-    ) ERC20(name, symbol) {
+    constructor(IERC20 _underlyingAsset, string memory name, string memory symbol) ERC20(name, symbol) {
         underlyingAsset = _underlyingAsset;
-        fundManager = IFundManager(_fundManager);
-        redeemWaitingRoom = IWaitingRoom(_redeemWaitingRoom);
-        depositWaitingRoom = IWaitingRoom(_depositWaitingRoom);
+        DEPLOYER = msg.sender;
 
         // Initialize the first epoch to 1
         currentEpoch = 1;
+    }
+
+    /**
+     * @notice One-shot setter wiring the FundManager address after deployment. Callable once by DEPLOYER.
+     * @param _fundManager Address of the deployed FundManager.
+     */
+    function setFundManager(address _fundManager) external {
+        if (msg.sender != DEPLOYER) revert INVALID_CALLER();
+        if (address(fundManager) != address(0)) revert ALREADY_SET();
+        fundManager = IFundManager(_fundManager);
     }
 
     //      ______     __                        __   ______                 __  _
@@ -132,12 +146,14 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Lazy-settle any pending deposit from a previous epoch
         _settleDepositIfNeeded(controller);
 
-        // Transfer the underlying asset from the owner to the DepositWaitingRoom contract
-        underlyingAsset.safeTransferFrom(owner, address(depositWaitingRoom), assets);
+        // Pending deposits are custodied by the vault itself until settlement.
+        underlyingAsset.safeTransferFrom(owner, address(this), assets);
 
         // Accrue the assets deposited by this controller
         _pendingDepositRequest[controller] += assets;
         totalPendingDepositAssets += assets;
+
+        // Record the epoch of this deposit request
         _depositRequestEpoch[controller] = currentEpoch;
 
         emit DepositRequest(controller, owner, requestId, msg.sender, assets);
@@ -170,6 +186,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         if (shares == 0) revert INVALID_PARAMETERS();
         if (owner != msg.sender && !_isOperator[owner][msg.sender]) revert INVALID_CALLER();
         if (_snapshot.epoch != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
+        if (address(fundManager) == address(0)) revert FUND_MANAGER_NOT_SET();
 
         // no requestId associated with this request
         requestId = 0;
@@ -177,8 +194,17 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Lazy-settle any pending redeem from a previous epoch
         _settleRedeemIfNeeded(controller);
 
-        // Transfer the shares from the owner to this contract
-        transferFrom(owner, address(this), shares);
+        // Snapshot the owner's share balance BEFORE the share lock — this is the denominator
+        // used by FM to compute the proportional unit decrement. Must be read pre-lock.
+        uint256 totalSharesOwned = balanceOf(owner);
+        if (shares > totalSharesOwned) revert INVALID_PARAMETERS();
+
+        // Inform FM to decrement units and recalibrate the GDA flow. Must happen before the
+        // share lock so `totalSharesOwned` reflects unit-backed holdings.
+        fundManager.onRequestRedeem(controller, shares, totalSharesOwned);
+
+        // Transfer the shares from the owner to this contract via the internal path
+        _transfer(owner, address(this), shares);
 
         // Accrue the shares pending to be redeemed by this controller
         _pendingRedeemRequest[controller] += shares;
@@ -243,29 +269,21 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         // Convert pending redeeming shares to asset terms using the epoch rate
         uint256 redeemingAssets = _snapshot.redeemingShares.mulDiv(_snapshot.rate, 1e18);
 
+        // Earmark the redeemable assets against vault balance. Deposits and claimable redeems
+        // coexist in the vault's underlying balance; this counter partitions the two.
+        totalClaimableRedeemAssets += redeemingAssets;
+
         if (_snapshot.depositingAssets >= redeemingAssets) {
-            if (redeemingAssets > 0) {
-                // Move redeemable assets from DepositWaitingRoom to RedeemWaitingRoom
-                depositWaitingRoom.move(address(redeemWaitingRoom), redeemingAssets);
-            }
-
-            // Calculate surplus of deposits over redeems in asset terms
+            // Deposits cover redeems; push the surplus to the FundManager for investment.
             uint256 surplus = _snapshot.depositingAssets - redeemingAssets;
-
             if (surplus > 0) {
-                // Move surplus from DepositWaitingRoom to FundManager
-                depositWaitingRoom.move(address(fundManager), surplus);
+                underlyingAsset.safeTransfer(address(fundManager), surplus);
             }
         } else {
-            if (_snapshot.depositingAssets > 0) {
-                // Move depositing assets from DepositWaitingRoom to RedeemWaitingRoom
-                depositWaitingRoom.move(address(redeemWaitingRoom), _snapshot.depositingAssets);
-            }
-
+            // Deposits fall short; pull the deficit from the FundManager to cover redeems.
+            // FM downgrades its super-token and transfers underlying into this vault.
             uint256 deficit = redeemingAssets - _snapshot.depositingAssets;
-
-            // Move deficit from FundManager to RedeemWaitingRoom
-            fundManager.move(address(redeemWaitingRoom), deficit);
+            fundManager.move(address(this), deficit);
         }
 
         // Track unclaimed positions for effective supply adjustment in future closeEpoch calls
@@ -290,6 +308,18 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         _isOperator[msg.sender][operator] = approved;
         emit OperatorSet(msg.sender, operator, approved);
         success = true;
+    }
+
+    /// @inheritdoc IERC20
+    /// @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design
+    function transfer(address, uint256) public pure override(ERC20, IERC20) returns (bool) {
+        revert SHARES_NON_TRANSFERABLE();
+    }
+
+    /// @inheritdoc IERC20
+    /// @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design
+    function transferFrom(address, address, uint256) public pure override(ERC20, IERC20) returns (bool) {
+        revert SHARES_NON_TRANSFERABLE();
     }
 
     //   _    ___                 ______                 __  _
@@ -321,12 +351,8 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC7540Deposit
     function pendingDepositRequest(uint256, address controller) external view returns (uint256 assets) {
-        uint256 pending = _pendingDepositRequest[controller];
-
         // If the epoch has been settled, this is no longer truly pending (it's claimable)
-        if (pending > 0 && isEpochSettled(_depositRequestEpoch[controller])) return 0;
-
-        assets = pending;
+        assets = isEpochSettled(_depositRequestEpoch[controller]) ? 0 : _pendingDepositRequest[controller];
     }
 
     /// @inheritdoc IERC7540Deposit
@@ -336,10 +362,8 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC7540Redeem
     function pendingRedeemRequest(uint256, address controller) external view returns (uint256 shares) {
-        uint256 pending = _pendingRedeemRequest[controller];
         // If the epoch has been settled, this is no longer truly pending (it's claimable)
-        if (pending > 0 && isEpochSettled(_redeemRequestEpoch[controller])) return 0;
-        shares = pending;
+        shares = isEpochSettled(_redeemRequestEpoch[controller]) ? 0 : _pendingRedeemRequest[controller];
     }
 
     /// @inheritdoc IERC7540Redeem
@@ -414,10 +438,8 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IStableYieldAsyncVault
     function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
-        return interfaceId == 0xe3bc4e65 // IERC7540Operator
-            || interfaceId == 0x2f0a18c5 // IERC7575
-            || interfaceId == 0xce3bbe50 // IERC7540Deposit
-            || interfaceId == 0x620ee8e4; // IERC7540Redeem
+        return interfaceId == type(IERC7540Operator).interfaceId || interfaceId == type(IERC7575).interfaceId
+            || interfaceId == type(IERC7540Deposit).interfaceId || interfaceId == type(IERC7540Redeem).interfaceId;
     }
 
     //      ____      __                        __   ______                 __  _
@@ -445,6 +467,10 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
         _mint(receiver, shares);
 
+        // Transfer GDA units from FM's pending-member slot to the receiver.
+        // Per D2, stream commences at claim time (not request time).
+        fundManager.onClaimDeposit(receiver, assets);
+
         emit Deposit(msg.sender, receiver, assets, shares);
     }
 
@@ -466,6 +492,9 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
         _mint(receiver, shares);
 
+        // Transfer GDA units from FM's pending-member slot to the receiver.
+        fundManager.onClaimDeposit(receiver, assets);
+
         emit Deposit(msg.sender, receiver, assets, shares);
     }
 
@@ -485,12 +514,13 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         _claimableRedeemShares[controller] -= shares;
         _claimableRedeemAssets[controller] -= assets;
         _unclaimedRedeemShares -= shares;
+        totalClaimableRedeemAssets -= assets;
 
         // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
 
-        // Redeem assets for the receiver from the RedeemWaitingRoom
-        redeemWaitingRoom.move(receiver, assets);
+        // Release assets from the vault's earmark to the receiver.
+        underlyingAsset.safeTransfer(receiver, assets);
 
         emit Withdraw(msg.sender, receiver, controller, assets, shares);
     }
@@ -511,12 +541,13 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         _claimableRedeemAssets[controller] -= assets;
         _claimableRedeemShares[controller] -= shares;
         _unclaimedRedeemShares -= shares;
+        totalClaimableRedeemAssets -= assets;
 
         // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
 
-        // Redeem assets for the receiver from the RedeemWaitingRoom
-        redeemWaitingRoom.move(receiver, assets);
+        // Release assets from the vault's earmark to the receiver.
+        underlyingAsset.safeTransfer(receiver, assets);
 
         emit Withdraw(msg.sender, receiver, controller, assets, shares);
     }
