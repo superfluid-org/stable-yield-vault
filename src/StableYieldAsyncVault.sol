@@ -427,118 +427,79 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     function _deposit(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
-
-        // Lazy-settle any pending deposit from a previous epoch
-        _settleDepositIfNeeded(controller);
-
-        ControllerState storage cs = _controllerStates[controller];
-
-        if (cs.claimableDepositAssets == 0) revert NOTHING_TO_CLAIM();
-
-        // Proportional deduction: assets is the native unit, derive shares
-        shares = assets.mulDiv(cs.claimableDepositShares, cs.claimableDepositAssets);
-
+        (uint256 claimableAssets, uint256 claimableShares) = _resolveClaimableDeposit(controller);
+        shares = assets.mulDiv(claimableShares, claimableAssets);
         if (shares == 0) revert INVALID_PARAMETERS();
-
-        // Deduct claimed assets and shares from the controller's claimable balances
-        cs.claimableDepositAssets -= assets;
-        cs.claimableDepositShares -= shares;
-
-        // Deduct claimed shares the vault's unclaimed deposit shares
-        _unclaimedDepositShares -= shares;
-
-        _mint(receiver, shares);
-
-        fundManager.onClaimDeposit(receiver, assets);
-
-        emit Deposit(msg.sender, receiver, assets, shares);
+        _claimDeposit(assets, shares, receiver, controller);
     }
 
     function _mintShares(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
-
-        // Lazy-settle any pending deposit from a previous epoch
-        _settleDepositIfNeeded(controller);
-
-        ControllerState storage cs = _controllerStates[controller];
-
-        if (cs.claimableDepositAssets == 0) revert NOTHING_TO_CLAIM();
-
-        // Proportional deduction: shares is the native unit, derive assets
-        assets = shares.mulDiv(cs.claimableDepositAssets, cs.claimableDepositShares, Math.Rounding.Ceil);
-
-        // Deduct claimed assets and shares from the controller's claimable balances
-        cs.claimableDepositShares -= shares;
-        cs.claimableDepositAssets -= assets;
-
-        // Deduct claimed shares the vault's unclaimed deposit shares
-        _unclaimedDepositShares -= shares;
-
-        _mint(receiver, shares);
-
-        fundManager.onClaimDeposit(receiver, assets);
-
-        emit Deposit(msg.sender, receiver, assets, shares);
+        (uint256 claimableAssets, uint256 claimableShares) = _resolveClaimableDeposit(controller);
+        assets = shares.mulDiv(claimableAssets, claimableShares, Math.Rounding.Ceil);
+        _claimDeposit(assets, shares, receiver, controller);
     }
 
     function _redeem(uint256 shares, address receiver, address controller) internal returns (uint256 assets) {
         if (shares == 0) revert INVALID_PARAMETERS();
-
-        // Lazy-settle any pending redeem from a previous epoch
-        _settleRedeemIfNeeded(controller);
-
-        ControllerState storage cs = _controllerStates[controller];
-
-        if (cs.claimableRedeemAssets == 0) revert NOTHING_TO_CLAIM();
-
-        // Proportional deduction: shares is the native unit, derive assets
-        assets = shares.mulDiv(cs.claimableRedeemAssets, cs.claimableRedeemShares);
-
+        (uint256 claimableAssets, uint256 claimableShares) = _resolveClaimableRedeem(controller);
+        assets = shares.mulDiv(claimableAssets, claimableShares);
         if (assets == 0) revert INVALID_PARAMETERS();
-
-        // Deduct claimed assets and shares from the controller's claimable balances
-        cs.claimableRedeemShares -= shares;
-        cs.claimableRedeemAssets -= assets;
-
-        _unclaimedRedeemShares -= shares;
-        totalClaimableRedeemAssets -= assets;
-
-        // Burn shares pre-transferred to this contract in requestRedeem
-        _burn(address(this), shares);
-
-        // Release assets from the vault's earmark to the receiver.
-        underlyingAsset.safeTransfer(receiver, assets);
-
-        emit Withdraw(msg.sender, receiver, controller, assets, shares);
+        _claimRedeem(assets, shares, receiver, controller);
     }
 
     function _withdraw(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
-
-        // Lazy-settle any pending redeem from a previous epoch
-        _settleRedeemIfNeeded(controller);
-
-        ControllerState storage cs = _controllerStates[controller];
-
-        if (cs.claimableRedeemAssets == 0) revert NOTHING_TO_CLAIM();
-
-        // Proportional deduction: assets is the native unit, derive shares
+        (uint256 claimableAssets, uint256 claimableShares) = _resolveClaimableRedeem(controller);
         // Round up so at least 1 share is burned per non-zero withdrawal (favors vault)
-        shares = assets.mulDiv(cs.claimableRedeemShares, cs.claimableRedeemAssets, Math.Rounding.Ceil);
+        shares = assets.mulDiv(claimableShares, claimableAssets, Math.Rounding.Ceil);
+        _claimRedeem(assets, shares, receiver, controller);
+    }
 
-        // Deduct claimed assets and shares from the controller's claimable balances
+    /// @dev Lazy-settles any pending deposit and returns the controller's claimable deposit balances.
+    function _resolveClaimableDeposit(address controller)
+        internal
+        returns (uint256 claimableAssets, uint256 claimableShares)
+    {
+        _settleDepositIfNeeded(controller);
+        ControllerState storage cs = _controllerStates[controller];
+        claimableAssets = cs.claimableDepositAssets;
+        if (claimableAssets == 0) revert NOTHING_TO_CLAIM();
+        claimableShares = cs.claimableDepositShares;
+    }
+
+    /// @dev Lazy-settles any pending redeem and returns the controller's claimable redeem balances.
+    function _resolveClaimableRedeem(address controller)
+        internal
+        returns (uint256 claimableAssets, uint256 claimableShares)
+    {
+        _settleRedeemIfNeeded(controller);
+        ControllerState storage cs = _controllerStates[controller];
+        claimableAssets = cs.claimableRedeemAssets;
+        if (claimableAssets == 0) revert NOTHING_TO_CLAIM();
+        claimableShares = cs.claimableRedeemShares;
+    }
+
+    /// @dev Executes a deposit claim: deducts from claimable, mints shares, notifies FM.
+    function _claimDeposit(uint256 assets, uint256 shares, address receiver, address controller) internal {
+        ControllerState storage cs = _controllerStates[controller];
+        cs.claimableDepositAssets -= assets;
+        cs.claimableDepositShares -= shares;
+        _unclaimedDepositShares -= shares;
+        _mint(receiver, shares);
+        fundManager.onClaimDeposit(receiver, assets);
+        emit Deposit(msg.sender, receiver, assets, shares);
+    }
+
+    /// @dev Executes a redeem claim: deducts from claimable, burns shares, transfers assets.
+    function _claimRedeem(uint256 assets, uint256 shares, address receiver, address controller) internal {
+        ControllerState storage cs = _controllerStates[controller];
         cs.claimableRedeemShares -= shares;
         cs.claimableRedeemAssets -= assets;
-
         _unclaimedRedeemShares -= shares;
         totalClaimableRedeemAssets -= assets;
-
-        // Burn shares pre-transferred to this contract in requestRedeem
         _burn(address(this), shares);
-
-        // Release assets from the vault's earmark to the receiver.
         underlyingAsset.safeTransfer(receiver, assets);
-
         emit Withdraw(msg.sender, receiver, controller, assets, shares);
     }
 
