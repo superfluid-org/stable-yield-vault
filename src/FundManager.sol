@@ -88,30 +88,28 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
      * @notice FundManager contract constructor
      * @param _asset Underlying asset (e.g. USDC) address
      * @param _superToken Wrapped super-token underlying asset
-     * @param _admin Default admin (role manager)
      * @param _fundOperator Operator granted FUND_OPERATOR_ROLE
      * @param _initialAnnualRate Initial annualRate in basis points (10% <=> 1000)
      * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      */
     constructor(
-        IERC20 _asset,
-        ISuperToken _superToken,
-        address _admin,
+        address _asset,
+        address _superToken,
         address _fundOperator,
         uint256 _initialAnnualRate,
         uint256 _initialGuaranteedFlowDuration
     ) {
-        ASSET = _asset;
+        ASSET = IERC20(_asset);
 
         // Verify super-token wraps the correct underlying
-        if (_superToken.getUnderlyingToken() != address(ASSET)) revert NOT_INITIALIZED();
-        SUPER_TOKEN = _superToken;
+        if (ISuperToken(_superToken).getUnderlyingToken() != address(ASSET)) revert NOT_INITIALIZED();
+        SUPER_TOKEN = ISuperToken(_superToken);
 
-        uint8 underlyingDecimals = _superToken.getUnderlyingDecimals();
+        uint8 underlyingDecimals = ISuperToken(_superToken).getUnderlyingDecimals();
         SUPER_TOKEN_SCALE = 10 ** (18 - underlyingDecimals);
 
-        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(FUND_OPERATOR_ROLE, _fundOperator);
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
         // Create the pool with FM as admin (units are non-transferable by default; any-sender distribution allowed)
         PoolConfig memory poolConfig =

@@ -17,7 +17,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
-contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
+contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     using Math for uint256;
     using SafeERC20 for IERC20;
@@ -30,7 +30,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     uint256 internal constant REQUEST_ID = 0;
 
-    IFundManager public FUND_MANAGER;
+    IFundManager public immutable FUND_MANAGER;
 
     //     _____ __        __
     //    / ___// /_____ _/ /____  _____

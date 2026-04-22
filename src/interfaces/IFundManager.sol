@@ -142,13 +142,6 @@ interface IFundManager {
     function downgrade(uint256 superTokenAmount) external;
 
     /**
-     * @notice Top up the yield-asset balance by upgrading unutilized assets to cover any current deficit.
-     * @dev Permissionless. Reverts with NOT_AUTHORIZED when there is no deficit to rebalance.
-     *      The amount upgraded is capped at the unutilized-assets balance.
-     */
-    function rebalanceYieldAssets() external;
-
-    /**
      * @notice Set the target annualized rate committed to per-unit streaming.
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
      *      Recalibrates the distribution flow; reverts with INVARIANT_VIOLATED if the new rate would break
