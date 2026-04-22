@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
+import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
 
 interface IFundManager {
 
@@ -33,6 +33,7 @@ interface IFundManager {
     error BAD_REDEEM_ARGS();
     error DURATION_BELOW_FLOOR();
     error NOT_INITIALIZED();
+    error SETTLEMENT_PRECONDITIONS_NOT_MET();
 
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
@@ -133,10 +134,21 @@ interface IFundManager {
 
     /**
      * @notice Get the balance of unutilized assets held by the FundManager, in underlying decimals.
-     * @dev Derived from the super-token's realtime available balance and scaled to underlying decimals.
      * @return balance The amount of unutilized assets (underlying-denominated)
      */
     function unutilizedAssetsBalance() external view returns (uint256 balance);
+
+    /**
+     * @notice Get the balance of yield assets streaming to the Yield Pool, in super-token decimals.
+     * @return balance The amount of yield assets (super-token-denominated)
+     */
+    function yieldAssetsBalance() external view returns (uint256 balance);
+
+    /**
+     * @notice Get the balance of yield assets streaming to the Yield Pool, in underlying decimals.
+     * @return balance The amount of yield assets (underlying-denominated)
+     */
+    function scaledYieldAssetsBalance() external view returns (uint256 balance);
 
     /**
      * @notice The GDA pool whose flow distributes yield to shareholders.

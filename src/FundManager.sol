@@ -7,8 +7,12 @@ import { AccessControl } from "@openzeppelin-v5/contracts/access/AccessControl.s
 import { IERC20 } from "@openzeppelin-v5/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin-v5/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "@openzeppelin-v5/contracts/utils/ReentrancyGuard.sol";
-import { SuperTokenV1Library } from "@superfluid-finance/ethereum-contracts/contracts/apps/SuperTokenV1Library.sol";
+import {
+    PoolConfig,
+    SuperTokenV1Library
+} from "@superfluid-finance/ethereum-contracts/contracts/apps/SuperTokenV1Library.sol";
 
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
 import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
@@ -16,6 +20,7 @@ import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVa
 
 contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
+    using Math for uint256;
     using SafeERC20 for IERC20;
     using SuperTokenV1Library for ISuperToken;
 
@@ -34,8 +39,11 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     /// @notice Seconds in a year (365 * 24 * 3600)
     uint256 public constant YEAR = 365 days;
 
-    /// @notice WAD scale used for `annualRate` (1e18 == 100% APR)
-    uint256 public constant WAD = 1e18;
+    // /// @notice Basis Point denominator for annual rate calculations (e.g. 10_000 = 100%)
+    uint256 private constant _BP_DENOMINATOR = 10_000;
+
+    // Every 1 USDC deposited gives 1e6 units to the depositor
+    uint256 public constant UNIT_PER_ASSET_DEPOSITED = 1;
 
     /// @notice Sanity floor for `guaranteedFlowDuration` to prevent operator-error zeroing-out the buffer
     uint256 public constant MIN_GUARANTEED_FLOW_DURATION = 1 days;
@@ -64,6 +72,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     uint256 public annualRate;
+
+    int96 private _flowRatePerUnit;
 
     /// @inheritdoc IFundManager
     uint256 public guaranteedFlowDuration;
@@ -108,7 +118,10 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         _grantRole(VAULT_ROLE, address(_vault));
 
         // Create the pool with FM as admin (units are non-transferable by default; any-sender distribution allowed)
-        POOL = SUPER_TOKEN.createPool(address(this));
+        PoolConfig memory poolConfig =
+            PoolConfig({ transferabilityForUnitsOwner: false, distributionFromAnyAddress: true });
+
+        POOL = SUPER_TOKEN.createPool(address(this), poolConfig);
 
         // Connect FM to the pool
         SUPER_TOKEN.connectPool(POOL);
@@ -126,35 +139,53 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     /// @inheritdoc IFundManager
     function closeEpoch(uint256 workingAssets) external onlyRole(FUND_OPERATOR_ROLE) {
         // totalFundAssets is reported in underlying decimals
-        uint256 totalFundAssets = workingAssets + unutilizedAssetsBalance();
+        uint256 totalFundAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance();
         VAULT.closeEpoch(totalFundAssets);
+    }
+
+    function canSettleEpoch() public view returns (bool canSettle) {
+        // Snapshot must be read BEFORE the vault deletes it during settleEpoch
+        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+
+        canSettle = true;
+
+        // Check that the current epoch to settle has been closed (snap.epoch != 0);
+        if (snap.epoch == 0) canSettle = false;
+
+        // Check that the increase of units (incurred by depositing assets) is backed by a sufficient increase in the
+        // FM's super-token balance to maintain the invariant post-settlement
+        uint128 addedUnits = uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
+        uint128 currentUnits = POOL.getTotalUnits();
+        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(currentUnits + addedUnits));
+        uint256 expectedRequiredBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
+        if (yieldAssetsBalance() < expectedRequiredBalance) canSettle = false;
+
+        // Check that if redeeming assets > depositing assets, the FM holds enough unutilized assets to cover the
+        // excess redeemables at the epoch rate (i.e. the invariant post-settlement would not be violated)
+        /// FIXME 1e18 here might be a footgun
+
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
+        if (redeemingAssets > snap.depositingAssets) {
+            if (unutilizedAssetsBalance() < (redeemingAssets - snap.depositingAssets)) {
+                canSettle = false;
+            }
+        }
     }
 
     /// @inheritdoc IFundManager
     function settleEpoch() external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
+        if (!canSettleEpoch()) revert SETTLEMENT_PRECONDITIONS_NOT_MET();
+
         // Snapshot must be read BEFORE the vault deletes it during settleEpoch
         IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
-
-        // Track underlying balance changes across the settlement call
-        uint256 preUnderlying = ASSET.balanceOf(address(this));
 
         // Drives the vault's settlement; may call back into `FundManager.move` if redeem > deposit
         VAULT.settleEpoch();
 
-        // Wrap any underlying that arrived (net-inflow epoch surplus)
-        uint256 postUnderlying = ASSET.balanceOf(address(this));
-        if (postUnderlying > preUnderlying) {
-            uint256 arrived = postUnderlying - preUnderlying;
-            ASSET.forceApprove(address(SUPER_TOKEN), arrived);
-            SUPER_TOKEN.upgrade(arrived * SUPER_TOKEN_SCALE);
-        }
-
-        // Grant FM units for this epoch's depositors (asset-basis, scaled into super-token decimals)
+        // Grant FM units for this epoch's depositors
         if (snap.depositingAssets > 0) {
-            uint128 currentFMUnits = POOL.getUnits(address(this));
-            uint128 delta = _toU128(snap.depositingAssets * SUPER_TOKEN_SCALE);
-            uint128 newFMUnits = _add128(currentFMUnits, delta);
-            POOL.updateMemberUnits(address(this), newFMUnits);
+            POOL.increaseMemberUnits(address(this), uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED));
+
             _recalibrateFlow();
         }
 
@@ -162,27 +193,43 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     }
 
     /// @inheritdoc IFundManager
-    function give(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
+    function give(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) {
         ASSET.safeTransferFrom(msg.sender, address(this), amount);
-        ASSET.forceApprove(address(SUPER_TOKEN), amount);
-        SUPER_TOKEN.upgrade(amount * SUPER_TOKEN_SCALE);
         emit Gave(msg.sender, amount);
     }
 
     /// @inheritdoc IFundManager
     function take(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
-        SUPER_TOKEN.downgrade(amount * SUPER_TOKEN_SCALE);
         ASSET.safeTransfer(msg.sender, amount);
-        _assertInvariant();
         emit Took(msg.sender, amount);
     }
 
+    function upgrade(uint256 underlyingAmount) external onlyRole(FUND_OPERATOR_ROLE) {
+        ASSET.approve(address(SUPER_TOKEN), underlyingAmount);
+        SUPER_TOKEN.upgrade(underlyingAmount * SUPER_TOKEN_SCALE);
+
+        // Upgrading increases the yield assets balance, therefore invariant trivially holds
+    }
+
+    function downgrade(uint256 superTokenAmount) external onlyRole(FUND_OPERATOR_ROLE) {
+        SUPER_TOKEN.downgrade(superTokenAmount);
+
+        // Ensure invariant holds after the decrease in yield assets balance
+        _assertInvariant();
+    }
+
     /// @inheritdoc IFundManager
-    function setAnnualRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
+    function setAnnualRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
         uint256 oldRate = annualRate;
         annualRate = newRate;
+
+        // Recalculate flow rate based on the new annual rate
+        /// FIXME : this formula needs to be generalized (eg. for regular 1e18 underlying decimals assets)
+        _flowRatePerUnit = int96(int256(SUPER_TOKEN_SCALE * newRate / (YEAR * _BP_DENOMINATOR)));
+
         _recalibrateFlow();
         _assertInvariant();
+
         emit AnnualRateChanged(oldRate, newRate);
     }
 
@@ -203,25 +250,16 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function move(address recipient, uint256 amount) external onlyRole(VAULT_ROLE) {
-        SUPER_TOKEN.downgrade(amount * SUPER_TOKEN_SCALE);
         ASSET.safeTransfer(recipient, amount);
         _assertInvariant();
     }
 
     /// @inheritdoc IFundManager
     function onClaimDeposit(address controller, uint256 depositAssets) external onlyRole(VAULT_ROLE) {
-        if (depositAssets == 0) return;
+        // Transfer the units associated to the claimed deposit from FM to the controller
+        POOL.decreaseMemberUnits(address(this), uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
+        POOL.increaseMemberUnits(controller, uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
 
-        uint128 delta = _toU128(depositAssets * SUPER_TOKEN_SCALE);
-
-        uint128 fmUnits = POOL.getUnits(address(this));
-        if (fmUnits < delta) revert UNITS_UNDERFLOW();
-
-        uint128 userUnits = POOL.getUnits(controller);
-        POOL.updateMemberUnits(address(this), fmUnits - delta);
-        POOL.updateMemberUnits(controller, _add128(userUnits, delta));
-
-        emit UnitsTransferred(address(this), controller, delta);
         // pool.totalUnits unchanged; flowRate unchanged; invariant unchanged
     }
 
@@ -258,10 +296,17 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function unutilizedAssetsBalance() public view returns (uint256 balance) {
-        (int256 avail,,,) = SUPER_TOKEN.realtimeBalanceOfNow(address(this));
-        if (avail <= 0) return 0;
-        // availableBalanceOf is in super-token decimals (18); convert to underlying decimals
-        balance = uint256(avail) / SUPER_TOKEN_SCALE;
+        balance = ASSET.balanceOf(address(this));
+    }
+
+    /// @inheritdoc IFundManager
+    function yieldAssetsBalance() public view returns (uint256 balance) {
+        balance = SUPER_TOKEN.balanceOf(address(this));
+    }
+
+    /// @inheritdoc IFundManager
+    function scaledYieldAssetsBalance() public view returns (uint256 balance) {
+        balance = yieldAssetsBalance() / SUPER_TOKEN_SCALE;
     }
 
     //      ____      __                        __   ______                 __  _
@@ -270,42 +315,20 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   _/ // / / / /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  /___/_/ /_/\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
-    /// @dev Recalibrate the pool's distributeFlow to `totalUnits * annualRate / YEAR` (all in super-token wei).
     function _recalibrateFlow() internal {
-        uint128 totalUnits = POOL.getTotalUnits();
-        int96 targetRate = _toFlowRate(totalUnits, annualRate);
-        SUPER_TOKEN.distributeFlow(POOL, targetRate);
-        emit FlowRateRecalibrated(totalUnits, annualRate, targetRate);
+        SUPER_TOKEN.distributeFlow(POOL, _targetFlowRate());
     }
 
-    /// @dev Compute flow rate (super-token wei/sec) from total units (super-token decimals) and annualRate (WAD).
-    function _toFlowRate(uint128 totalUnits, uint256 rateWad) internal pure returns (int96) {
-        if (totalUnits == 0 || rateWad == 0) return int96(0);
-        // fr = totalUnits * rateWad / (YEAR * WAD). All in super-token wei/sec.
-        uint256 fr = (uint256(totalUnits) * rateWad) / (YEAR * WAD);
-        if (fr > uint256(uint96(type(int96).max))) revert FLOW_RATE_OVERFLOW();
-        return int96(int256(fr));
+    function _targetFlowRate() internal view returns (int96 flowRate) {
+        flowRate = _flowRatePerUnit * int96(int128(POOL.getTotalUnits()));
     }
 
     /// @dev Assert the stream-solvency invariant: avail >= actualFlowRate * guaranteedFlowDuration.
     function _assertInvariant() internal view {
-        (int256 avail,,,) = SUPER_TOKEN.realtimeBalanceOfNow(address(this));
-        if (avail < 0) revert INVARIANT_VIOLATED();
-        int96 rate = POOL.getTotalFlowRate();
-        // rate is non-negative by construction (we only ever distribute to members at >=0 rates)
-        uint256 required = uint256(uint96(rate)) * guaranteedFlowDuration;
-        if (uint256(avail) < required) revert INVARIANT_VIOLATED();
-    }
+        uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
+        uint256 actualBalance = yieldAssetsBalance();
 
-    function _add128(uint128 a, uint128 b) internal pure returns (uint128) {
-        uint256 s = uint256(a) + uint256(b);
-        if (s > type(uint128).max) revert UNITS_OVERFLOW();
-        return uint128(s);
-    }
-
-    function _toU128(uint256 a) internal pure returns (uint128) {
-        if (a > type(uint128).max) revert UNITS_OVERFLOW();
-        return uint128(a);
+        if (actualBalance < requiredBalance) revert INVARIANT_VIOLATED();
     }
 
 }
