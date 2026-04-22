@@ -77,6 +77,12 @@ interface IFundManager {
      */
     error NOT_AUTHORIZED();
 
+    error VAULT_ALREADY_SET();
+
+    error ZERO_ADDRESS();
+
+    error ASSET_MISMATCH();
+
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //    / __/ | |/_/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
@@ -159,6 +165,13 @@ interface IFundManager {
      * @param newDuration The new guaranteed flow duration, in seconds.
      */
     function setGuaranteedFlowDuration(uint256 newDuration) external;
+
+    /**
+     * @notice Set vault address and grant it permissions to call FM hooks.
+     * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
+     * @param vault The vault address to connect to this FundManager
+     */
+    function setVault(address vault) external;
 
     //    _    __             ____     ______      __           __
     //   | |  / /___ ___  __/ / /_   / ____/___ _/ /____  ____/ /

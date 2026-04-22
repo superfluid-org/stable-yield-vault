@@ -30,8 +30,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     uint256 internal constant REQUEST_ID = 0;
 
-    /// FIXME : remove this as its probably not needed
-    address public immutable DEPLOYER;
+    IFundManager public FUND_MANAGER;
 
     //     _____ __        __
     //    / ___// /_____ _/ /____  _____
@@ -58,7 +57,6 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
 
     Snapshot private _snapshot;
     IERC20 public underlyingAsset;
-    IFundManager public fundManager;
 
     uint256 public currentEpoch;
     uint256 public totalPendingDepositAssets;
@@ -79,25 +77,18 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
      * @dev    The FundManager address must be wired via `setFundManager` after deployment.
      *         This breaks the construction cycle between Vault and FundManager (FM needs Vault).
      * @param _underlyingAsset The address of the underlying ERC-20 asset.
+     * @param _fundManager Address of the deployed FundManager.
      * @param name The name of the share token.
      * @param symbol The symbol of the share token.
      */
-    constructor(IERC20 _underlyingAsset, string memory name, string memory symbol) ERC20(name, symbol) {
-        underlyingAsset = _underlyingAsset;
-        DEPLOYER = msg.sender;
+    constructor(address _underlyingAsset, address _fundManager, string memory name, string memory symbol)
+        ERC20(name, symbol)
+    {
+        underlyingAsset = IERC20(_underlyingAsset);
+        FUND_MANAGER = IFundManager(_fundManager);
 
         // Initialize the first epoch to 1
         currentEpoch = 1;
-    }
-
-    /**
-     * @notice One-shot setter wiring the FundManager address after deployment. Callable once by DEPLOYER.
-     * @param _fundManager Address of the deployed FundManager.
-     */
-    function setFundManager(address _fundManager) external {
-        if (msg.sender != DEPLOYER) revert INVALID_CALLER();
-        if (address(fundManager) != address(0)) revert ALREADY_SET();
-        fundManager = IFundManager(_fundManager);
     }
 
     //      ______     __                        __   ______                 __  _
@@ -168,7 +159,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         if (shares > totalSharesOwned) revert INVALID_PARAMETERS();
 
         // Inform FM to decrement units and recalibrate the GDA flow.
-        fundManager.onRequestRedeem(controller, shares, totalSharesOwned);
+        FUND_MANAGER.onRequestRedeem(controller, shares, totalSharesOwned);
 
         // Transfer the shares from the owner to this contract
         _transfer(owner, address(this), shares);
@@ -250,13 +241,13 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
             // Deposits cover redeems; push the surplus to the FundManager for investment.
             uint256 surplus = _snapshot.depositingAssets - redeemingAssets;
             if (surplus > 0) {
-                underlyingAsset.safeTransfer(address(fundManager), surplus);
+                underlyingAsset.safeTransfer(address(FUND_MANAGER), surplus);
             }
         } else {
             // Deposits fall short; pull the deficit from the FundManager to cover redeems.
             // FM downgrades its super-token and transfers underlying into this vault.
             uint256 deficit = redeemingAssets - _snapshot.depositingAssets;
-            fundManager.move(address(this), deficit);
+            FUND_MANAGER.move(address(this), deficit);
         }
 
         // Track unclaimed positions for effective supply adjustment in future closeEpoch calls
@@ -487,7 +478,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
         cs.claimableDepositShares -= shares;
         _unclaimedDepositShares -= shares;
         _mint(receiver, shares);
-        fundManager.onClaimDeposit(receiver, assets);
+        FUND_MANAGER.onClaimDeposit(receiver, assets);
         emit Deposit(msg.sender, receiver, assets, shares);
     }
 
@@ -631,7 +622,7 @@ contract StableYieldAsynchronousVault is ERC20, IStableYieldAsyncVault {
     //  /_/  /_/\____/\__,_/_/_/ /_/\___/_/  /____/
 
     modifier onlyFundManager() {
-        if (msg.sender != address(fundManager)) revert INVALID_CALLER();
+        if (msg.sender != address(FUND_MANAGER)) revert INVALID_CALLER();
         _;
     }
 

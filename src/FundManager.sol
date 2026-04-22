@@ -48,9 +48,6 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     /// @notice Sanity floor for `guaranteedFlowDuration` to prevent operator-error zeroing-out the buffer
     uint256 public constant MIN_GUARANTEED_FLOW_DURATION = 1 days;
 
-    /// @notice Reference to the StableYieldAsyncVault contract
-    IStableYieldAsyncVault public immutable VAULT;
-
     /// @notice Underlying asset (e.g. USDC)
     IERC20 public immutable ASSET;
 
@@ -70,6 +67,9 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   ___/ / /_/ /_/ / /_/  __(__  )
     //  /____/\__/\__,_/\__/\___/____/
 
+    /// @notice Reference to the StableYieldAsyncVault contract
+    IStableYieldAsyncVault public vault;
+
     /// @inheritdoc IFundManager
     uint256 public annualRate;
 
@@ -85,24 +85,23 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //  \____/\____/_/ /_/____/\__/_/   \__,_/\___/\__/\____/_/
 
     /**
-     * @notice Constructor for the FundManager contract
-     * @param _vault                         StableYieldAsyncVault contract
-     * @param _superToken                    Wrapped super-token of the vault's underlying asset
-     * @param _admin                         Default admin (role manager)
-     * @param _fundOperator                  Operator granted FUND_OPERATOR_ROLE
-     * @param _initialAnnualRate             Initial annualRate in WAD (5% == 5e16)
+     * @notice FundManager contract constructor
+     * @param _asset Underlying asset (e.g. USDC) address
+     * @param _superToken Wrapped super-token underlying asset
+     * @param _admin Default admin (role manager)
+     * @param _fundOperator Operator granted FUND_OPERATOR_ROLE
+     * @param _initialAnnualRate Initial annualRate in basis points (10% <=> 1000)
      * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      */
     constructor(
-        IStableYieldAsyncVault _vault,
+        IERC20 _asset,
         ISuperToken _superToken,
         address _admin,
         address _fundOperator,
         uint256 _initialAnnualRate,
         uint256 _initialGuaranteedFlowDuration
     ) {
-        VAULT = _vault;
-        ASSET = IERC20(_vault.asset());
+        ASSET = _asset;
 
         // Verify super-token wraps the correct underlying
         if (_superToken.getUnderlyingToken() != address(ASSET)) revert NOT_INITIALIZED();
@@ -111,11 +110,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         uint8 underlyingDecimals = _superToken.getUnderlyingDecimals();
         SUPER_TOKEN_SCALE = 10 ** (18 - underlyingDecimals);
 
-        if (_initialGuaranteedFlowDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
-
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(FUND_OPERATOR_ROLE, _fundOperator);
-        _grantRole(VAULT_ROLE, address(_vault));
 
         // Create the pool with FM as admin (units are non-transferable by default; any-sender distribution allowed)
         PoolConfig memory poolConfig =
@@ -127,6 +123,11 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         SUPER_TOKEN.connectPool(POOL);
 
         annualRate = _initialAnnualRate;
+
+        /// FIXME : this formula needs to be generalized (eg. for regular 1e18 underlying decimals assets)
+        _flowRatePerUnit = int96(int256(SUPER_TOKEN_SCALE * _initialAnnualRate / (YEAR * _BP_DENOMINATOR)));
+
+        if (_initialGuaranteedFlowDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
         guaranteedFlowDuration = _initialGuaranteedFlowDuration;
     }
 
@@ -140,7 +141,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     function closeEpoch(uint256 workingAssets) external onlyRole(FUND_OPERATOR_ROLE) {
         // totalFundAssets is reported in underlying decimals
         uint256 totalFundAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance();
-        VAULT.closeEpoch(totalFundAssets);
+        vault.closeEpoch(totalFundAssets);
     }
 
     /// @inheritdoc IFundManager
@@ -148,10 +149,10 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         if (!canSettleEpoch()) revert SETTLEMENT_PRECONDITIONS_NOT_MET();
 
         // Snapshot must be read BEFORE the vault deletes it during settleEpoch
-        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+        IStableYieldAsyncVault.Snapshot memory snap = vault.getSnapshot();
 
         // Drives the vault's settlement; may call back into `FundManager.move` if redeem > deposit
-        VAULT.settleEpoch();
+        vault.settleEpoch();
 
         // Grant FM units for this epoch's depositors
         if (snap.depositingAssets > 0) {
@@ -213,6 +214,16 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         guaranteedFlowDuration = newDuration;
         _assertInvariant();
         emit GuaranteedFlowDurationChanged(oldDuration, newDuration);
+    }
+
+    function setVault(address _vault) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (_vault == address(0)) revert ZERO_ADDRESS();
+        if (address(vault) != address(0)) revert VAULT_ALREADY_SET();
+
+        // Verify the vault's underlying asset matches the FM's super-token underlying
+        if (IStableYieldAsyncVault(_vault).asset() != address(ASSET)) revert ASSET_MISMATCH();
+
+        _grantRole(VAULT_ROLE, _vault);
     }
 
     //    _    __             ____     ______      __           __
@@ -293,7 +304,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     /// @inheritdoc IFundManager
     function canSettleEpoch() public view returns (bool canSettle) {
         // Snapshot must be read BEFORE the vault deletes it during settleEpoch
-        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+        IStableYieldAsyncVault.Snapshot memory snap = vault.getSnapshot();
 
         canSettle = true;
 
