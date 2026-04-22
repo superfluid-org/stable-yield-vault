@@ -143,35 +143,6 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         VAULT.closeEpoch(totalFundAssets);
     }
 
-    function canSettleEpoch() public view returns (bool canSettle) {
-        // Snapshot must be read BEFORE the vault deletes it during settleEpoch
-        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
-
-        canSettle = true;
-
-        // Check that the current epoch to settle has been closed (snap.epoch != 0);
-        if (snap.epoch == 0) canSettle = false;
-
-        // Check that the increase of units (incurred by depositing assets) is backed by a sufficient increase in the
-        // FM's super-token balance to maintain the invariant post-settlement
-        uint128 addedUnits = uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
-        uint128 currentUnits = POOL.getTotalUnits();
-        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(currentUnits + addedUnits));
-        uint256 expectedRequiredBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
-        if (yieldAssetsBalance() < expectedRequiredBalance) canSettle = false;
-
-        // Check that if redeeming assets > depositing assets, the FM holds enough unutilized assets to cover the
-        // excess redeemables at the epoch rate (i.e. the invariant post-settlement would not be violated)
-        /// FIXME 1e18 here might be a footgun
-
-        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
-        if (redeemingAssets > snap.depositingAssets) {
-            if (unutilizedAssetsBalance() < (redeemingAssets - snap.depositingAssets)) {
-                canSettle = false;
-            }
-        }
-    }
-
     /// @inheritdoc IFundManager
     function settleEpoch() external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
         if (!canSettleEpoch()) revert SETTLEMENT_PRECONDITIONS_NOT_MET();
@@ -200,6 +171,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function take(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
+        // Cannot take assets if the invariant is violated (the yield assets reserve must be rebalanced before)
+        _assertInvariant();
         ASSET.safeTransfer(msg.sender, amount);
         emit Took(msg.sender, amount);
     }
@@ -249,18 +222,12 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
 
     /// @inheritdoc IFundManager
-    function move(address recipient, uint256 amount) external onlyRole(VAULT_ROLE) {
-        ASSET.safeTransfer(recipient, amount);
-        _assertInvariant();
-    }
-
-    /// @inheritdoc IFundManager
     function onClaimDeposit(address controller, uint256 depositAssets) external onlyRole(VAULT_ROLE) {
         // Transfer the units associated to the claimed deposit from FM to the controller
         POOL.decreaseMemberUnits(address(this), uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
         POOL.increaseMemberUnits(controller, uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
 
-        // pool.totalUnits unchanged; flowRate unchanged; invariant unchanged
+        // pool.totalUnits unchanged -> flowRate unchanged -> invariant unchanged
     }
 
     /// @inheritdoc IFundManager
@@ -275,17 +242,19 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
         uint128 delta;
         if (sharesRedeemed == totalSharesOwned) {
-            // Full exit: remove every unit explicitly to avoid rounding residue
             delta = userUnits;
         } else {
-            delta = uint128((uint256(userUnits) * sharesRedeemed) / totalSharesOwned);
+            delta = uint128(uint256(userUnits).mulDiv(sharesRedeemed, totalSharesOwned, Math.Rounding.Ceil));
         }
-
-        if (delta == 0) return;
 
         POOL.updateMemberUnits(controller, userUnits - delta);
         _recalibrateFlow();
-        // flowRate decreases; invariant trivially safe
+        // pool.totalUnits decreases -> flowRate decreases; invariant trivially safe
+    }
+
+    /// @inheritdoc IFundManager
+    function move(address recipient, uint256 amount) external onlyRole(VAULT_ROLE) {
+        ASSET.safeTransfer(recipient, amount);
     }
 
     //   _    ___                 ______                 __  _
@@ -309,6 +278,47 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         balance = yieldAssetsBalance() / SUPER_TOKEN_SCALE;
     }
 
+    /// @inheritdoc IFundManager
+    function evaluateYieldAssetsDeficit() public view returns (uint256 deficit) {
+        uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
+        uint256 actualBalance = yieldAssetsBalance();
+
+        if (actualBalance < requiredBalance) {
+            deficit = requiredBalance - actualBalance;
+        } else {
+            deficit = 0;
+        }
+    }
+
+    /// @inheritdoc IFundManager
+    function canSettleEpoch() public view returns (bool canSettle) {
+        // Snapshot must be read BEFORE the vault deletes it during settleEpoch
+        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+
+        canSettle = true;
+
+        // Check that the current epoch to settle has been closed (snap.epoch != 0);
+        if (snap.epoch == 0) canSettle = false;
+
+        // Check that the increase of units (incurred by depositing assets) is backed by a sufficient increase in the
+        // FM's super-token balance to maintain the invariant post-settlement
+        uint128 addedUnits = uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
+        uint128 currentUnits = POOL.getTotalUnits();
+        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(currentUnits + addedUnits));
+        uint256 expectedRequiredBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
+        if (yieldAssetsBalance() < expectedRequiredBalance) canSettle = false;
+
+        // Check that if redeeming assets > depositing assets, the FM holds enough unutilized assets to cover the
+        // excess redeemables at the epoch rate (i.e. the invariant post-settlement would not be violated)
+        /// FIXME 1e18 here might be a footgun
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
+        if (redeemingAssets > snap.depositingAssets) {
+            if (unutilizedAssetsBalance() < (redeemingAssets - snap.depositingAssets)) {
+                canSettle = false;
+            }
+        }
+    }
+
     //      ____      __                        __   ______                 __  _
     //     /  _/___  / /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //     / // __ \/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
@@ -325,10 +335,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @dev Assert the stream-solvency invariant: avail >= actualFlowRate * guaranteedFlowDuration.
     function _assertInvariant() internal view {
-        uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
-        uint256 actualBalance = yieldAssetsBalance();
-
-        if (actualBalance < requiredBalance) revert INVARIANT_VIOLATED();
+        if (evaluateYieldAssetsDeficit() > 0) revert INVARIANT_VIOLATED();
     }
 
 }

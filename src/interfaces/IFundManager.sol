@@ -13,11 +13,32 @@ interface IFundManager {
     // / /___ | |/ /  __/ / / / /_(__  )
     // /_____/ |___/\___/_/ /_/\__/____/
 
+    /**
+     * @notice Emitted when the operator updates the committed annualized streaming rate.
+     * @param oldRate Previous annual rate, scaled by 1e18 (WAD).
+     * @param newRate New annual rate, scaled by 1e18 (WAD).
+     */
     event AnnualRateChanged(uint256 oldRate, uint256 newRate);
+
+    /**
+     * @notice Emitted when the operator updates the minimum forward stream-solvency horizon.
+     * @param oldDuration Previous guaranteed flow duration, in seconds.
+     * @param newDuration New guaranteed flow duration, in seconds.
+     */
     event GuaranteedFlowDurationChanged(uint256 oldDuration, uint256 newDuration);
-    event FlowRateRecalibrated(uint128 totalUnits, uint256 annualRate, int96 flowRate);
-    event UnitsTransferred(address indexed from, address indexed to, uint128 amount);
+
+    /**
+     * @notice Emitted when the operator deposits underlying assets into the FundManager.
+     * @param from The address providing the assets.
+     * @param amount The amount of underlying asset given.
+     */
     event Gave(address indexed from, uint256 amount);
+
+    /**
+     * @notice Emitted when the operator withdraws underlying assets from the FundManager.
+     * @param to The address receiving the assets.
+     * @param amount The amount of underlying asset taken.
+     */
     event Took(address indexed to, uint256 amount);
 
     //    ______
@@ -26,14 +47,35 @@ interface IFundManager {
     // / /___/ /  / /  / /_/ / /  (__  )
     // /_____/_/  /_/   \____/_/  /____/
 
+    /**
+     * @notice Thrown when an operation would leave the stream-solvency invariant violated.
+     */
     error INVARIANT_VIOLATED();
-    error FLOW_RATE_OVERFLOW();
-    error UNITS_OVERFLOW();
-    error UNITS_UNDERFLOW();
+
+    /**
+     * @notice Thrown when the vault's redeem hook is called with incoherent share arguments.
+     */
     error BAD_REDEEM_ARGS();
+
+    /**
+     * @notice Thrown when a duration is set below MIN_GUARANTEED_FLOW_DURATION.
+     */
     error DURATION_BELOW_FLOOR();
+
+    /**
+     * @notice Thrown at construction when the provided super-token does not wrap the vault's underlying asset.
+     */
     error NOT_INITIALIZED();
+
+    /**
+     * @notice Thrown when settleEpoch is called but the settlement preconditions are not satisfied.
+     */
     error SETTLEMENT_PRECONDITIONS_NOT_MET();
+
+    /**
+     * @notice Thrown when a caller attempts an operation they are not allowed to perform.
+     */
+    error NOT_AUTHORIZED();
 
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
@@ -42,50 +84,78 @@ interface IFundManager {
     //  /_____/_/|_|\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /**
-     * @notice Commit the settlement of the current epoch in the vault.
-     * @dev This operation can only be performed by an account with the FUND_OPERATOR_ROLE
-     * @param workingAssets Amount of assets invested at the time of settlement (excludes unutilized assets)
+     * @notice Close the current epoch in the vault by reporting total fund assets.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Total fund assets = `workingAssets` + unutilized balance + scaled yield balance.
+     * @param workingAssets Amount of assets invested at the time of settlement (excludes unutilized assets),
+     *                      in underlying decimals.
      */
     function closeEpoch(uint256 workingAssets) external;
 
     /**
-     * @notice Finalize the settlement of a current epoch in the vault.
-     * @dev This operation can only be performed by an account with the FUND_OPERATOR_ROLE
-     *      At the time of this call, the FundManager shall :
-     *        1. have previously called `closeEpoch` with the workingAssets for the epoch being settled
-     *        2. holds sufficient `unutilizedAssets` to cover for redeemable shares at the epoch rate (if needed)
+     * @notice Finalize settlement of the currently-closed epoch.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Reverts with SETTLEMENT_PRECONDITIONS_NOT_MET if {canSettleEpoch} returns false, i.e. if any of:
+     *        1. `closeEpoch` has not been called for the epoch being settled;
+     *        2. the post-settlement super-token balance cannot sustain the new flow for `guaranteedFlowDuration`;
+     *        3. redeeming assets exceed depositing assets and the FundManager does not hold enough unutilized
+     *           assets to cover the difference at the epoch rate.
      */
     function settleEpoch() external;
 
     /**
-     * @notice Give assets to the FundManager.
-     * @dev This operation can only be performed by an account with the FUND_OPERATOR_ROLE
-     *      Underlying is pulled from the caller and upgraded to the super-token internally.
+     * @notice Deposit underlying assets into the FundManager.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Pulls underlying from the caller into the FundManager.
      * @param amount The amount of underlying asset to give.
      */
     function give(uint256 amount) external;
 
     /**
-     * @notice Take assets from the FundManager.
-     * @dev This operation can only be performed by an account with the FUND_OPERATOR_ROLE
-     *      Super-token is downgraded internally and underlying is transferred to the caller.
-     *      Reverts if the post-operation state would violate the stream solvency invariant.
+     * @notice Withdraw underlying assets from the FundManager.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Transfers underlying from the FundManager to the caller.
      * @param amount The amount of underlying asset to take.
      */
     function take(uint256 amount) external;
 
     /**
+     * @notice Upgrade underlying assets held by the FundManager into super-tokens used to fund the yield stream.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Increases the yield-asset balance; the stream-solvency invariant is trivially preserved.
+     * @param underlyingAmount The amount of underlying asset to upgrade, in underlying decimals.
+     */
+    function upgrade(uint256 underlyingAmount) external;
+
+    /**
+     * @notice Downgrade super-tokens held by the FundManager back into underlying assets.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Reverts with INVARIANT_VIOLATED if the post-operation state would break the stream-solvency invariant.
+     * @param superTokenAmount The amount of super-token to downgrade, in super-token decimals (18).
+     */
+    function downgrade(uint256 superTokenAmount) external;
+
+    /**
+     * @notice Top up the yield-asset balance by upgrading unutilized assets to cover any current deficit.
+     * @dev Permissionless. Reverts with NOT_AUTHORIZED when there is no deficit to rebalance.
+     *      The amount upgraded is capped at the unutilized-assets balance.
+     */
+    function rebalanceYieldAssets() external;
+
+    /**
      * @notice Set the target annualized rate committed to per-unit streaming.
-     * @dev This operation can only be performed by an account with the FUND_OPERATOR_ROLE
-     *      Reverts if the post-operation state would violate the stream solvency invariant.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Recalibrates the distribution flow; reverts with INVARIANT_VIOLATED if the new rate would break
+     *      the stream-solvency invariant.
      * @param newRate The new annual rate, scaled by 1e18 (WAD). 5% APR == 5e16.
      */
     function setAnnualRate(uint256 newRate) external;
 
     /**
-     * @notice Set the minimum forward stream-solvency horizon FM must maintain.
-     * @dev This operation can only be performed by an account with the FUND_OPERATOR_ROLE
-     *      Reverts if below the minimum floor or if the post-operation state would violate the invariant.
+     * @notice Set the minimum forward stream-solvency horizon the FundManager must maintain.
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     *      Reverts with DURATION_BELOW_FLOOR if `newDuration` is below MIN_GUARANTEED_FLOW_DURATION,
+     *      or with INVARIANT_VIOLATED if the post-operation state would break the invariant.
      * @param newDuration The new guaranteed flow duration, in seconds.
      */
     function setGuaranteedFlowDuration(uint256 newDuration) external;
@@ -97,29 +167,29 @@ interface IFundManager {
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
 
     /**
-     * @notice Move assets from the FundManager to a recipient, settling any required unwrap.
-     * @dev This operation can only be performed by an account with the VAULT_ROLE
-     *      The amount is specified in underlying-asset decimals. Super-token is downgraded
-     *      internally and underlying is transferred to `recipient`. Asserts the invariant.
-     * @param recipient The address to transfer assets to
-     * @param amount The amount of underlying asset to move.
+     * @notice Move underlying assets from the FundManager to a recipient.
+     * @dev Only callable by accounts holding VAULT_ROLE.
+     *      Used by the vault during settleEpoch when redeems exceed deposits.
+     * @param recipient The address to transfer assets to.
+     * @param amount The amount of underlying asset to move, in underlying decimals.
      */
     function move(address recipient, uint256 amount) external;
 
     /**
      * @notice Hook invoked by the vault when a controller claims their settled deposit.
-     * @dev This operation can only be performed by an account with the VAULT_ROLE
-     *      Transfers units from FM's pending-member slot to the controller's slot.
-     *      Pool total units are unchanged; flow rate is unchanged.
+     * @dev Only callable by accounts holding VAULT_ROLE.
+     *      Transfers pool units from the FundManager's pending-member slot to the controller's slot.
+     *      Pool total units and flow rate are unchanged.
      * @param controller The controller claiming deposit shares.
-     * @param depositAssets The originally-deposited underlying assets being claimed (underlying decimals).
+     * @param depositAssets The originally-deposited underlying assets being claimed, in underlying decimals.
      */
     function onClaimDeposit(address controller, uint256 depositAssets) external;
 
     /**
      * @notice Hook invoked by the vault when a controller requests a redeem.
-     * @dev This operation can only be performed by an account with the VAULT_ROLE
-     *      Decrements controller's units proportionally and recalibrates flow downward.
+     * @dev Only callable by accounts holding VAULT_ROLE.
+     *      Decrements the controller's pool units proportionally to `sharesRedeemed / totalSharesOwned`
+     *      and recalibrates the pool flow downward.
      * @param controller The controller requesting redeem.
      * @param sharesRedeemed The number of shares being redeemed.
      * @param totalSharesOwned The controller's total share balance before the redeem lock.
@@ -133,22 +203,35 @@ interface IFundManager {
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /**
-     * @notice Get the balance of unutilized assets held by the FundManager, in underlying decimals.
-     * @return balance The amount of unutilized assets (underlying-denominated)
+     * @notice Unutilized underlying assets held by the FundManager (available to cover redeem deficits).
+     * @return balance The amount of unutilized assets, in underlying decimals.
      */
     function unutilizedAssetsBalance() external view returns (uint256 balance);
 
     /**
-     * @notice Get the balance of yield assets streaming to the Yield Pool, in super-token decimals.
-     * @return balance The amount of yield assets (super-token-denominated)
+     * @notice Super-token balance funding the yield stream to the pool.
+     * @return balance The amount of yield assets, in super-token decimals (18).
      */
     function yieldAssetsBalance() external view returns (uint256 balance);
 
     /**
-     * @notice Get the balance of yield assets streaming to the Yield Pool, in underlying decimals.
-     * @return balance The amount of yield assets (underlying-denominated)
+     * @notice Super-token balance funding the yield stream, rescaled to underlying decimals.
+     * @return balance The amount of yield assets, in underlying decimals.
      */
     function scaledYieldAssetsBalance() external view returns (uint256 balance);
+
+    /**
+     * @notice Amount of super-token the FundManager is short of to sustain the target flow for the
+     *         full `guaranteedFlowDuration` horizon.
+     * @return deficit Required super-token balance minus current super-token balance, or 0 if fully funded.
+     */
+    function evaluateYieldAssetsDeficit() external view returns (uint256 deficit);
+
+    /**
+     * @notice Whether the current epoch satisfies all preconditions required to call {settleEpoch}.
+     * @return canSettle True if {settleEpoch} can be called without reverting on preconditions.
+     */
+    function canSettleEpoch() external view returns (bool canSettle);
 
     /**
      * @notice The GDA pool whose flow distributes yield to shareholders.
@@ -161,12 +244,12 @@ interface IFundManager {
     function SUPER_TOKEN() external view returns (ISuperToken);
 
     /**
-     * @notice The current annualized rate committed to per-unit streaming, scaled by 1e18.
+     * @notice The current annualized rate committed to per-unit streaming, scaled by 1e18 (WAD).
      */
     function annualRate() external view returns (uint256);
 
     /**
-     * @notice The minimum forward stream-solvency horizon FM maintains, in seconds.
+     * @notice The minimum forward stream-solvency horizon the FundManager maintains, in seconds.
      */
     function guaranteedFlowDuration() external view returns (uint256);
 
