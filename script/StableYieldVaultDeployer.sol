@@ -47,6 +47,8 @@ library StableYieldVaultDeployer {
             new StableYieldAsyncVault(config.underlying, results.fundManager, config.shareName, config.shareSymbol);
 
         results.asyncVault = address(asyncVault);
+
+        return results;
     }
 
     function _configureFundManager(DeploymentResult memory results) internal {
