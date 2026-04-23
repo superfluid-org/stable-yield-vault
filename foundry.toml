@@ -5,6 +5,7 @@ libs = ["lib"]
 solc_version = "0.8.34"
 optimizer = true
 optimizer_runs = 200
+ignored_warnings_from = ["lib/"]
 
 [fmt]
 bracket_spacing = true
