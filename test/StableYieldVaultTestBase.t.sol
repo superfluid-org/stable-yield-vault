@@ -36,13 +36,16 @@ contract StableYieldVaultTestBase is Test {
     address internal immutable BOB = makeAddr("BOB");
     address internal immutable KAREN = makeAddr("KAREN");
 
+    address internal immutable WHALE = makeAddr("WHALE");
+
     uint256 internal constant INITIAL_ANNUAL_RATE = 1000; // 10% annual rate
     uint256 internal constant GUARANTEED_FLOW_DURATION = 7 days;
 
-    function setUp() public {
+    function setUp() public virtual {
         (_sf, _deployer) = _deploySuperfluid();
         (_usdc, _usdcSuperToken) = _deployer.deployWrapperSuperToken("USDC", "USDC", 6, type(uint256).max, address(0));
         _usdcx = ISuperToken(address(_usdcSuperToken));
+        _initWhale();
 
         vm.startPrank(DEPLOYER);
         StableYieldVaultDeployer.DeploymentResult memory deploymentResult = StableYieldVaultDeployer.deployAll(
@@ -62,13 +65,20 @@ contract StableYieldVaultTestBase is Test {
         _vault = StableYieldAsyncVault(deploymentResult.asyncVault);
     }
 
-    function _dealUSDCx(address recipient, uint256 amount) internal {
-        vm.startPrank(DEPLOYER);
-        _usdc.mint(DEPLOYER, amount / 1e12);
-        _usdc.approve(address(_usdcx), amount / 1e12);
-        _usdcx.upgrade(amount);
-        _usdcx.transfer(recipient, amount);
+    function _initWhale() internal {
+        // Mint 100 billion USDC to the WHALE
+        _usdc.mint(WHALE, 100e9 * 1e6);
+
+        // Upgrade 1 billion USDC to USDCx and transfer to the WHALE
+        vm.startPrank(WHALE);
+        _usdc.approve(address(_usdcx), type(uint256).max);
+        _usdcx.upgrade(100e9 * 1e18);
         vm.stopPrank();
+    }
+
+    function _dealUSDCx(address recipient, uint256 amount) internal {
+        vm.prank(WHALE);
+        _usdcx.transfer(recipient, amount);
     }
 
     function _dealUSDC(address recipient, uint256 amount) internal {

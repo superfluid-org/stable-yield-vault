@@ -5,7 +5,7 @@ import { StableYieldVaultTestBase } from "./StableYieldVaultTestBase.t.sol";
 
 contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
 
-    function setUp() public {
+    function setUp() public override {
         super.setUp();
     }
 
