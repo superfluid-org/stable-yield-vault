@@ -221,6 +221,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         // Verify the vault's underlying asset matches the FM's super-token underlying
         if (IStableYieldAsyncVault(_vault).asset() != address(ASSET)) revert ASSET_MISMATCH();
 
+        vault = IStableYieldAsyncVault(_vault);
         _grantRole(VAULT_ROLE, _vault);
     }
 
