@@ -156,10 +156,9 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         if (snap.depositingAssets > 0) {
             POOL.increaseMemberUnits(address(this), uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED));
 
+            _rebalanceYieldAssets();
             _recalibrateFlow();
         }
-
-        _assertInvariant();
     }
 
     /// @inheritdoc IFundManager
@@ -170,24 +169,16 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function take(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
-        // Cannot take assets if the invariant is violated (the yield assets reserve must be rebalanced before)
-        _assertInvariant();
         ASSET.safeTransfer(msg.sender, amount);
         emit Took(msg.sender, amount);
     }
 
     function upgrade(uint256 underlyingAmount) external onlyRole(FUND_OPERATOR_ROLE) {
-        ASSET.approve(address(SUPER_TOKEN), underlyingAmount);
-        SUPER_TOKEN.upgrade(underlyingAmount * SUPER_TOKEN_SCALE);
-
-        // Upgrading increases the yield assets balance, therefore invariant trivially holds
+        _upgrade(underlyingAmount);
     }
 
     function downgrade(uint256 superTokenAmount) external onlyRole(FUND_OPERATOR_ROLE) {
-        SUPER_TOKEN.downgrade(superTokenAmount);
-
-        // Ensure invariant holds after the decrease in yield assets balance
-        _assertInvariant();
+        _downgrade(superTokenAmount);
     }
 
     /// @inheritdoc IFundManager
@@ -199,8 +190,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         /// FIXME : this formula needs to be generalized (eg. for regular 1e18 underlying decimals assets)
         _flowRatePerUnit = int96(int256(SUPER_TOKEN_SCALE * newRate / (YEAR * _BP_DENOMINATOR)));
 
+        _rebalanceYieldAssets();
         _recalibrateFlow();
-        _assertInvariant();
 
         emit AnnualRateChanged(oldRate, newRate);
     }
@@ -209,8 +200,15 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     function setGuaranteedFlowDuration(uint256 newDuration) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
         if (newDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
         uint256 oldDuration = guaranteedFlowDuration;
+
+        // Update the guaranteed flow duration
         guaranteedFlowDuration = newDuration;
-        _assertInvariant();
+
+        // Rebalance the yield assets reserve to match new duration
+        // Either downgrade yield assets if the duration is decreased
+        // or upgrade underlying assets if the duration is increased
+        _rebalanceYieldAssets();
+
         emit GuaranteedFlowDurationChanged(oldDuration, newDuration);
     }
 
@@ -289,15 +287,12 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     }
 
     /// @inheritdoc IFundManager
-    function evaluateYieldAssetsDeficit() public view returns (uint256 deficit) {
+    function evaluateYieldAssetsDeficit() public view returns (int256 deficit) {
+        /// FIXME : add buffer to the required balance
         uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
         uint256 actualBalance = yieldAssetsBalance();
 
-        if (actualBalance < requiredBalance) {
-            deficit = requiredBalance - actualBalance;
-        } else {
-            deficit = 0;
-        }
+        deficit = requiredBalance - actualBalance;
     }
 
     /// @inheritdoc IFundManager
@@ -310,23 +305,17 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         // Check that the current epoch to settle has been closed (snap.epoch != 0);
         if (snap.epoch == 0) canSettle = false;
 
-        // Check that the increase of units (incurred by depositing assets) is backed by a sufficient increase in the
-        // FM's super-token balance to maintain the invariant post-settlement
-        uint128 addedUnits = uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
-        uint128 currentUnits = POOL.getTotalUnits();
-        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(currentUnits + addedUnits));
-        uint256 expectedRequiredBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
-        if (yieldAssetsBalance() < expectedRequiredBalance) canSettle = false;
-
-        // Check that if redeeming assets > depositing assets, the FM holds enough unutilized assets to cover the
-        // excess redeemables at the epoch rate (i.e. the invariant post-settlement would not be violated)
         /// FIXME 1e18 here might be a footgun
         uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
-        if (redeemingAssets > snap.depositingAssets) {
-            if (unutilizedAssetsBalance() < (redeemingAssets - snap.depositingAssets)) {
-                canSettle = false;
-            }
-        }
+        uint128 newTotalUnits = POOL.getTotalUnits() + uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
+        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
+        uint256 requiredScaledYieldAssetsBalance =
+            uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration / SUPER_TOKEN_SCALE;
+
+        if (
+            scaledYieldAssetsBalance() + unutilizedAssetsBalance() + snap.depositingAssets
+                < redeemingAssets + requiredScaledYieldAssetsBalance
+        ) canSettle = false;
     }
 
     //      ____      __                        __   ______                 __  _
@@ -335,8 +324,35 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   _/ // / / / /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  /___/_/ /_/\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
+    function _upgrade(uint256 underlyingAmount) internal {
+        ASSET.approve(address(SUPER_TOKEN), underlyingAmount);
+        SUPER_TOKEN.upgrade(underlyingAmount * SUPER_TOKEN_SCALE);
+    }
+
+    function _downgrade(uint256 superTokenAmount) internal {
+        SUPER_TOKEN.downgrade(superTokenAmount);
+    }
+
     function _recalibrateFlow() internal {
         SUPER_TOKEN.distributeFlow(POOL, _targetFlowRate());
+    }
+
+    function _rebalanceYieldAssets() internal {
+        int256 deficit = evaluateYieldAssetsDeficit();
+
+        if (deficit > 0) {
+            uint256 underlyingAmountToUpgrade = (deficit / SUPER_TOKEN_SCALE) + 1;
+
+            if (unutilizedAssetsBalance() < underlyingAmountToUpgrade) revert INSUFFICIENT_UNUTILIZED_ASSETS();
+
+            // Upgrade underlying deficit amount
+            // note - Add 1 unit to cover for decimals clipping in case of non-18 decimals underlying
+            _upgrade();
+        } else {
+            
+            // downgrade excess amount of yield assets
+            _downgrade(deficit);
+        }
     }
 
     function _targetFlowRate() internal view returns (int96 flowRate) {

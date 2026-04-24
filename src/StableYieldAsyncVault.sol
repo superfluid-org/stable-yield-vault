@@ -192,9 +192,6 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IStableYieldAsyncVault
     function closeEpoch(uint256 _totalAssets) external onlyFundManager {
-        // Reject total-loss scenarios
-        if (_totalAssets == 0) revert INVALID_PARAMETERS();
-
         // Ensure previous epoch has been settled before allowing close of a new epoch
         if (_snapshot.epoch != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
 
@@ -258,8 +255,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         _epochRate[settlingEpoch] = _snapshot.rate;
         _epochSettled[settlingEpoch] = true;
 
-        /// FIXME : verify below formula (should this account for unclaimed redeeming/depositing shares?)
-        uint256 totalAssetValue = _snapshot.rate.mulDiv(totalSupply(), 1e18);
+        /// FIXME : verify below formula (should this account for unclaimed redeeming shares?)
+        uint256 totalAssetValue = _snapshot.rate.mulDiv(totalSupply() + _unclaimedDepositShares, 1e18);
         emit EpochSettled(
             settlingEpoch, totalAssetValue, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares
         );
