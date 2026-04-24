@@ -83,6 +83,8 @@ interface IFundManager {
 
     error ASSET_MISMATCH();
 
+    error INSUFFICIENT_UNUTILIZED_ASSETS();
+
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //    / __/ | |/_/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
@@ -229,9 +231,9 @@ interface IFundManager {
     /**
      * @notice Amount of super-token the FundManager is short of to sustain the target flow for the
      *         full `guaranteedFlowDuration` horizon.
-     * @return deficit Required super-token balance minus current super-token balance, or 0 if fully funded.
+     * @return deficit deficit amount of yield assets if positive, excess if negative
      */
-    function evaluateYieldAssetsDeficit() external view returns (uint256 deficit);
+    function evaluateYieldAssets() external view returns (int256 deficit);
 
     /**
      * @notice Whether the current epoch satisfies all preconditions required to call {settleEpoch}.
