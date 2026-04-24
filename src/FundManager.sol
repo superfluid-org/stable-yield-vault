@@ -212,6 +212,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         emit GuaranteedFlowDurationChanged(oldDuration, newDuration);
     }
 
+    /// @inheritdoc IFundManager
     function setVault(address _vault) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_vault == address(0)) revert ZERO_ADDRESS();
         if (address(vault) != address(0)) revert VAULT_ALREADY_SET();
@@ -230,23 +231,23 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
 
     /// @inheritdoc IFundManager
-    function onClaimDeposit(address controller, uint256 depositAssets) external onlyRole(VAULT_ROLE) {
-        // Transfer the units associated to the claimed deposit from FM to the controller
+    function onClaimDeposit(address shareholder, uint256 depositAssets) external onlyRole(VAULT_ROLE) {
+        // Transfer the units associated to the claimed deposit from FM to the shareholder
         POOL.decreaseMemberUnits(address(this), uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
-        POOL.increaseMemberUnits(controller, uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
+        POOL.increaseMemberUnits(shareholder, uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
 
         // pool.totalUnits unchanged -> flowRate unchanged -> invariant unchanged
     }
 
     /// @inheritdoc IFundManager
-    function onRequestRedeem(address controller, uint256 sharesRedeemed, uint256 totalSharesOwned)
+    function onRequestRedeem(address shareholder, uint256 sharesRedeemed, uint256 totalSharesOwned)
         external
         onlyRole(VAULT_ROLE)
     {
         if (totalSharesOwned == 0 || sharesRedeemed > totalSharesOwned) revert BAD_REDEEM_ARGS();
 
-        uint128 userUnits = POOL.getUnits(controller);
-        if (userUnits == 0) return;
+        uint128 userUnits = POOL.getUnits(shareholder);
+        if (userUnits == 0) revert BAD_REDEEM_ARGS();
 
         uint128 delta;
         if (sharesRedeemed == totalSharesOwned) {
@@ -255,7 +256,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
             delta = uint128(uint256(userUnits).mulDiv(sharesRedeemed, totalSharesOwned, Math.Rounding.Ceil));
         }
 
-        POOL.updateMemberUnits(controller, userUnits - delta);
+        POOL.updateMemberUnits(shareholder, userUnits - delta);
         _recalibrateFlow();
         // pool.totalUnits decreases -> flowRate decreases; invariant trivially safe
     }
@@ -349,7 +350,6 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
             // note - Add 1 unit to cover for decimals clipping in case of non-18 decimals underlying
             _upgrade();
         } else {
-            
             // downgrade excess amount of yield assets
             _downgrade(deficit);
         }

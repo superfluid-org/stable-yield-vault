@@ -159,7 +159,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         if (shares > totalSharesOwned) revert INVALID_PARAMETERS();
 
         // Inform FM to decrement units and recalibrate the GDA flow.
-        FUND_MANAGER.onRequestRedeem(controller, shares, totalSharesOwned);
+        FUND_MANAGER.onRequestRedeem(owner, shares, totalSharesOwned);
 
         // Transfer the shares from the owner to this contract
         _transfer(owner, address(this), shares);
@@ -476,7 +476,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         _unclaimedDepositShares -= shares;
         _mint(receiver, shares);
         FUND_MANAGER.onClaimDeposit(receiver, assets);
-        emit Deposit(msg.sender, receiver, assets, shares);
+        emit Deposit(controller, receiver, assets, shares);
     }
 
     /// @dev Executes a redeem claim: deducts from claimable, burns shares, transfers assets.
