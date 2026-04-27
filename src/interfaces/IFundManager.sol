@@ -233,7 +233,7 @@ interface IFundManager {
      *         full `guaranteedFlowDuration` horizon.
      * @return deficit deficit amount of yield assets if positive, excess if negative
      */
-    function evaluateYieldAssets() external view returns (int256 deficit);
+    function evaluateYieldAssetsDeficit() external view returns (int256 deficit);
 
     /**
      * @notice Whether the current epoch satisfies all preconditions required to call {settleEpoch}.

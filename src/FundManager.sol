@@ -293,7 +293,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
         uint256 actualBalance = yieldAssetsBalance();
 
-        deficit = requiredBalance - actualBalance;
+        deficit = int256(requiredBalance - actualBalance);
     }
 
     /// @inheritdoc IFundManager
@@ -342,16 +342,16 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         int256 deficit = evaluateYieldAssetsDeficit();
 
         if (deficit > 0) {
-            uint256 underlyingAmountToUpgrade = (deficit / SUPER_TOKEN_SCALE) + 1;
+            // Add 1 unit to cover for decimals clipping in case of non-18 decimals underlying
+            uint256 underlyingAmountToUpgrade = (uint256(deficit) / SUPER_TOKEN_SCALE) + 1;
 
             if (unutilizedAssetsBalance() < underlyingAmountToUpgrade) revert INSUFFICIENT_UNUTILIZED_ASSETS();
 
             // Upgrade underlying deficit amount
-            // note - Add 1 unit to cover for decimals clipping in case of non-18 decimals underlying
-            _upgrade();
+            _upgrade(underlyingAmountToUpgrade);
         } else {
             // downgrade excess amount of yield assets
-            _downgrade(deficit);
+            _downgrade(uint256(deficit));
         }
     }
 
