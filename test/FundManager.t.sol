@@ -606,7 +606,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
     }
 
     function test_setGuaranteedFlowDuration_accessControl(address nonFundOperator, uint256 newDuration) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        vm.assume(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), nonFundOperator) == false);
         vm.prank(nonFundOperator);
         vm.expectRevert();
 

@@ -149,7 +149,7 @@ interface IFundManager {
 
     /**
      * @notice Set the minimum forward stream-solvency horizon the FundManager must maintain.
-     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
      *      Reverts with DURATION_BELOW_FLOOR if `newDuration` is below MIN_GUARANTEED_FLOW_DURATION,
      *      or with INVARIANT_VIOLATED if the post-operation state would break the invariant.
      * @param newDuration The new guaranteed flow duration, in seconds.

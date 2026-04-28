@@ -206,7 +206,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     }
 
     /// @inheritdoc IFundManager
-    function setGuaranteedFlowDuration(uint256 newDuration) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
+    function setGuaranteedFlowDuration(uint256 newDuration) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         if (newDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
         uint256 oldDuration = guaranteedFlowDuration;
 
