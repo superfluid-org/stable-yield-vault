@@ -102,7 +102,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         ASSET = IERC20(_asset);
 
         // Verify super-token wraps the correct underlying
-        if (ISuperToken(_superToken).getUnderlyingToken() != address(ASSET)) revert NOT_INITIALIZED();
+        if (ISuperToken(_superToken).getUnderlyingToken() != address(ASSET)) revert ASSET_MISMATCH();
         SUPER_TOKEN = ISuperToken(_superToken);
 
         uint8 underlyingDecimals = ISuperToken(_superToken).getUnderlyingDecimals();
@@ -137,9 +137,9 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function closeEpoch(uint256 workingAssets) external onlyRole(FUND_OPERATOR_ROLE) {
-        // totalFundAssets is reported in underlying decimals
-        uint256 totalFundAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance();
-        vault.closeEpoch(totalFundAssets);
+        // totalAssets is reported in underlying decimals
+        uint256 totalAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance();
+        vault.closeEpoch(totalAssets);
     }
 
     /// @inheritdoc IFundManager
@@ -293,7 +293,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
         uint256 actualBalance = yieldAssetsBalance();
 
-        deficit = int256(requiredBalance - actualBalance);
+        deficit = int256(requiredBalance) - int256(actualBalance);
     }
 
     /// @inheritdoc IFundManager
@@ -349,19 +349,16 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
             // Upgrade underlying deficit amount
             _upgrade(underlyingAmountToUpgrade);
-        } else {
+        } else if (deficit < 0) {
             // downgrade excess amount of yield assets
-            _downgrade(uint256(deficit));
+            _downgrade(uint256(-deficit));
+        } else {
+            return;
         }
     }
 
     function _targetFlowRate() internal view returns (int96 flowRate) {
         flowRate = _flowRatePerUnit * int96(int128(POOL.getTotalUnits()));
-    }
-
-    /// @dev Assert the stream-solvency invariant: avail >= actualFlowRate * guaranteedFlowDuration.
-    function _assertInvariant() internal view {
-        if (evaluateYieldAssetsDeficit() > 0) revert INVARIANT_VIOLATED();
     }
 
 }

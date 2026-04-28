@@ -63,11 +63,6 @@ interface IFundManager {
     error DURATION_BELOW_FLOOR();
 
     /**
-     * @notice Thrown at construction when the provided super-token does not wrap the vault's underlying asset.
-     */
-    error NOT_INITIALIZED();
-
-    /**
      * @notice Thrown when settleEpoch is called but the settlement preconditions are not satisfied.
      */
     error SETTLEMENT_PRECONDITIONS_NOT_MET();
