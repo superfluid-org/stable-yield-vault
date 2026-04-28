@@ -122,7 +122,10 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
     function test_settleEpoch_revertsIfNoEpochClosed() public {
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, "CURRENT_EPOCH_NOT_CLOSED")
+        );
+
         _fundManager.settleEpoch();
     }
 
