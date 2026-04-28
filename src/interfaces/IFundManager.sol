@@ -15,10 +15,10 @@ interface IFundManager {
 
     /**
      * @notice Emitted when the operator updates the committed annualized streaming rate.
-     * @param oldRate Previous annual rate, scaled by 1e18 (WAD).
-     * @param newRate New annual rate, scaled by 1e18 (WAD).
+     * @param oldRate Previous annualized era rate, expressed in basis points
+     * @param newRate New annualized era rate, expressed in basis points
      */
-    event AnnualRateChanged(uint256 oldRate, uint256 newRate);
+    event EraStableYieldRateChanged(uint256 oldRate, uint256 newRate);
 
     /**
      * @notice Emitted when the operator updates the minimum forward stream-solvency horizon.
@@ -139,13 +139,13 @@ interface IFundManager {
     function downgrade(uint256 superTokenAmount) external;
 
     /**
-     * @notice Set the target annualized rate committed to per-unit streaming.
+     * @notice Set the target annualized era stable yield rate
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
      *      Recalibrates the distribution flow; reverts with INVARIANT_VIOLATED if the new rate would break
      *      the stream-solvency invariant.
-     * @param newRate The new annual rate, scaled by 1e18 (WAD). 5% APR == 5e16.
+     * @param newRate The new annualized stable yield rate, expressed in basis points (e.g. 100 <=> 1%)
      */
-    function setAnnualRate(uint256 newRate) external;
+    function setEraStableYieldRate(uint256 newRate) external;
 
     /**
      * @notice Set the minimum forward stream-solvency horizon the FundManager must maintain.
@@ -240,12 +240,14 @@ interface IFundManager {
     function YIELD_ASSET() external view returns (ISuperToken);
 
     /**
-     * @notice The current annualized rate committed to per-unit streaming, scaled by 1e18 (WAD).
+     * @notice The current era's annualized rate committed to per-unit streaming
+     * @dev Expressed in basis point (e.g. 100 <=> 1%)
      */
-    function annualRate() external view returns (uint256);
+    function eraStableYieldRate() external view returns (uint256);
 
     /**
-     * @notice The minimum forward stream-solvency horizon the FundManager maintains, in seconds.
+     * @notice The minimum forward stream-solvency horizon the FundManager maintains
+     * @dev Expressed in seconds
      */
     function guaranteedFlowDuration() external view returns (uint256);
 

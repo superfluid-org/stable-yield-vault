@@ -16,7 +16,7 @@ import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVa
 
 contract FundManagerTest is StableYieldVaultTestBase {
 
-    event AnnualRateChanged(uint256 oldRate, uint256 newRate);
+    event EraStableYieldRateChanged(uint256 oldRate, uint256 newRate);
     event GuaranteedFlowDurationChanged(uint256 oldDuration, uint256 newDuration);
     event Gave(address indexed from, uint256 amount);
     event Took(address indexed to, uint256 amount);
@@ -35,8 +35,9 @@ contract FundManagerTest is StableYieldVaultTestBase {
     }
 
     function _calculateExpectedFlowRate(uint128 poolUnits) internal view returns (int96 expectedFlowRate) {
-        int96 flowRatePerUnit =
-            int96(int256(_fundManager.SCALING_FACTOR() * _fundManager.annualRate() / (_fundManager.YEAR() * 10_000)));
+        int96 flowRatePerUnit = int96(
+            int256(_fundManager.SCALING_FACTOR() * _fundManager.eraStableYieldRate() / (_fundManager.YEAR() * 10_000))
+        );
 
         expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
     }
@@ -51,7 +52,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(address(_fundManager.UNDERLYING_ASSET()), address(_usdc));
         vm.assertEq(address(_fundManager.YIELD_ASSET()), address(_usdcx));
         vm.assertEq(_fundManager.SCALING_FACTOR(), 1e12);
-        vm.assertEq(_fundManager.annualRate(), INITIAL_ANNUAL_RATE);
+        vm.assertEq(_fundManager.eraStableYieldRate(), INITIAL_ERA_STABLE_YIELD_RATE);
         vm.assertEq(_fundManager.guaranteedFlowDuration(), GUARANTEED_FLOW_DURATION);
         vm.assertTrue(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), FUND_OPERATOR));
         vm.assertTrue(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), DEPLOYER));
@@ -65,7 +66,12 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
         vm.expectRevert(IFundManager.ASSET_MISMATCH.selector);
         new FundManager(
-            address(_usdc), otherUsdcx, FUND_OPERATOR, FUND_ADMIN, INITIAL_ANNUAL_RATE, GUARANTEED_FLOW_DURATION
+            address(_usdc),
+            otherUsdcx,
+            FUND_OPERATOR,
+            FUND_ADMIN,
+            INITIAL_ERA_STABLE_YIELD_RATE,
+            GUARANTEED_FLOW_DURATION
         );
     }
 
@@ -74,7 +80,12 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
         vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
         new FundManager(
-            address(_usdc), address(_usdcx), FUND_OPERATOR, FUND_ADMIN, INITIAL_ANNUAL_RATE, belowFloorDuration
+            address(_usdc),
+            address(_usdcx),
+            FUND_OPERATOR,
+            FUND_ADMIN,
+            INITIAL_ERA_STABLE_YIELD_RATE,
+            belowFloorDuration
         );
     }
 
@@ -284,19 +295,19 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.downgrade(downgradeAmount);
     }
 
-    function test_setAnnualRate_updatesAndEmits() public {
+    function test_setEraStableYieldRate_updatesAndEmits() public {
         uint256 newRate = 2000; // 20%
 
         vm.expectEmit(false, false, false, true, address(_fundManager));
-        emit AnnualRateChanged(INITIAL_ANNUAL_RATE, newRate);
+        emit EraStableYieldRateChanged(INITIAL_ERA_STABLE_YIELD_RATE, newRate);
 
         vm.prank(FUND_OPERATOR);
-        _fundManager.setAnnualRate(newRate);
+        _fundManager.setEraStableYieldRate(newRate);
 
-        vm.assertEq(_fundManager.annualRate(), newRate);
+        vm.assertEq(_fundManager.eraStableYieldRate(), newRate);
     }
 
-    function test_setAnnualRate_revertsIfInvariantWouldBeViolated() public {
+    function test_setEraStableYieldRate_revertsIfInvariantWouldBeViolated() public {
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
         vm.prank(FUND_OPERATOR);
@@ -308,7 +319,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         // but the 7-day invariant horizon exceeds the yield buffer.
         vm.prank(FUND_OPERATOR);
         vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
-        _fundManager.setAnnualRate(INITIAL_ANNUAL_RATE * 500);
+        _fundManager.setEraStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE * 500);
     }
 
     function test_setGuaranteedFlowDuration_updatesAndEmits() public {
@@ -586,12 +597,12 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.downgrade(amount);
     }
 
-    function test_setAnnualRate_accessControl(address nonFundOperator, uint256 newRate) public {
+    function test_setEraStableYieldRate_accessControl(address nonFundOperator, uint256 newRate) public {
         vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
         vm.prank(nonFundOperator);
         vm.expectRevert();
 
-        _fundManager.setAnnualRate(newRate);
+        _fundManager.setEraStableYieldRate(newRate);
     }
 
     function test_setGuaranteedFlowDuration_accessControl(address nonFundOperator, uint256 newDuration) public {

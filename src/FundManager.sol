@@ -39,7 +39,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     /// @notice Seconds in a year (365 * 24 * 3600)
     uint256 public constant YEAR = 365 days;
 
-    // /// @notice Basis Point denominator for annual rate calculations (e.g. 10_000 = 100%)
+    // /// @notice Basis Point denominator for annualized stable yield rate calculations (e.g. 10_000 = 100%)
     uint256 private constant _BP_DENOMINATOR = 10_000;
 
     // Every 1 USDC deposited gives 1e6 units to the depositor
@@ -71,7 +71,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //  /____/\__/\__,_/\__/\___/____/
 
     /// @inheritdoc IFundManager
-    uint256 public annualRate;
+    uint256 public eraStableYieldRate;
 
     int96 private _flowRatePerUnit;
 
@@ -90,7 +90,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
      * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
      * @param _fundOperator Operator granted with the FUND_OPERATOR_ROLE
      * @param _fundAdmin Admin granted with the DEFAULT_ADMIN_ROLE
-     * @param _initialAnnualRate Initial annualRate in basis points (10% <=> 1000)
+     * @param _initialEraStableYieldRate Initial era stable yield rate (in basis points, e.g. 100% <=> 1)
      * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      */
     constructor(
@@ -98,7 +98,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         address _yieldAsset,
         address _fundOperator,
         address _fundAdmin,
-        uint256 _initialAnnualRate,
+        uint256 _initialEraStableYieldRate,
         uint256 _initialGuaranteedFlowDuration
     ) {
         UNDERLYING_ASSET = IERC20(_asset);
@@ -127,10 +127,10 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         // Connect FM to the pool
         YIELD_ASSET.connectPool(POOL);
 
-        annualRate = _initialAnnualRate;
+        eraStableYieldRate = _initialEraStableYieldRate;
 
         /// FIXME : this formula needs to be generalized (eg. for regular 1e18 underlying decimals assets)
-        _flowRatePerUnit = int96(int256(SCALING_FACTOR * _initialAnnualRate / (YEAR * _BP_DENOMINATOR)));
+        _flowRatePerUnit = int96(int256(SCALING_FACTOR * _initialEraStableYieldRate / (YEAR * _BP_DENOMINATOR)));
 
         if (_initialGuaranteedFlowDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
         guaranteedFlowDuration = _initialGuaranteedFlowDuration;
@@ -189,18 +189,18 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     }
 
     /// @inheritdoc IFundManager
-    function setAnnualRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
-        uint256 oldRate = annualRate;
-        annualRate = newRate;
+    function setEraStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
+        uint256 oldRate = eraStableYieldRate;
+        eraStableYieldRate = newRate;
 
-        // Recalculate flow rate based on the new annual rate
+        // Recalculate flow rate based on the new annualized era stable yield rate
         /// FIXME : this formula needs to be generalized (eg. for regular 1e18 underlying decimals assets)
         _flowRatePerUnit = int96(int256(SCALING_FACTOR * newRate / (YEAR * _BP_DENOMINATOR)));
 
         _rebalanceYieldAssets();
         _recalibrateFlow();
 
-        emit AnnualRateChanged(oldRate, newRate);
+        emit EraStableYieldRateChanged(oldRate, newRate);
     }
 
     /// @inheritdoc IFundManager

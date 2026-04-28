@@ -39,7 +39,7 @@ contract StableYieldVaultTestBase is Test {
 
     address internal immutable WHALE = makeAddr("WHALE");
 
-    uint256 internal constant INITIAL_ANNUAL_RATE = 1000; // 10% annual rate
+    uint256 internal constant INITIAL_ERA_STABLE_YIELD_RATE = 1000; // 10% annual rate
     uint256 internal constant GUARANTEED_FLOW_DURATION = 7 days;
 
     uint256 internal constant ONE_BILLION = 1_000_000_000;
@@ -57,7 +57,7 @@ contract StableYieldVaultTestBase is Test {
                 yieldAsset: address(_usdcx),
                 fundOperator: FUND_OPERATOR,
                 fundAdmin: FUND_OPERATOR,
-                initialEraStableYieldRate: INITIAL_ANNUAL_RATE,
+                initialEraStableYieldRate: INITIAL_ERA_STABLE_YIELD_RATE,
                 guaranteedFlowDuration: GUARANTEED_FLOW_DURATION,
                 shareName: "Stable Yield Vault Share",
                 shareSymbol: "SYVS"

@@ -81,7 +81,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
      * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
      * @param _fundOperator Fund Manager operator address
      * @param _fundAdmin Fund Manager admin address
-     * @param _initialEraStableYieldRate Initial stable yield rate in basis points (10% <=> 1000)
+     * @param _initialEraStableYieldRate Initial era stable yield rate (in basis points, e.g. 100% <=> 1)
      * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      * @param name The name of the share token.
      * @param symbol The symbol of the share token.
