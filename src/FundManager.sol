@@ -190,6 +190,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function setEraStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
+        /// FIXME : enforce minimum era duration
+
         uint256 oldRate = eraStableYieldRate;
         eraStableYieldRate = newRate;
 
