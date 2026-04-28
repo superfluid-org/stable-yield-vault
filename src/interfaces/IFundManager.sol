@@ -99,6 +99,12 @@ interface IFundManager {
     function settleEpoch() external;
 
     /**
+     * @notice Restart the yield flow if needed and rebalance underlying/yield assets to guarantee the flow duration
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     */
+    function ensureYieldFlowDuration() external;
+
+    /**
      * @notice Deposit underlying assets into the FundManager.
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
      *      Pulls underlying from the caller into the FundManager.
@@ -115,29 +121,13 @@ interface IFundManager {
     function take(uint256 amount) external;
 
     /**
-     * @notice Upgrade underlying assets held by the FundManager into super-tokens used to fund the yield stream.
-     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Increases the yield-asset balance; the stream-solvency invariant is trivially preserved.
-     * @param underlyingAmount The amount of underlying asset to upgrade, in underlying decimals.
-     */
-    function upgrade(uint256 underlyingAmount) external;
-
-    /**
-     * @notice Downgrade super-tokens held by the FundManager back into underlying assets.
-     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Reverts with INVARIANT_VIOLATED if the post-operation state would break the stream-solvency invariant.
-     * @param superTokenAmount The amount of super-token to downgrade, in super-token decimals (18).
-     */
-    function downgrade(uint256 superTokenAmount) external;
-
-    /**
      * @notice Set the target annualized era stable yield rate
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
      *      Recalibrates the distribution flow; reverts with INVARIANT_VIOLATED if the new rate would break
      *      the stream-solvency invariant.
      * @param newRate The new annualized stable yield rate, expressed in basis points (e.g. 100 <=> 1%)
      */
-    function setEraStableYieldRate(uint256 newRate) external;
+    function setStableYieldRate(uint256 newRate) external;
 
     /**
      * @notice Set the minimum forward stream-solvency horizon the FundManager must maintain.

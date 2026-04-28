@@ -271,60 +271,19 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.take(1);
     }
 
-    function test_upgrade_convertsUsdcToUsdcx() public {
-        _dealUSDC(address(_fundManager), DEFAULT_DEPOSIT);
-        uint256 yieldBefore = _fundManager.yieldAssetsBalance();
-
-        vm.prank(FUND_OPERATOR);
-        _fundManager.upgrade(DEFAULT_DEPOSIT);
-
-        vm.assertEq(_fundManager.yieldAssetsBalance(), yieldBefore + DEFAULT_DEPOSIT * _fundManager.SCALING_FACTOR());
-    }
-
-    function test_downgrade_convertsUsdcxToUsdc() public {
-        _seedYieldBuffer();
-        uint256 unutilizedBefore = _fundManager.unutilizedAssetsBalance();
-        uint256 downgradeAmount = 1 ether; // 1 USDCx
-
-        vm.prank(FUND_OPERATOR);
-        _fundManager.downgrade(downgradeAmount);
-
-        vm.assertEq(
-            _fundManager.unutilizedAssetsBalance(), unutilizedBefore + downgradeAmount / _fundManager.SCALING_FACTOR()
-        );
-    }
-
-    function test_downgrade_revertsIfInvariantWouldBeViolated() public {
-        _seedYieldBuffer();
-        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.closeEpoch(0);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.settleEpoch();
-
-        // Attempt to downgrade most of the yield buffer — would leave < required
-        uint256 bal = _fundManager.yieldAssetsBalance();
-        // Leave just 1 wei of USDCx — guaranteed to be below required
-        uint256 downgradeAmount = bal - 1;
-
-        vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
-        _fundManager.downgrade(downgradeAmount);
-    }
-
-    function test_setEraStableYieldRate_updatesAndEmits() public {
+    function test_setStableYieldRate_updatesAndEmits() public {
         uint256 newRate = 2000; // 20%
 
         vm.expectEmit(false, false, false, true, address(_fundManager));
         emit EraStableYieldRateChanged(INITIAL_ERA_STABLE_YIELD_RATE, newRate);
 
         vm.prank(FUND_OPERATOR);
-        _fundManager.setEraStableYieldRate(newRate);
+        _fundManager.setStableYieldRate(newRate);
 
         vm.assertEq(_fundManager.eraStableYieldRate(), newRate);
     }
 
-    function test_setEraStableYieldRate_revertsIfInvariantWouldBeViolated() public {
+    function test_setStableYieldRate_revertsIfInvariantWouldBeViolated() public {
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
         vm.prank(FUND_OPERATOR);
@@ -336,7 +295,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         // but the 7-day invariant horizon exceeds the yield buffer.
         vm.prank(FUND_OPERATOR);
         vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
-        _fundManager.setEraStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE * 500);
+        _fundManager.setStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE * 500);
     }
 
     function test_setGuaranteedFlowDuration_updatesAndEmits() public {
@@ -581,36 +540,12 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.take(amount);
     }
 
-    function test_upgrade_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 * 1e6);
-
-        _dealUSDC(address(_fundManager), amount);
-
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.upgrade(amount);
-    }
-
-    function test_downgrade_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 ether);
-
-        _dealUSDCx(address(_fundManager), amount);
-
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.downgrade(amount);
-    }
-
-    function test_setEraStableYieldRate_accessControl(address nonFundOperator, uint256 newRate) public {
+    function test_setStableYieldRate_accessControl(address nonFundOperator, uint256 newRate) public {
         vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
         vm.prank(nonFundOperator);
         vm.expectRevert();
 
-        _fundManager.setEraStableYieldRate(newRate);
+        _fundManager.setStableYieldRate(newRate);
     }
 
     function test_setGuaranteedFlowDuration_accessControl(address nonFundOperator, uint256 newDuration) public {

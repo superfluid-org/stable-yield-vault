@@ -170,6 +170,18 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     }
 
     /// @inheritdoc IFundManager
+    function ensureYieldFlowDuration() external onlyRole(FUND_OPERATOR_ROLE) {
+        // Rebalance underlying vs. yield assets
+        _rebalanceYieldAssets();
+
+        // Check if the flow needs to be restarted
+        if (POOL.getTotalFlowRate() == 0 && POOL.getTotalUnits() > 0) {
+            // Restart the distribution flow if necessary
+            _recalibrateFlow();
+        }
+    }
+
+    /// @inheritdoc IFundManager
     function give(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) {
         UNDERLYING_ASSET.safeTransferFrom(msg.sender, address(this), amount);
         emit Gave(msg.sender, amount);
@@ -181,16 +193,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         emit Took(msg.sender, amount);
     }
 
-    function upgrade(uint256 underlyingAmount) external onlyRole(FUND_OPERATOR_ROLE) {
-        _upgrade(underlyingAmount);
-    }
-
-    function downgrade(uint256 superTokenAmount) external onlyRole(FUND_OPERATOR_ROLE) {
-        _downgrade(superTokenAmount);
-    }
-
     /// @inheritdoc IFundManager
-    function setEraStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
+    function setStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
         /// FIXME : enforce minimum era duration
 
         uint256 oldRate = eraStableYieldRate;
