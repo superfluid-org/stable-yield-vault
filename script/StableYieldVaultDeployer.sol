@@ -18,41 +18,24 @@ library StableYieldVaultDeployer {
         internal
         returns (DeploymentResult memory results)
     {
-        // Deploy the Liquidity Strategy Contract
-        results = _deployFundManager(config);
-        results = _deployVault(config, results);
-        _configureFundManager(results);
+        // Deploy the AsyncVault and AsyncFundManager Contract
+        results = _deploy(config);
     }
 
-    function _deployFundManager(NetworkConfig.DeploymentConfig memory config)
-        internal
-        returns (DeploymentResult memory results)
-    {
-        FundManager fundManager = new FundManager(
-            config.underlying,
-            config.superToken,
+    function _deploy(NetworkConfig.DeploymentConfig memory config) internal returns (DeploymentResult memory results) {
+        StableYieldAsyncVault asyncVault = new StableYieldAsyncVault(
+            config.underlyingAsset,
+            config.yieldAsset,
             config.fundOperator,
-            config.initialAnnualRate,
-            config.guaranteedFlowDuration
+            config.fundAdmin,
+            config.initialEraStableYieldRate,
+            config.guaranteedFlowDuration,
+            config.shareName,
+            config.shareSymbol
         );
 
-        results.fundManager = address(fundManager);
-    }
-
-    function _deployVault(NetworkConfig.DeploymentConfig memory config, DeploymentResult memory results)
-        internal
-        returns (DeploymentResult memory)
-    {
-        StableYieldAsyncVault asyncVault =
-            new StableYieldAsyncVault(config.underlying, results.fundManager, config.shareName, config.shareSymbol);
-
         results.asyncVault = address(asyncVault);
-
-        return results;
-    }
-
-    function _configureFundManager(DeploymentResult memory results) internal {
-        FundManager(results.fundManager).setVault(results.asyncVault);
+        results.fundManager = address(asyncVault.FUND_MANAGER());
     }
 
 }

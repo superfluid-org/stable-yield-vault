@@ -29,10 +29,11 @@ contract Deploy is Script {
 
         console.log("");
         console.log("===> DEPLOYMENT CONFIGURATION");
-        console.log(" --- Underlying Asset              :", config.underlying);
-        console.log(" --- SuperToken                    :", config.superToken);
+        console.log(" --- Underlying Asset              :", config.underlyingAsset);
+        console.log(" --- Yield Asset                   :", config.yieldAsset);
         console.log(" --- Fund Operator                 :", config.fundOperator);
-        console.log(" --- Initial Annual Rate           :", config.initialAnnualRate);
+        console.log(" --- Fund Admin                    :", config.fundAdmin);
+        console.log(" --- Initial Era Stable Yield Rate :", config.initialEraStableYieldRate);
         console.log(" --- Guaranteed Flow Duration      :", config.guaranteedFlowDuration);
         console.log(" --- Share Name                    :", config.shareName);
         console.log(" --- Share Symbol                  :", config.shareSymbol);

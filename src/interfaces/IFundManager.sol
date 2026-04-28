@@ -156,13 +156,6 @@ interface IFundManager {
      */
     function setGuaranteedFlowDuration(uint256 newDuration) external;
 
-    /**
-     * @notice Set vault address and grant it permissions to call FM hooks.
-     * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
-     * @param vault The vault address to connect to this FundManager
-     */
-    function setVault(address vault) external;
-
     //    _    __             ____     ______      __           __
     //   | |  / /___ ___  __/ / /_   / ____/___ _/ /____  ____/ /
     //   | | / / __ `/ / / / / __/  / / __/ __ `/ __/ _ \/ __  /
@@ -244,7 +237,7 @@ interface IFundManager {
     /**
      * @notice The super-token wrapping the underlying asset.
      */
-    function SUPER_TOKEN() external view returns (ISuperToken);
+    function YIELD_ASSET() external view returns (ISuperToken);
 
     /**
      * @notice The current annualized rate committed to per-unit streaming, scaled by 1e18 (WAD).

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import { IFundManager } from "./interfaces/IFundManager.sol";
+import { FundManager } from "src/FundManager.sol";
 
 import {
     IERC4626,
@@ -76,16 +77,35 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
      * @notice Initializes the vault with the underlying asset and share token metadata.
      * @dev    The FundManager address must be wired via `setFundManager` after deployment.
      *         This breaks the construction cycle between Vault and FundManager (FM needs Vault).
-     * @param _underlyingAsset The address of the underlying ERC-20 asset.
-     * @param _fundManager Address of the deployed FundManager.
+     * @param _underlyingAsset The address of the underlying ERC-20 asset
+     * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
+     * @param _fundOperator Fund Manager operator address
+     * @param _fundAdmin Fund Manager admin address
+     * @param _initialEraStableYieldRate Initial stable yield rate in basis points (10% <=> 1000)
+     * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      * @param name The name of the share token.
      * @param symbol The symbol of the share token.
      */
-    constructor(address _underlyingAsset, address _fundManager, string memory name, string memory symbol)
-        ERC20(name, symbol)
-    {
+    constructor(
+        address _underlyingAsset,
+        address _yieldAsset,
+        address _fundOperator,
+        address _fundAdmin,
+        uint256 _initialEraStableYieldRate,
+        uint256 _initialGuaranteedFlowDuration,
+        string memory name,
+        string memory symbol
+    ) ERC20(name, symbol) {
         underlyingAsset = IERC20(_underlyingAsset);
-        FUND_MANAGER = IFundManager(_fundManager);
+
+        FUND_MANAGER = new FundManager(
+            _underlyingAsset,
+            _yieldAsset,
+            _fundOperator,
+            _fundAdmin,
+            _initialEraStableYieldRate,
+            _initialGuaranteedFlowDuration
+        );
 
         // Initialize the first epoch to 1
         currentEpoch = 1;

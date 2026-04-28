@@ -8,6 +8,8 @@ import { IERC7540Redeem } from "./IERC7540Redeem.sol";
 import { IERC7575 } from "./IERC7575.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
+import { IFundManager } from "src/interfaces/IFundManager.sol";
+
 /// @title IStableYieldAsyncVault
 /// @notice Fully asynchronous ERC-7540 vault with epoch-based, two-phase settlement.
 ///

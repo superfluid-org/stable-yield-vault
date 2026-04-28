@@ -32,6 +32,7 @@ contract StableYieldVaultTestBase is Test {
 
     address internal immutable DEPLOYER = makeAddr("DEPLOYER");
     address internal immutable FUND_OPERATOR = makeAddr("FUND_OPERATOR");
+    address internal immutable FUND_ADMIN = makeAddr("FUND_ADMIN");
     address internal immutable ALICE = makeAddr("ALICE");
     address internal immutable BOB = makeAddr("BOB");
     address internal immutable KAREN = makeAddr("KAREN");
@@ -52,10 +53,11 @@ contract StableYieldVaultTestBase is Test {
         vm.startPrank(DEPLOYER);
         StableYieldVaultDeployer.DeploymentResult memory deploymentResult = StableYieldVaultDeployer.deployAll(
             NetworkConfig.DeploymentConfig({
-                underlying: address(_usdc),
-                superToken: address(_usdcx),
+                underlyingAsset: address(_usdc),
+                yieldAsset: address(_usdcx),
                 fundOperator: FUND_OPERATOR,
-                initialAnnualRate: INITIAL_ANNUAL_RATE,
+                fundAdmin: FUND_OPERATOR,
+                initialEraStableYieldRate: INITIAL_ANNUAL_RATE,
                 guaranteedFlowDuration: GUARANTEED_FLOW_DURATION,
                 shareName: "Stable Yield Vault Share",
                 shareSymbol: "SYVS"
