@@ -68,15 +68,6 @@ interface IFundManager {
      */
     error SETTLEMENT_PRECONDITIONS_NOT_MET(string reason);
 
-    /**
-     * @notice Thrown when a caller attempts an operation they are not allowed to perform.
-     */
-    error NOT_AUTHORIZED();
-
-    error VAULT_ALREADY_SET();
-
-    error ZERO_ADDRESS();
-
     error ASSET_MISMATCH();
 
     error INSUFFICIENT_UNUTILIZED_ASSETS();
