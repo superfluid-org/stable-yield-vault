@@ -190,6 +190,12 @@ interface IFundManager {
     function scaledYieldAssetsBalance() external view returns (uint256 balance);
 
     /**
+     * @notice Evaluate the current FundManager current funding situation
+     * @return funding amount that can be taken if negative, or that must be given if positive
+     */
+    function evaluateFunding() external view returns (int256 funding);
+
+    /**
      * @notice Amount of super-token the FundManager is short of to sustain the target flow for the
      *         full `guaranteedFlowDuration` horizon.
      * @return deficit deficit amount of yield assets if positive, excess if negative

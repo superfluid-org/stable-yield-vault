@@ -285,6 +285,18 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     }
 
     /// @inheritdoc IFundManager
+    function evaluateFunding() external view returns (int256 funding) {
+        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
+
+        int256 underlyingAssetDeficit =
+            int256(redeemingAssets) - int256(unutilizedAssetsBalance()) - int256(snap.depositingAssets);
+        int256 scaledYieldAssetDeficit = evaluateYieldAssetsDeficit() / int256(SCALING_FACTOR);
+
+        funding = underlyingAssetDeficit + scaledYieldAssetDeficit;
+    }
+
+    /// @inheritdoc IFundManager
     function evaluateYieldAssetsDeficit() public view returns (int256 deficit) {
         /// FIXME : add buffer to the required balance
         uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
