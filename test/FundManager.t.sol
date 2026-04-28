@@ -34,122 +34,18 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _dealUSDCx(address(_fundManager), USDCX_SEED);
     }
 
-    //      ___                               ______            __             __   ______          __
-    //     /   | _____________  __________   / ____/___  ____  / /__________  / /  /_  __/__  _____/ /______
-    //    / /| |/ ___/ ___/ _ \/ ___/ ___/  / /   / __ \/ __ \/ __/ ___/ __ \/ /    / / / _ \/ ___/ __/ ___/
-    //   / ___ / /__/ /__/  __(__  |__  )  / /___/ /_/ / / / / /_/ /  / /_/ / /    / / /  __(__  ) /_(__  )
-    //  /_/  |_\___/\___/\___/____/____/   \____/\____/_/ /_/\__/_/   \____/_/    /_/  \___/____/\__/____/
+    function _calculateExpectedFlowRate(uint128 poolUnits) internal view returns (int96 expectedFlowRate) {
+        int96 flowRatePerUnit =
+            int96(int256(_fundManager.SUPER_TOKEN_SCALE() * _fundManager.annualRate() / (_fundManager.YEAR() * 10_000)));
 
-    function test_closeEpoch_accessControl(address nonFundOperator, uint256 workingAssets) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.closeEpoch(workingAssets);
+        expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
     }
 
-    function test_settleEpoch_accessControl(address nonFundOperator) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.settleEpoch();
-    }
-
-    function test_give_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.give(amount);
-    }
-
-    function test_take_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 * 1e6);
-
-        _dealUSDC(address(_fundManager), amount);
-
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.take(amount);
-    }
-
-    function test_upgrade_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 * 1e6);
-
-        _dealUSDC(address(_fundManager), amount);
-
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.upgrade(amount);
-    }
-
-    function test_downgrade_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 ether);
-
-        _dealUSDCx(address(_fundManager), amount);
-
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.downgrade(amount);
-    }
-
-    function test_setAnnualRate_accessControl(address nonFundOperator, uint256 newRate) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.setAnnualRate(newRate);
-    }
-
-    function test_setGuaranteedFlowDuration_accessControl(address nonFundOperator, uint256 newDuration) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.setGuaranteedFlowDuration(newDuration);
-    }
-
-    function test_setVault_accessControl(address nonAdmin, address newVault) public {
-        vm.assume(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), nonAdmin) == false);
-        vm.prank(nonAdmin);
-        vm.expectRevert();
-
-        _fundManager.setVault(newVault);
-    }
-
-    function test_onRequestRedeem_accessControl(address nonVault, address redeemer, uint256 shareAmount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
-
-        vm.prank(nonVault);
-        vm.expectRevert();
-
-        _fundManager.onRequestRedeem(redeemer, shareAmount, shareAmount);
-    }
-
-    function test_onClaimDeposit_accessControl(address nonVault, address depositor, uint256 depositAmount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
-
-        vm.prank(nonVault);
-        vm.expectRevert();
-
-        _fundManager.onClaimDeposit(depositor, depositAmount);
-    }
-
-    function test_move_accessControl(address nonVault, address recipient, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
-
-        vm.prank(nonVault);
-        vm.expectRevert();
-
-        _fundManager.move(recipient, amount);
-    }
+    //     ______                 __                  __                ______          __
+    //    / ____/___  ____  _____/ /________  _______/ /_____  _____   /_  __/__  _____/ /______
+    //   / /   / __ \/ __ \/ ___/ __/ ___/ / / / ___/ __/ __ \/ ___/    / / / _ \/ ___/ __/ ___/
+    //  / /___/ /_/ / / / (__  ) /_/ /  / /_/ / /__/ /_/ /_/ / /       / / /  __(__  ) /_(__  )
+    //  \____/\____/_/ /_/____/\__/_/   \__,_/\___/\__/\____/_/       /_/  \___/____/\__/____/
 
     function test_constructor_initialState() public view {
         vm.assertEq(address(_fundManager.ASSET()), address(_usdc));
@@ -167,29 +63,47 @@ contract FundManagerTest is StableYieldVaultTestBase {
     function test_constructor_revertsOnMismatchedSuperToken() public {
         (, address otherUsdcx) = _deployFreshWrapper("XYZ", 6);
 
-        vm.expectRevert(IFundManager.NOT_INITIALIZED.selector);
+        vm.expectRevert(IFundManager.ASSET_MISMATCH.selector);
         new FundManager(address(_usdc), otherUsdcx, FUND_OPERATOR, INITIAL_ANNUAL_RATE, GUARANTEED_FLOW_DURATION);
     }
 
-    function test_constructor_revertsOnDurationBelowFloor() public {
-        uint256 belowFloor = _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1;
+    function test_constructor_revertsOnDurationBelowFloor(uint256 belowFloorDuration) public {
+        belowFloorDuration = bound(belowFloorDuration, 0, _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1);
 
         vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
-        new FundManager(address(_usdc), address(_usdcx), FUND_OPERATOR, INITIAL_ANNUAL_RATE, belowFloor);
+        new FundManager(address(_usdc), address(_usdcx), FUND_OPERATOR, INITIAL_ANNUAL_RATE, belowFloorDuration);
     }
 
-    function test_closeEpoch_forwardsTotalFundAssetsToVault() public {
+    //    ________                   ______                 __
+    //   / ____/ /___  ________     / ____/___  ____  _____/ /_
+    //  / /   / / __ \/ ___/ _ \   / __/ / __ \/ __ \/ ___/ __ \
+    // / /___/ / /_/ (__  )  __/  / /___/ /_/ / /_/ / /__/ / / /
+    // \____/_/\____/____/\___/  /_____/ .___/\____/\___/_/ /_/
+    //                                /_/
+    function test_closeEpoch(uint256 workingAssets, uint256 unutilizedAssets, uint256 yieldAssets) public {
+        workingAssets = bound(workingAssets, 0, ONE_BILLION * 1e6);
+        unutilizedAssets = bound(unutilizedAssets, 0, ONE_BILLION * 1e6);
+        yieldAssets = bound(yieldAssets, 0, ONE_BILLION * 1e18);
+
         // Seed FM with some unutilized USDC and USDCx
-        _dealUSDC(address(_fundManager), 500e6);
-        uint256 expectedScaledYield = _fundManager.yieldAssetsBalance() / _fundManager.SUPER_TOKEN_SCALE();
-        uint256 workingAssets = 300e6;
+        _dealUSDC(address(_fundManager), unutilizedAssets);
+        _dealUSDCx(address(_fundManager), yieldAssets);
+
+        uint256 expectedScaledYield = yieldAssets / _fundManager.SUPER_TOKEN_SCALE();
 
         vm.prank(FUND_OPERATOR);
         _fundManager.closeEpoch(workingAssets);
 
         // Vault captures the reported total in totalAssets()
-        vm.assertEq(_vault.totalAssets(), workingAssets + 500e6 + expectedScaledYield);
+        vm.assertEq(_vault.totalAssets(), workingAssets + unutilizedAssets + expectedScaledYield);
     }
+
+    //     _____      __  __  __        ______                 __
+    //    / ___/___  / /_/ /_/ /__     / ____/___  ____  _____/ /_
+    //    \__ \/ _ \/ __/ __/ / _ \   / __/ / __ \/ __ \/ ___/ __ \
+    //   ___/ /  __/ /_/ /_/ /  __/  / /___/ /_/ / /_/ / /__/ / / /
+    //  /____/\___/\__/\__/_/\___/  /_____/ .___/\____/\___/_/ /_/
+    //                                   /_/
 
     function test_settleEpoch_revertsIfNoEpochClosed() public {
         vm.prank(FUND_OPERATOR);
@@ -205,26 +119,40 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.closeEpoch(0);
 
         ISuperfluidPool pool = _fundManager.POOL();
-        uint128 unitsBefore = pool.getTotalUnits();
 
         vm.prank(FUND_OPERATOR);
         _fundManager.settleEpoch();
 
-        uint128 expectedAdded = uint128(DEFAULT_DEPOSIT * _fundManager.UNIT_PER_ASSET_DEPOSITED());
-        vm.assertEq(pool.getTotalUnits(), unitsBefore + expectedAdded);
-        vm.assertEq(pool.getUnits(address(_fundManager)), expectedAdded);
+        uint128 totalUnits = pool.getTotalUnits();
+        uint128 expectedUnits = uint128(DEFAULT_DEPOSIT * _fundManager.UNIT_PER_ASSET_DEPOSITED());
+        vm.assertEq(totalUnits, expectedUnits);
+        vm.assertEq(pool.getUnits(address(_fundManager)), expectedUnits);
+        vm.assertEq(pool.getTotalFlowRate(), _calculateExpectedFlowRate(totalUnits));
+        vm.assertEq(pool.getMemberFlowRate(address(_fundManager)), _calculateExpectedFlowRate(totalUnits));
     }
 
+    //     ______               _____      __  __  __        ______                 __
+    //    / ____/___ _____     / ___/___  / /_/ /_/ /__     / ____/___  ____  _____/ /_
+    //   / /   / __ `/ __ \    \__ \/ _ \/ __/ __/ / _ \   / __/ / __ \/ __ \/ ___/ __ \
+    //  / /___/ /_/ / / / /   ___/ /  __/ /_/ /_/ /  __/  / /___/ /_/ / /_/ / /__/ / / /
+    //  \____/\__,_/_/ /_/   /____/\___/\__/\__/_/\___/  /_____/ .___/\____/\___/_/ /_/
+    //                                                        /_/
+
     function test_canSettleEpoch_returnsFalseBeforeClose() public view {
+        uint256 epoch = _vault.getSnapshot().epoch;
+
+        vm.assertEq(epoch, 0);
         vm.assertFalse(_fundManager.canSettleEpoch());
     }
 
     function test_canSettleEpoch_returnsFalseWhenInsufficientYield() public {
-        // Leave FM with 0 USDCx so the post-settle yield buffer can't be met.
-        // Pass a non-zero workingAssets so vault.closeEpoch's total-assets check doesn't revert.
+        // FM holds zero USDCx and zero unutilized USDC. Inflating pool units before close
+        // pushes the post-settle yield buffer requirement above what depositing assets can fund.
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        _inflateUnitsToBreakInvariant();
+
         vm.prank(FUND_OPERATOR);
-        _fundManager.closeEpoch(1);
+        _fundManager.closeEpoch(0);
 
         vm.assertFalse(_fundManager.canSettleEpoch());
 
@@ -249,15 +177,21 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.prank(ALICE);
         _vault.requestRedeem(aliceShares, ALICE, ALICE);
 
-        // Drain FM's unutilized USDC so it can't cover the redeem deficit
+        // Close while FM still holds full reserves so the snapshot rate is rich.
+        vm.prank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+
+        // Drain FM's unutilized USDC after the snapshot — available now sits below the
+        // redeem outflow priced at the snapshotted rate.
         uint256 fmUsdc = _usdc.balanceOf(address(_fundManager));
         vm.prank(address(_fundManager));
         _usdc.transfer(address(0xdead), fmUsdc);
 
-        vm.prank(FUND_OPERATOR);
-        _fundManager.closeEpoch(0);
-
         vm.assertFalse(_fundManager.canSettleEpoch());
+
+        vm.prank(FUND_OPERATOR);
+        vm.expectRevert(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector);
+        _fundManager.settleEpoch();
     }
 
     function test_give_pullsAndEmits() public {
@@ -628,6 +562,123 @@ contract FundManagerTest is StableYieldVaultTestBase {
         require(ok, "deployWrapperSuperToken failed");
         (underlying, stk) = abi.decode(ret, (address, address));
         superToken = stk;
+    }
+
+    //      ___                               ______            __             __   ______          __
+    //     /   | _____________  __________   / ____/___  ____  / /__________  / /  /_  __/__  _____/ /______
+    //    / /| |/ ___/ ___/ _ \/ ___/ ___/  / /   / __ \/ __ \/ __/ ___/ __ \/ /    / / / _ \/ ___/ __/ ___/
+    //   / ___ / /__/ /__/  __(__  |__  )  / /___/ /_/ / / / / /_/ /  / /_/ / /    / / /  __(__  ) /_(__  )
+    //  /_/  |_\___/\___/\___/____/____/   \____/\____/_/ /_/\__/_/   \____/_/    /_/  \___/____/\__/____/
+
+    function test_closeEpoch_accessControl(address nonFundOperator, uint256 workingAssets) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.closeEpoch(workingAssets);
+    }
+
+    function test_settleEpoch_accessControl(address nonFundOperator) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.settleEpoch();
+    }
+
+    function test_give_accessControl(address nonFundOperator, uint256 amount) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.give(amount);
+    }
+
+    function test_take_accessControl(address nonFundOperator, uint256 amount) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        amount = bound(amount, 1, 100e9 * 1e6);
+
+        _dealUSDC(address(_fundManager), amount);
+
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.take(amount);
+    }
+
+    function test_upgrade_accessControl(address nonFundOperator, uint256 amount) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        amount = bound(amount, 1, 100e9 * 1e6);
+
+        _dealUSDC(address(_fundManager), amount);
+
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.upgrade(amount);
+    }
+
+    function test_downgrade_accessControl(address nonFundOperator, uint256 amount) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        amount = bound(amount, 1, 100e9 ether);
+
+        _dealUSDCx(address(_fundManager), amount);
+
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.downgrade(amount);
+    }
+
+    function test_setAnnualRate_accessControl(address nonFundOperator, uint256 newRate) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.setAnnualRate(newRate);
+    }
+
+    function test_setGuaranteedFlowDuration_accessControl(address nonFundOperator, uint256 newDuration) public {
+        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        vm.prank(nonFundOperator);
+        vm.expectRevert();
+
+        _fundManager.setGuaranteedFlowDuration(newDuration);
+    }
+
+    function test_setVault_accessControl(address nonAdmin, address newVault) public {
+        vm.assume(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), nonAdmin) == false);
+        vm.prank(nonAdmin);
+        vm.expectRevert();
+
+        _fundManager.setVault(newVault);
+    }
+
+    function test_onRequestRedeem_accessControl(address nonVault, address redeemer, uint256 shareAmount) public {
+        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
+
+        vm.prank(nonVault);
+        vm.expectRevert();
+
+        _fundManager.onRequestRedeem(redeemer, shareAmount, shareAmount);
+    }
+
+    function test_onClaimDeposit_accessControl(address nonVault, address depositor, uint256 depositAmount) public {
+        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
+
+        vm.prank(nonVault);
+        vm.expectRevert();
+
+        _fundManager.onClaimDeposit(depositor, depositAmount);
+    }
+
+    function test_move_accessControl(address nonVault, address recipient, uint256 amount) public {
+        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
+
+        vm.prank(nonVault);
+        vm.expectRevert();
+
+        _fundManager.move(recipient, amount);
     }
 
 }
