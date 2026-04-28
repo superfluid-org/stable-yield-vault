@@ -163,15 +163,6 @@ interface IFundManager {
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
 
     /**
-     * @notice Move underlying assets from the FundManager to a recipient.
-     * @dev Only callable by accounts holding VAULT_ROLE.
-     *      Used by the vault during settleEpoch when redeems exceed deposits.
-     * @param recipient The address to transfer assets to.
-     * @param amount The amount of underlying asset to move, in underlying decimals.
-     */
-    function move(address recipient, uint256 amount) external;
-
-    /**
      * @notice Hook invoked by the vault when a controller claims their settled deposit.
      * @dev Only callable by accounts holding VAULT_ROLE.
      *      Transfers pool units from the FundManager's pending-member slot to the controller's slot.

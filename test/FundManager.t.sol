@@ -429,15 +429,6 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(pool.getTotalUnits(), totalUnitsBefore);
     }
 
-    function test_move_transfersToRecipient() public {
-        _dealUSDC(address(_fundManager), DEFAULT_DEPOSIT);
-
-        vm.prank(address(_vault));
-        _fundManager.move(KAREN, DEFAULT_DEPOSIT);
-
-        vm.assertEq(_usdc.balanceOf(KAREN), DEFAULT_DEPOSIT);
-    }
-
     //   _    ___                 ______                 __  _                ______          __
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____     /_  __/__  _____/ /______
     //  | | / / / _ \ | /| / /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \     / / / _ \/ ___/ __/ ___/
@@ -629,15 +620,6 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.expectRevert();
 
         _fundManager.onClaimDeposit(depositor, depositAmount);
-    }
-
-    function test_move_accessControl(address nonVault, address recipient, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
-
-        vm.prank(nonVault);
-        vm.expectRevert();
-
-        _fundManager.move(recipient, amount);
     }
 
 }

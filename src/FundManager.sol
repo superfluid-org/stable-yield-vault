@@ -104,6 +104,9 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         UNDERLYING_ASSET = IERC20(_asset);
         VAULT = IStableYieldAsyncVault(msg.sender);
 
+        // Grant underlying asset unlimited approval to the vault
+        UNDERLYING_ASSET.approve(msg.sender, type(uint256).max);
+
         // Verify super-token wraps the correct underlying
         if (ISuperToken(_yieldAsset).getUnderlyingToken() != _asset) revert ASSET_MISMATCH();
         YIELD_ASSET = ISuperToken(_yieldAsset);
@@ -256,11 +259,6 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         POOL.updateMemberUnits(shareholder, userUnits - delta);
         _recalibrateFlow();
         // pool.totalUnits decreases -> flowRate decreases; invariant trivially safe
-    }
-
-    /// @inheritdoc IFundManager
-    function move(address recipient, uint256 amount) external onlyRole(VAULT_ROLE) {
-        UNDERLYING_ASSET.safeTransfer(recipient, amount);
     }
 
     //   _    ___                 ______                 __  _

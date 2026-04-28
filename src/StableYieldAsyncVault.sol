@@ -264,7 +264,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
             // Deposits fall short; pull the deficit from the FundManager to cover redeems.
             // FM downgrades its super-token and transfers underlying into this vault.
             uint256 deficit = redeemingAssets - _snapshot.depositingAssets;
-            FUND_MANAGER.move(address(this), deficit);
+            underlyingAsset.safeTransferFrom(address(FUND_MANAGER), address(this), deficit);
         }
 
         // Track unclaimed positions for effective supply adjustment in future closeEpoch calls
