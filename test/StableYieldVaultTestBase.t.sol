@@ -41,6 +41,8 @@ contract StableYieldVaultTestBase is Test {
     uint256 internal constant INITIAL_ANNUAL_RATE = 1000; // 10% annual rate
     uint256 internal constant GUARANTEED_FLOW_DURATION = 7 days;
 
+    uint256 internal constant ONE_BILLION = 1_000_000_000;
+
     function setUp() public virtual {
         (_sf, _deployer) = _deploySuperfluid();
         (_usdc, _usdcSuperToken) = _deployer.deployWrapperSuperToken("USDC", "USDC", 6, type(uint256).max, address(0));
@@ -66,13 +68,13 @@ contract StableYieldVaultTestBase is Test {
     }
 
     function _initWhale() internal {
-        // Mint 100 billion USDC to the WHALE
-        _usdc.mint(WHALE, 100e9 * 1e6);
+        // Mint 2000 billion USDC to the WHALE
+        _usdc.mint(WHALE, 1000 * ONE_BILLION * 1e6);
 
-        // Upgrade 1 billion USDC to USDCx and transfer to the WHALE
+        // Upgrade 1000 billion USDC to USDCx and transfer to the WHALE
         vm.startPrank(WHALE);
         _usdc.approve(address(_usdcx), type(uint256).max);
-        _usdcx.upgrade(100e9 * 1e18);
+        _usdcx.upgrade(1000 * ONE_BILLION * 1e18);
         vm.stopPrank();
     }
 
