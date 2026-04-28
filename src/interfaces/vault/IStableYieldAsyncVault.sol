@@ -169,7 +169,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     // ──────────────────────────────────────────────
 
     /// @notice Freeze deposit/redeem requests for the current epoch and lock the epoch rate
-    function closeEpoch(uint256 totalFundAssets) external;
+    function onCloseEpoch(uint256 totalFundAssets) external;
 
     /// @notice Finalize the settlement of a previously closed epoch.
     /// @dev Must be called after closeEpoch(). Uses the locked snapshot and rate to:
@@ -179,7 +179,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     ///        3. Earmark redeemable assets inside the vault for later claims
     ///        4. Store the epoch rate and mark the epoch as settled
     ///      Pending requests from the closed epoch become claimable (lazily) after this call.
-    function settleEpoch() external;
+    function onSettleEpoch() external;
 
     /// @notice Returns the current epoch number.
     function currentEpoch() external view returns (uint256);

@@ -149,7 +149,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     function closeEpoch(uint256 workingAssets) external onlyRole(FUND_OPERATOR_ROLE) {
         // totalAssets is reported in underlying decimals
         uint256 totalAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance();
-        VAULT.closeEpoch(totalAssets);
+        VAULT.onCloseEpoch(totalAssets);
     }
 
     /// @inheritdoc IFundManager
@@ -158,7 +158,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         if (!canSettle) revert SETTLEMENT_PRECONDITIONS_NOT_MET(reason);
 
         // Drives the vault's settlement; may call back into `FundManager.move` if redeem > deposit
-        VAULT.settleEpoch();
+        VAULT.onSettleEpoch();
 
         // Grant FM units for this epoch's depositors
         if (snap.depositingAssets > 0) {

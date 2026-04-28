@@ -211,7 +211,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @inheritdoc IStableYieldAsyncVault
-    function closeEpoch(uint256 _totalAssets) external onlyFundManager {
+    function onCloseEpoch(uint256 _totalAssets) external onlyFundManager {
         // Ensure previous epoch has been settled before allowing close of a new epoch
         if (_snapshot.epoch != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
 
@@ -242,7 +242,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @inheritdoc IStableYieldAsyncVault
-    function settleEpoch() external onlyFundManager {
+    function onSettleEpoch() external onlyFundManager {
         uint256 settlingEpoch = _snapshot.epoch;
 
         if (settlingEpoch == 0) revert NO_EPOCH_TO_SETTLE();
