@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
 import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
 
 interface IFundManager {
 
@@ -65,7 +66,7 @@ interface IFundManager {
     /**
      * @notice Thrown when settleEpoch is called but the settlement preconditions are not satisfied.
      */
-    error SETTLEMENT_PRECONDITIONS_NOT_MET();
+    error SETTLEMENT_PRECONDITIONS_NOT_MET(string reason);
 
     /**
      * @notice Thrown when a caller attempts an operation they are not allowed to perform.
@@ -218,7 +219,10 @@ interface IFundManager {
      * @notice Whether the current epoch satisfies all preconditions required to call {settleEpoch}.
      * @return canSettle True if {settleEpoch} can be called without reverting on preconditions.
      */
-    function canSettleEpoch() external view returns (bool canSettle);
+    function canSettleEpoch()
+        external
+        view
+        returns (bool canSettle, string memory reason, IStableYieldAsyncVault.Snapshot memory snap);
 
     /**
      * @notice The GDA pool whose flow distributes yield to shareholders.

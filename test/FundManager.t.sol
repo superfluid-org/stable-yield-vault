@@ -153,11 +153,19 @@ contract FundManagerTest is StableYieldVaultTestBase {
     //  \____/\__,_/_/ /_/   /____/\___/\__/\__/_/\___/  /_____/ .___/\____/\___/_/ /_/
     //                                                        /_/
 
-    function test_canSettleEpoch_returnsFalseBeforeClose() public view {
+    function test_canSettleEpoch_returnsFalseBeforeClose() public {
         uint256 epoch = _vault.getSnapshot().epoch;
 
         vm.assertEq(epoch, 0);
-        vm.assertFalse(_fundManager.canSettleEpoch());
+
+        (bool canSettle, string memory reason,) = _fundManager.canSettleEpoch();
+
+        vm.assertFalse(canSettle);
+        vm.assertEq(reason, "CURRENT_EPOCH_NOT_CLOSED");
+
+        vm.prank(FUND_OPERATOR);
+        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
+        _fundManager.settleEpoch();
     }
 
     function test_canSettleEpoch_returnsFalseWhenInsufficientYield() public {
@@ -169,10 +177,13 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.prank(FUND_OPERATOR);
         _fundManager.closeEpoch(0);
 
-        vm.assertFalse(_fundManager.canSettleEpoch());
+        (bool canSettle, string memory reason,) = _fundManager.canSettleEpoch();
+
+        vm.assertFalse(canSettle);
+        vm.assertEq(reason, "INSUFFICIENT_ASSETS_IN_FUND_MANAGER");
 
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector);
+        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
         _fundManager.settleEpoch();
     }
 
@@ -202,10 +213,13 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.prank(address(_fundManager));
         _usdc.transfer(address(0xdead), fmUsdc);
 
-        vm.assertFalse(_fundManager.canSettleEpoch());
+        (bool canSettle, string memory reason,) = _fundManager.canSettleEpoch();
+
+        vm.assertFalse(canSettle);
+        vm.assertEq(reason, "INSUFFICIENT_ASSETS_IN_FUND_MANAGER");
 
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector);
+        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
         _fundManager.settleEpoch();
     }
 

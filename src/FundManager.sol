@@ -154,10 +154,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function settleEpoch() external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
-        if (!canSettleEpoch()) revert SETTLEMENT_PRECONDITIONS_NOT_MET();
-
-        // Snapshot must be read BEFORE the vault deletes it during settleEpoch
-        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+        (bool canSettle, string memory reason, IStableYieldAsyncVault.Snapshot memory snap) = canSettleEpoch();
+        if (!canSettle) revert SETTLEMENT_PRECONDITIONS_NOT_MET(reason);
 
         // Drives the vault's settlement; may call back into `FundManager.move` if redeem > deposit
         VAULT.settleEpoch();
@@ -292,14 +290,21 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     }
 
     /// @inheritdoc IFundManager
-    function canSettleEpoch() public view returns (bool canSettle) {
+    function canSettleEpoch()
+        public
+        view
+        returns (bool canSettle, string memory reason, IStableYieldAsyncVault.Snapshot memory snap)
+    {
         // Snapshot must be read BEFORE the vault deletes it during settleEpoch
-        IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+        snap = VAULT.getSnapshot();
 
         canSettle = true;
 
         // Check that the current epoch to settle has been closed (snap.epoch != 0);
-        if (snap.epoch == 0) canSettle = false;
+        if (snap.epoch == 0) {
+            canSettle = false;
+            reason = "CURRENT_EPOCH_NOT_CLOSED";
+        }
 
         /// FIXME 1e18 here might be a footgun
         uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
@@ -311,7 +316,10 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         if (
             scaledYieldAssetsBalance() + unutilizedAssetsBalance() + snap.depositingAssets
                 < redeemingAssets + requiredScaledYieldAssetsBalance
-        ) canSettle = false;
+        ) {
+            canSettle = false;
+            reason = "INSUFFICIENT_ASSETS_IN_FUND_MANAGER";
+        }
     }
 
     //      ____      __                        __   ______                 __  _
