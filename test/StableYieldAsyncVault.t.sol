@@ -60,13 +60,13 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
     /// @dev Directly drive closeEpoch on the vault (bypasses FM totalAssets calculation).
     function _vaultCloseEpoch(uint256 totalAssetsReported) internal {
         vm.prank(address(_fundManager));
-        _vault.closeEpoch(totalAssetsReported);
+        _vault.onCloseEpoch(totalAssetsReported);
     }
 
     /// @dev Directly drive settleEpoch on the vault.
     function _vaultSettleEpoch() internal {
         vm.prank(address(_fundManager));
-        _vault.settleEpoch();
+        _vault.onSettleEpoch();
     }
 
     /// @dev Drives settleEpoch + mimics the pool-unit grant that FM.settleEpoch would normally do.
@@ -75,7 +75,7 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         IStableYieldAsyncVault.Snapshot memory snap = _vault.getSnapshot();
 
         vm.prank(address(_fundManager));
-        _vault.settleEpoch();
+        _vault.onSettleEpoch();
 
         if (snap.depositingAssets > 0) {
             uint256 units = snap.depositingAssets * _fundManager.UNIT_PER_ASSET_DEPOSITED();
@@ -281,7 +281,7 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
     function test_closeEpoch_revertsOnZeroTotalAssets() public {
         vm.prank(address(_fundManager));
         vm.expectRevert(IStableYieldAsyncVault.INVALID_PARAMETERS.selector);
-        _vault.closeEpoch(0);
+        _vault.onCloseEpoch(0);
     }
 
     function test_closeEpoch_revertsIfPreviousNotSettled() public {
@@ -289,25 +289,25 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
 
         vm.prank(address(_fundManager));
         vm.expectRevert(IStableYieldAsyncVault.PREVIOUS_EPOCH_NOT_SETTLED.selector);
-        _vault.closeEpoch(1000e6);
+        _vault.onCloseEpoch(1000e6);
     }
 
     function test_closeEpoch_revertsIfNotFundManager() public {
         vm.prank(ALICE);
         vm.expectRevert(IStableYieldAsyncVault.INVALID_CALLER.selector);
-        _vault.closeEpoch(1000e6);
+        _vault.onCloseEpoch(1000e6);
     }
 
     function test_settleEpoch_revertsWhenNoEpochClosed() public {
         vm.prank(address(_fundManager));
         vm.expectRevert(IStableYieldAsyncVault.NO_EPOCH_TO_SETTLE.selector);
-        _vault.settleEpoch();
+        _vault.onSettleEpoch();
     }
 
     function test_settleEpoch_revertsIfNotFundManager() public {
         vm.prank(ALICE);
         vm.expectRevert(IStableYieldAsyncVault.INVALID_CALLER.selector);
-        _vault.settleEpoch();
+        _vault.onSettleEpoch();
     }
 
     function test_settleEpoch_surplusPushedToFundManager() public {

@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
 import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
 
 interface IFundManager {
 
@@ -15,10 +16,10 @@ interface IFundManager {
 
     /**
      * @notice Emitted when the operator updates the committed annualized streaming rate.
-     * @param oldRate Previous annual rate, scaled by 1e18 (WAD).
-     * @param newRate New annual rate, scaled by 1e18 (WAD).
+     * @param oldRate Previous annualized era rate, expressed in basis points
+     * @param newRate New annualized era rate, expressed in basis points
      */
-    event AnnualRateChanged(uint256 oldRate, uint256 newRate);
+    event EraStableYieldRateChanged(uint256 oldRate, uint256 newRate);
 
     /**
      * @notice Emitted when the operator updates the minimum forward stream-solvency horizon.
@@ -65,16 +66,7 @@ interface IFundManager {
     /**
      * @notice Thrown when settleEpoch is called but the settlement preconditions are not satisfied.
      */
-    error SETTLEMENT_PRECONDITIONS_NOT_MET();
-
-    /**
-     * @notice Thrown when a caller attempts an operation they are not allowed to perform.
-     */
-    error NOT_AUTHORIZED();
-
-    error VAULT_ALREADY_SET();
-
-    error ZERO_ADDRESS();
+    error SETTLEMENT_PRECONDITIONS_NOT_MET(string reason);
 
     error ASSET_MISMATCH();
 
@@ -107,6 +99,12 @@ interface IFundManager {
     function settleEpoch() external;
 
     /**
+     * @notice Restart the yield flow if needed and rebalance underlying/yield assets to guarantee the flow duration
+     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     */
+    function ensureYieldFlowDuration() external;
+
+    /**
      * @notice Deposit underlying assets into the FundManager.
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
      *      Pulls underlying from the caller into the FundManager.
@@ -123,60 +121,28 @@ interface IFundManager {
     function take(uint256 amount) external;
 
     /**
-     * @notice Upgrade underlying assets held by the FundManager into super-tokens used to fund the yield stream.
-     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Increases the yield-asset balance; the stream-solvency invariant is trivially preserved.
-     * @param underlyingAmount The amount of underlying asset to upgrade, in underlying decimals.
-     */
-    function upgrade(uint256 underlyingAmount) external;
-
-    /**
-     * @notice Downgrade super-tokens held by the FundManager back into underlying assets.
-     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Reverts with INVARIANT_VIOLATED if the post-operation state would break the stream-solvency invariant.
-     * @param superTokenAmount The amount of super-token to downgrade, in super-token decimals (18).
-     */
-    function downgrade(uint256 superTokenAmount) external;
-
-    /**
-     * @notice Set the target annualized rate committed to per-unit streaming.
+     * @notice Set the target annualized era stable yield rate
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
      *      Recalibrates the distribution flow; reverts with INVARIANT_VIOLATED if the new rate would break
      *      the stream-solvency invariant.
-     * @param newRate The new annual rate, scaled by 1e18 (WAD). 5% APR == 5e16.
+     * @param newRate The new annualized stable yield rate, expressed in basis points (e.g. 100 <=> 1%)
      */
-    function setAnnualRate(uint256 newRate) external;
+    function setStableYieldRate(uint256 newRate) external;
 
     /**
      * @notice Set the minimum forward stream-solvency horizon the FundManager must maintain.
-     * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
+     * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
      *      Reverts with DURATION_BELOW_FLOOR if `newDuration` is below MIN_GUARANTEED_FLOW_DURATION,
      *      or with INVARIANT_VIOLATED if the post-operation state would break the invariant.
      * @param newDuration The new guaranteed flow duration, in seconds.
      */
     function setGuaranteedFlowDuration(uint256 newDuration) external;
 
-    /**
-     * @notice Set vault address and grant it permissions to call FM hooks.
-     * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
-     * @param vault The vault address to connect to this FundManager
-     */
-    function setVault(address vault) external;
-
     //    _    __             ____     ______      __           __
     //   | |  / /___ ___  __/ / /_   / ____/___ _/ /____  ____/ /
     //   | | / / __ `/ / / / / __/  / / __/ __ `/ __/ _ \/ __  /
     //   | |/ / /_/ / /_/ / / /_   / /_/ / /_/ / /_/  __/ /_/ /
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
-
-    /**
-     * @notice Move underlying assets from the FundManager to a recipient.
-     * @dev Only callable by accounts holding VAULT_ROLE.
-     *      Used by the vault during settleEpoch when redeems exceed deposits.
-     * @param recipient The address to transfer assets to.
-     * @param amount The amount of underlying asset to move, in underlying decimals.
-     */
-    function move(address recipient, uint256 amount) external;
 
     /**
      * @notice Hook invoked by the vault when a controller claims their settled deposit.
@@ -224,6 +190,12 @@ interface IFundManager {
     function scaledYieldAssetsBalance() external view returns (uint256 balance);
 
     /**
+     * @notice Evaluate the current FundManager current funding situation
+     * @return funding amount that can be taken if negative, or that must be given if positive
+     */
+    function evaluateFunding() external view returns (int256 funding);
+
+    /**
      * @notice Amount of super-token the FundManager is short of to sustain the target flow for the
      *         full `guaranteedFlowDuration` horizon.
      * @return deficit deficit amount of yield assets if positive, excess if negative
@@ -234,7 +206,10 @@ interface IFundManager {
      * @notice Whether the current epoch satisfies all preconditions required to call {settleEpoch}.
      * @return canSettle True if {settleEpoch} can be called without reverting on preconditions.
      */
-    function canSettleEpoch() external view returns (bool canSettle);
+    function canSettleEpoch()
+        external
+        view
+        returns (bool canSettle, string memory reason, IStableYieldAsyncVault.Snapshot memory snap);
 
     /**
      * @notice The GDA pool whose flow distributes yield to shareholders.
@@ -244,15 +219,17 @@ interface IFundManager {
     /**
      * @notice The super-token wrapping the underlying asset.
      */
-    function SUPER_TOKEN() external view returns (ISuperToken);
+    function YIELD_ASSET() external view returns (ISuperToken);
 
     /**
-     * @notice The current annualized rate committed to per-unit streaming, scaled by 1e18 (WAD).
+     * @notice The current era's annualized rate committed to per-unit streaming
+     * @dev Expressed in basis point (e.g. 100 <=> 1%)
      */
-    function annualRate() external view returns (uint256);
+    function eraStableYieldRate() external view returns (uint256);
 
     /**
-     * @notice The minimum forward stream-solvency horizon the FundManager maintains, in seconds.
+     * @notice The minimum forward stream-solvency horizon the FundManager maintains
+     * @dev Expressed in seconds
      */
     function guaranteedFlowDuration() external view returns (uint256);
 

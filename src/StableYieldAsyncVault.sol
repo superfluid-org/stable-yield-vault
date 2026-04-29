@@ -2,6 +2,7 @@
 pragma solidity ^0.8.34;
 
 import { IFundManager } from "./interfaces/IFundManager.sol";
+import { FundManager } from "src/FundManager.sol";
 
 import {
     IERC4626,
@@ -42,17 +43,18 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     mapping(address controller => ControllerState state) private _controllerStates;
 
-    /// @dev Exchange rate snapshot per settled epoch (assetsPerShare, scaled by 1e18)
+    /// @notice Exchange rate snapshot per settled epoch (assetsPerShare, scaled by 1e18)
     mapping(uint256 epoch => uint256 assetsPerShare) private _epochRate;
+
     mapping(uint256 epoch => bool isSettled) private _epochSettled;
 
-    /// @dev Cache of the last settled epoch total assets
+    /// @notice Cache of the last settled epoch total assets
     uint256 private _lastReportedTotalAssets;
 
-    /// @dev Total shares owed to settled depositors who haven't claimed yet.
+    /// @notice Total shares owed to settled depositors who haven't claimed yet.
     uint256 private _unclaimedDepositShares;
 
-    /// @dev Total shares held by the vault for settled redeemers who haven't claimed yet.
+    /// @notice Total shares held by the vault for settled redeemers who haven't claimed yet.
     uint256 private _unclaimedRedeemShares;
 
     Snapshot private _snapshot;
@@ -62,8 +64,10 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     uint256 public totalPendingDepositAssets;
     uint256 public totalPendingRedeemShares;
 
-    /// @notice Asset balance the vault holds as earmark for settled-but-unclaimed redeems.
-    ///         Invariant: `underlyingAsset.balanceOf(vault) == totalPendingDepositAssets + totalClaimableRedeemAssets`.
+    /**
+     * @notice Asset balance the vault holds as earmark for settled-but-unclaimed redeems.
+     * @dev    Invariant: `underlyingAsset.balanceOf(vault) == totalPendingDepositAssets + totalClaimableRedeemAssets`.
+     */
     uint256 public totalClaimableRedeemAssets;
 
     //     ______                 __                  __
@@ -73,19 +77,39 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     //  \____/\____/_/ /_/____/\__/_/   \__,_/\___/\__/\____/_/
 
     /**
-     * @notice Initializes the vault with the underlying asset and share token metadata.
-     * @dev    The FundManager address must be wired via `setFundManager` after deployment.
-     *         This breaks the construction cycle between Vault and FundManager (FM needs Vault).
-     * @param _underlyingAsset The address of the underlying ERC-20 asset.
-     * @param _fundManager Address of the deployed FundManager.
+     * @notice Initializes the vault with the underlying asset and share token metadata, and
+     *         deploys the paired FundManager.
+     * @dev    The FundManager is created in the constructor with `address(this)` as its vault,
+     *         pinning the vault/FM pair at deployment.
+     * @param _underlyingAsset The address of the underlying ERC-20 asset
+     * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
+     * @param _fundOperator Fund Manager operator address
+     * @param _fundAdmin Fund Manager admin address
+     * @param _initialEraStableYieldRate Initial era stable yield rate (in basis points, e.g. 100% <=> 1)
+     * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      * @param name The name of the share token.
      * @param symbol The symbol of the share token.
      */
-    constructor(address _underlyingAsset, address _fundManager, string memory name, string memory symbol)
-        ERC20(name, symbol)
-    {
+    constructor(
+        address _underlyingAsset,
+        address _yieldAsset,
+        address _fundOperator,
+        address _fundAdmin,
+        uint256 _initialEraStableYieldRate,
+        uint256 _initialGuaranteedFlowDuration,
+        string memory name,
+        string memory symbol
+    ) ERC20(name, symbol) {
         underlyingAsset = IERC20(_underlyingAsset);
-        FUND_MANAGER = IFundManager(_fundManager);
+
+        FUND_MANAGER = new FundManager(
+            _underlyingAsset,
+            _yieldAsset,
+            _fundOperator,
+            _fundAdmin,
+            _initialEraStableYieldRate,
+            _initialGuaranteedFlowDuration
+        );
 
         // Initialize the first epoch to 1
         currentEpoch = 1;
@@ -191,7 +215,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @inheritdoc IStableYieldAsyncVault
-    function closeEpoch(uint256 _totalAssets) external onlyFundManager {
+    function onCloseEpoch(uint256 _totalAssets) external onlyFundManager {
         // Ensure previous epoch has been settled before allowing close of a new epoch
         if (_snapshot.epoch != 0) revert PREVIOUS_EPOCH_NOT_SETTLED();
 
@@ -222,7 +246,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @inheritdoc IStableYieldAsyncVault
-    function settleEpoch() external onlyFundManager {
+    function onSettleEpoch() external onlyFundManager {
         uint256 settlingEpoch = _snapshot.epoch;
 
         if (settlingEpoch == 0) revert NO_EPOCH_TO_SETTLE();
@@ -244,7 +268,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
             // Deposits fall short; pull the deficit from the FundManager to cover redeems.
             // FM downgrades its super-token and transfers underlying into this vault.
             uint256 deficit = redeemingAssets - _snapshot.depositingAssets;
-            FUND_MANAGER.move(address(this), deficit);
+            underlyingAsset.safeTransferFrom(address(FUND_MANAGER), address(this), deficit);
         }
 
         // Track unclaimed positions for effective supply adjustment in future closeEpoch calls
@@ -255,7 +279,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         _epochRate[settlingEpoch] = _snapshot.rate;
         _epochSettled[settlingEpoch] = true;
 
-        /// FIXME : verify below formula (should this account for unclaimed redeeming shares?)
+        // FIXME : verify below formula (should this account for unclaimed redeeming shares?)
         uint256 totalAssetValue = _snapshot.rate.mulDiv(totalSupply() + _unclaimedDepositShares, 1e18);
         emit EpochSettled(
             settlingEpoch, totalAssetValue, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares
@@ -272,14 +296,18 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         success = true;
     }
 
-    /// @inheritdoc IERC20
-    /// @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design
+    /**
+     * @inheritdoc IERC20
+     * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
+     */
     function transfer(address, uint256) public pure override(ERC20, IERC20) returns (bool) {
         revert SHARES_NON_TRANSFERABLE();
     }
 
-    /// @inheritdoc IERC20
-    /// @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design
+    /**
+     * @inheritdoc IERC20
+     * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
+     */
     function transferFrom(address, address, uint256) public pure override(ERC20, IERC20) returns (bool) {
         revert SHARES_NON_TRANSFERABLE();
     }
@@ -290,6 +318,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     //  | |/ / /  __/ |/ |/ /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
+    /// @inheritdoc IStableYieldAsyncVault
     function isEpochSettled(uint256 epoch) public view returns (bool isSettled) {
         isSettled = _epochSettled[epoch];
     }
@@ -299,13 +328,19 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         snapshot = _snapshot;
     }
 
-    /// @inheritdoc IERC4626
+    /**
+     * @inheritdoc IERC4626
+     * @dev Uses the last settled epoch rate. Returns 1e18 (1:1) before any epoch has settled.
+     */
     function convertToShares(uint256 assets) public view returns (uint256 shares) {
         uint256 rate = _lastSettledRate();
         shares = assets.mulDiv(1e18, rate);
     }
 
-    /// @inheritdoc IERC4626
+    /**
+     * @inheritdoc IERC4626
+     * @dev Uses the last settled epoch rate. Returns 1e18 (1:1) before any epoch has settled.
+     */
     function convertToAssets(uint256 shares) public view returns (uint256 assets) {
         uint256 rate = _lastSettledRate();
         assets = shares.mulDiv(rate, 1e18);
@@ -336,7 +371,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         shares = _effectiveClaimableRedeemShares(controller);
     }
 
-    /// @inheritdoc IERC7575
+    /**
+     * @inheritdoc IERC7575
+     */
     function share() external view returns (address shareTokenAddress) {
         shareTokenAddress = address(this);
     }
@@ -346,13 +383,12 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         assetTokenAddress = address(underlyingAsset);
     }
 
-    /// @inheritdoc IERC4626
+    /**
+     * @inheritdoc IERC4626
+     * @dev This value is not necessarily up-to-date with the current on-chain state as it relies
+     *      on the last reported total assets from the FundManager at the last epoch settlement.
+     */
     function totalAssets() public view returns (uint256 total) {
-        /**
-         * NOTE:
-         *      this value is not necessarily up-to-date with the current on-chain state as it relies
-         *      on the last reported total assets from the FundManager at the last epoch settlement.
-         */
         total = _lastReportedTotalAssets;
     }
 
@@ -381,22 +417,30 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         maxAssets = _effectiveClaimableRedeemAssets(controller);
     }
 
-    /// @notice MUST revert for fully async vaults per ERC-7540 standard
+    /**
+     * @notice MUST revert for fully async vaults per ERC-7540 standard.
+     */
     function previewDeposit(uint256) external pure returns (uint256) {
         revert NOT_SUPPORTED_BY_ASYNC_VAULT();
     }
 
-    /// @notice MUST revert for fully async vaults per ERC-7540 standard
+    /**
+     * @notice MUST revert for fully async vaults per ERC-7540 standard.
+     */
     function previewMint(uint256) external pure returns (uint256) {
         revert NOT_SUPPORTED_BY_ASYNC_VAULT();
     }
 
-    /// @notice MUST revert for fully async vaults per ERC-7540 standard
+    /**
+     * @notice MUST revert for fully async vaults per ERC-7540 standard.
+     */
     function previewRedeem(uint256) external pure returns (uint256) {
         revert NOT_SUPPORTED_BY_ASYNC_VAULT();
     }
 
-    /// @notice MUST revert for fully async vaults per ERC-7540 standard
+    /**
+     * @notice MUST revert for fully async vaults per ERC-7540 standard.
+     */
     function previewWithdraw(uint256) external pure returns (uint256) {
         revert NOT_SUPPORTED_BY_ASYNC_VAULT();
     }
@@ -444,7 +488,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         _claimRedeem(assets, shares, receiver, controller);
     }
 
-    /// @dev Lazy-settles any pending deposit and returns the controller's claimable deposit balances.
+    /**
+     * @dev Lazy-settles any pending deposit and returns the controller's claimable deposit balances.
+     */
     function _resolveClaimableDeposit(address controller)
         internal
         returns (uint256 claimableAssets, uint256 claimableShares)
@@ -456,7 +502,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         claimableShares = cs.claimableDepositShares;
     }
 
-    /// @dev Lazy-settles any pending redeem and returns the controller's claimable redeem balances.
+    /**
+     * @dev Lazy-settles any pending redeem and returns the controller's claimable redeem balances.
+     */
     function _resolveClaimableRedeem(address controller)
         internal
         returns (uint256 claimableAssets, uint256 claimableShares)
@@ -468,7 +516,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         claimableShares = cs.claimableRedeemShares;
     }
 
-    /// @dev Executes a deposit claim: deducts from claimable, mints shares, notifies FM.
+    /**
+     * @dev Executes a deposit claim: deducts from claimable, mints shares, notifies FM.
+     */
     function _claimDeposit(uint256 assets, uint256 shares, address receiver, address controller) internal {
         ControllerState storage cs = _controllerStates[controller];
         cs.claimableDepositAssets -= assets;
@@ -479,7 +529,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         emit Deposit(controller, receiver, assets, shares);
     }
 
-    /// @dev Executes a redeem claim: deducts from claimable, burns shares, transfers assets.
+    /**
+     * @dev Executes a redeem claim: deducts from claimable, burns shares, transfers assets.
+     */
     function _claimRedeem(uint256 assets, uint256 shares, address receiver, address controller) internal {
         ControllerState storage cs = _controllerStates[controller];
         cs.claimableRedeemShares -= shares;
@@ -491,9 +543,11 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         emit Withdraw(msg.sender, receiver, controller, assets, shares);
     }
 
-    /// @dev Returns the exchange rate from the last settled epoch.
-    ///      Before any epoch has settled, returns 1e18 (1:1).
-    ///      During close/settle window, falls back to the epoch before.
+    /**
+     * @dev Returns the exchange rate from the last settled epoch.
+     *      Before any epoch has settled, returns 1e18 (1:1).
+     *      During close/settle window, falls back to the epoch before.
+     */
     function _lastSettledRate() internal view returns (uint256 lastSettledRate) {
         // Try the most recent epoch
         if (currentEpoch >= 2 && isEpochSettled(currentEpoch - 1)) {
@@ -508,8 +562,10 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         }
     }
 
-    /// @dev If the controller has a pending deposit from a settled (past) epoch,
-    ///      convert pending assets → claimable (both assets and shares) at the epoch's settlement rate.
+    /**
+     * @dev If the controller has a pending deposit from a settled (past) epoch,
+     *      convert pending assets → claimable (both assets and shares) at the epoch's settlement rate.
+     */
     function _settleDepositIfNeeded(address controller) internal {
         ControllerState storage cs = _controllerStates[controller];
 
@@ -531,8 +587,10 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         cs.pendingDepositAssets = 0;
     }
 
-    /// @dev If the controller has a pending redeem from a settled (past) epoch,
-    ///      convert pending shares → claimable (both shares and assets) at the epoch's settlement rate.
+    /**
+     * @dev If the controller has a pending redeem from a settled (past) epoch,
+     *      convert pending shares → claimable (both shares and assets) at the epoch's settlement rate.
+     */
     function _settleRedeemIfNeeded(address controller) internal {
         ControllerState storage cs = _controllerStates[controller];
 

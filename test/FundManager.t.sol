@@ -16,7 +16,7 @@ import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVa
 
 contract FundManagerTest is StableYieldVaultTestBase {
 
-    event AnnualRateChanged(uint256 oldRate, uint256 newRate);
+    event EraStableYieldRateChanged(uint256 oldRate, uint256 newRate);
     event GuaranteedFlowDurationChanged(uint256 oldDuration, uint256 newDuration);
     event Gave(address indexed from, uint256 amount);
     event Took(address indexed to, uint256 amount);
@@ -35,8 +35,9 @@ contract FundManagerTest is StableYieldVaultTestBase {
     }
 
     function _calculateExpectedFlowRate(uint128 poolUnits) internal view returns (int96 expectedFlowRate) {
-        int96 flowRatePerUnit =
-            int96(int256(_fundManager.SUPER_TOKEN_SCALE() * _fundManager.annualRate() / (_fundManager.YEAR() * 10_000)));
+        int96 flowRatePerUnit = int96(
+            int256(_fundManager.SCALING_FACTOR() * _fundManager.eraStableYieldRate() / (_fundManager.YEAR() * 10_000))
+        );
 
         expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
     }
@@ -48,30 +49,48 @@ contract FundManagerTest is StableYieldVaultTestBase {
     //  \____/\____/_/ /_/____/\__/_/   \__,_/\___/\__/\____/_/       /_/  \___/____/\__/____/
 
     function test_constructor_initialState() public view {
-        vm.assertEq(address(_fundManager.ASSET()), address(_usdc));
-        vm.assertEq(address(_fundManager.SUPER_TOKEN()), address(_usdcx));
-        vm.assertEq(_fundManager.SUPER_TOKEN_SCALE(), 1e12);
-        vm.assertEq(_fundManager.annualRate(), INITIAL_ANNUAL_RATE);
-        vm.assertEq(_fundManager.guaranteedFlowDuration(), GUARANTEED_FLOW_DURATION);
-        vm.assertTrue(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), FUND_OPERATOR));
-        vm.assertTrue(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), DEPLOYER));
-        vm.assertTrue(_fundManager.hasRole(_fundManager.VAULT_ROLE(), address(_vault)));
-        vm.assertEq(address(_fundManager.vault()), address(_vault));
-        vm.assertNotEq(address(_fundManager.POOL()), address(0));
+        vm.assertEq(address(_fundManager.UNDERLYING_ASSET()), address(_usdc), "incorrect underlying asset");
+        vm.assertEq(address(_fundManager.YIELD_ASSET()), address(_usdcx), "incorrect yield asset");
+        vm.assertEq(_fundManager.SCALING_FACTOR(), 1e12, "incorrect scaling factor");
+        vm.assertEq(_fundManager.eraStableYieldRate(), INITIAL_ERA_STABLE_YIELD_RATE, "incorrect stable yield rate");
+        vm.assertEq(
+            _fundManager.guaranteedFlowDuration(), GUARANTEED_FLOW_DURATION, "incorrect guaranteed flow duration"
+        );
+        vm.assertTrue(
+            _fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), FUND_OPERATOR), "Fund Operator role mismatch"
+        );
+        vm.assertTrue(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), FUND_ADMIN), "Fund Admin role mismatch");
+        vm.assertTrue(_fundManager.hasRole(_fundManager.VAULT_ROLE(), address(_vault)), "Vault role mismatch");
+        vm.assertEq(address(_fundManager.VAULT()), address(_vault), "incorrect vault address");
+        vm.assertNotEq(address(_fundManager.POOL()), address(0), "GDA pool not created");
     }
 
     function test_constructor_revertsOnMismatchedSuperToken() public {
         (, address otherUsdcx) = _deployFreshWrapper("XYZ", 6);
 
         vm.expectRevert(IFundManager.ASSET_MISMATCH.selector);
-        new FundManager(address(_usdc), otherUsdcx, FUND_OPERATOR, INITIAL_ANNUAL_RATE, GUARANTEED_FLOW_DURATION);
+        new FundManager(
+            address(_usdc),
+            otherUsdcx,
+            FUND_OPERATOR,
+            FUND_ADMIN,
+            INITIAL_ERA_STABLE_YIELD_RATE,
+            GUARANTEED_FLOW_DURATION
+        );
     }
 
     function test_constructor_revertsOnDurationBelowFloor(uint256 belowFloorDuration) public {
         belowFloorDuration = bound(belowFloorDuration, 0, _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1);
 
         vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
-        new FundManager(address(_usdc), address(_usdcx), FUND_OPERATOR, INITIAL_ANNUAL_RATE, belowFloorDuration);
+        new FundManager(
+            address(_usdc),
+            address(_usdcx),
+            FUND_OPERATOR,
+            FUND_ADMIN,
+            INITIAL_ERA_STABLE_YIELD_RATE,
+            belowFloorDuration
+        );
     }
 
     //    ________                   ______                 __
@@ -89,7 +108,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _dealUSDC(address(_fundManager), unutilizedAssets);
         _dealUSDCx(address(_fundManager), yieldAssets);
 
-        uint256 expectedScaledYield = yieldAssets / _fundManager.SUPER_TOKEN_SCALE();
+        uint256 expectedScaledYield = yieldAssets / _fundManager.SCALING_FACTOR();
 
         vm.prank(FUND_OPERATOR);
         _fundManager.closeEpoch(workingAssets);
@@ -107,7 +126,10 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
     function test_settleEpoch_revertsIfNoEpochClosed() public {
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, "CURRENT_EPOCH_NOT_CLOSED")
+        );
+
         _fundManager.settleEpoch();
     }
 
@@ -138,11 +160,19 @@ contract FundManagerTest is StableYieldVaultTestBase {
     //  \____/\__,_/_/ /_/   /____/\___/\__/\__/_/\___/  /_____/ .___/\____/\___/_/ /_/
     //                                                        /_/
 
-    function test_canSettleEpoch_returnsFalseBeforeClose() public view {
+    function test_canSettleEpoch_returnsFalseBeforeClose() public {
         uint256 epoch = _vault.getSnapshot().epoch;
 
         vm.assertEq(epoch, 0);
-        vm.assertFalse(_fundManager.canSettleEpoch());
+
+        (bool canSettle, string memory reason,) = _fundManager.canSettleEpoch();
+
+        vm.assertFalse(canSettle);
+        vm.assertEq(reason, "CURRENT_EPOCH_NOT_CLOSED");
+
+        vm.prank(FUND_OPERATOR);
+        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
+        _fundManager.settleEpoch();
     }
 
     function test_canSettleEpoch_returnsFalseWhenInsufficientYield() public {
@@ -154,10 +184,13 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.prank(FUND_OPERATOR);
         _fundManager.closeEpoch(0);
 
-        vm.assertFalse(_fundManager.canSettleEpoch());
+        (bool canSettle, string memory reason,) = _fundManager.canSettleEpoch();
+
+        vm.assertFalse(canSettle);
+        vm.assertEq(reason, "INSUFFICIENT_ASSETS_IN_FUND_MANAGER");
 
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector);
+        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
         _fundManager.settleEpoch();
     }
 
@@ -187,10 +220,13 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.prank(address(_fundManager));
         _usdc.transfer(address(0xdead), fmUsdc);
 
-        vm.assertFalse(_fundManager.canSettleEpoch());
+        (bool canSettle, string memory reason,) = _fundManager.canSettleEpoch();
+
+        vm.assertFalse(canSettle);
+        vm.assertEq(reason, "INSUFFICIENT_ASSETS_IN_FUND_MANAGER");
 
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector);
+        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
         _fundManager.settleEpoch();
     }
 
@@ -223,77 +259,19 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(_usdc.balanceOf(FUND_OPERATOR), opBefore + DEFAULT_DEPOSIT);
     }
 
-    function test_take_revertsIfInvariantWouldBeViolated() public {
-        _seedYieldBuffer();
-        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.closeEpoch(0);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.settleEpoch();
-
-        // Inflate pool units to push required balance above actual → invariant violated
-        _inflateUnitsToBreakInvariant();
-
-        vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
-        _fundManager.take(1);
-    }
-
-    function test_upgrade_convertsUsdcToUsdcx() public {
-        _dealUSDC(address(_fundManager), DEFAULT_DEPOSIT);
-        uint256 yieldBefore = _fundManager.yieldAssetsBalance();
-
-        vm.prank(FUND_OPERATOR);
-        _fundManager.upgrade(DEFAULT_DEPOSIT);
-
-        vm.assertEq(_fundManager.yieldAssetsBalance(), yieldBefore + DEFAULT_DEPOSIT * _fundManager.SUPER_TOKEN_SCALE());
-    }
-
-    function test_downgrade_convertsUsdcxToUsdc() public {
-        _seedYieldBuffer();
-        uint256 unutilizedBefore = _fundManager.unutilizedAssetsBalance();
-        uint256 downgradeAmount = 1 ether; // 1 USDCx
-
-        vm.prank(FUND_OPERATOR);
-        _fundManager.downgrade(downgradeAmount);
-
-        vm.assertEq(
-            _fundManager.unutilizedAssetsBalance(),
-            unutilizedBefore + downgradeAmount / _fundManager.SUPER_TOKEN_SCALE()
-        );
-    }
-
-    function test_downgrade_revertsIfInvariantWouldBeViolated() public {
-        _seedYieldBuffer();
-        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.closeEpoch(0);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.settleEpoch();
-
-        // Attempt to downgrade most of the yield buffer — would leave < required
-        uint256 bal = _fundManager.yieldAssetsBalance();
-        // Leave just 1 wei of USDCx — guaranteed to be below required
-        uint256 downgradeAmount = bal - 1;
-
-        vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
-        _fundManager.downgrade(downgradeAmount);
-    }
-
-    function test_setAnnualRate_updatesAndEmits() public {
+    function test_setStableYieldRate_updatesAndEmits() public {
         uint256 newRate = 2000; // 20%
 
         vm.expectEmit(false, false, false, true, address(_fundManager));
-        emit AnnualRateChanged(INITIAL_ANNUAL_RATE, newRate);
+        emit EraStableYieldRateChanged(INITIAL_ERA_STABLE_YIELD_RATE, newRate);
 
         vm.prank(FUND_OPERATOR);
-        _fundManager.setAnnualRate(newRate);
+        _fundManager.setStableYieldRate(newRate);
 
-        vm.assertEq(_fundManager.annualRate(), newRate);
+        vm.assertEq(_fundManager.eraStableYieldRate(), newRate);
     }
 
-    function test_setAnnualRate_revertsIfInvariantWouldBeViolated() public {
+    function test_setStableYieldRate_revertsIfInvariantWouldBeViolated() public {
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
         vm.prank(FUND_OPERATOR);
@@ -305,7 +283,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         // but the 7-day invariant horizon exceeds the yield buffer.
         vm.prank(FUND_OPERATOR);
         vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
-        _fundManager.setAnnualRate(INITIAL_ANNUAL_RATE * 500);
+        _fundManager.setStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE * 500);
     }
 
     function test_setGuaranteedFlowDuration_updatesAndEmits() public {
@@ -314,7 +292,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.expectEmit(false, false, false, true, address(_fundManager));
         emit GuaranteedFlowDurationChanged(GUARANTEED_FLOW_DURATION, newDuration);
 
-        vm.prank(FUND_OPERATOR);
+        vm.prank(FUND_ADMIN);
         _fundManager.setGuaranteedFlowDuration(newDuration);
 
         vm.assertEq(_fundManager.guaranteedFlowDuration(), newDuration);
@@ -323,7 +301,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
     function test_setGuaranteedFlowDuration_revertsBelowFloor() public {
         uint256 below = _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1;
 
-        vm.prank(FUND_OPERATOR);
+        vm.prank(FUND_ADMIN);
         vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
         _fundManager.setGuaranteedFlowDuration(below);
     }
@@ -337,56 +315,9 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.settleEpoch();
 
         // Raising the horizon to 1000 years would require far more yield buffer than we hold
-        vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
+        vm.prank(FUND_ADMIN);
+        vm.expectRevert(IFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setGuaranteedFlowDuration(365 days * 1000);
-    }
-
-    function test_setVault_revertsOnZeroAddress() public {
-        // Deploy a fresh FM to exercise setVault end-to-end
-        vm.prank(DEPLOYER);
-        FundManager freshFM = new FundManager(
-            address(_usdc), address(_usdcx), FUND_OPERATOR, INITIAL_ANNUAL_RATE, GUARANTEED_FLOW_DURATION
-        );
-
-        vm.prank(DEPLOYER);
-        vm.expectRevert(IFundManager.ZERO_ADDRESS.selector);
-        freshFM.setVault(address(0));
-    }
-
-    function test_setVault_revertsWhenAlreadySet() public {
-        vm.prank(DEPLOYER);
-        vm.expectRevert(IFundManager.VAULT_ALREADY_SET.selector);
-        _fundManager.setVault(address(_vault));
-    }
-
-    function test_setVault_revertsOnAssetMismatch() public {
-        vm.prank(DEPLOYER);
-        FundManager freshFM = new FundManager(
-            address(_usdc), address(_usdcx), FUND_OPERATOR, INITIAL_ANNUAL_RATE, GUARANTEED_FLOW_DURATION
-        );
-
-        // Deploy a vault whose underlying != FM's asset
-        (address dai,) = _deployFreshWrapper("DAI", 18);
-        StableYieldAsyncVault wrongVault = new StableYieldAsyncVault(dai, address(freshFM), "Wrong", "WRG");
-
-        vm.prank(DEPLOYER);
-        vm.expectRevert(IFundManager.ASSET_MISMATCH.selector);
-        freshFM.setVault(address(wrongVault));
-    }
-
-    function test_setVault_happyPath_wiresStorageAndRole() public {
-        vm.prank(DEPLOYER);
-        FundManager freshFM = new FundManager(
-            address(_usdc), address(_usdcx), FUND_OPERATOR, INITIAL_ANNUAL_RATE, GUARANTEED_FLOW_DURATION
-        );
-        StableYieldAsyncVault freshVault = new StableYieldAsyncVault(address(_usdc), address(freshFM), "Fresh", "FRSH");
-
-        vm.prank(DEPLOYER);
-        freshFM.setVault(address(freshVault));
-
-        vm.assertEq(address(freshFM.vault()), address(freshVault));
-        vm.assertTrue(freshFM.hasRole(freshFM.VAULT_ROLE(), address(freshVault)));
     }
 
     function test_onRequestRedeem_revertsOnBadArgs() public {
@@ -401,15 +332,14 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.onRequestRedeem(ALICE, 0, 0);
     }
 
-    function test_onRequestRedeem_returnsEarlyWhenNoUnits() public {
+    function test_onRequestRedeem_revertsWhenNoUnits() public {
         // ALICE has zero pool units — the hook should be a no-op
         ISuperfluidPool pool = _fundManager.POOL();
-        uint128 totalUnitsBefore = pool.getTotalUnits();
+        vm.assertEq(pool.getUnits(ALICE), 0);
 
+        vm.expectRevert(IFundManager.BAD_REDEEM_ARGS.selector);
         vm.prank(address(_vault));
         _fundManager.onRequestRedeem(ALICE, 100, 100);
-
-        vm.assertEq(pool.getTotalUnits(), totalUnitsBefore);
     }
 
     function test_onRequestRedeem_reducesUnitsProportionally() public {
@@ -462,15 +392,6 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(pool.getTotalUnits(), totalUnitsBefore);
     }
 
-    function test_move_transfersToRecipient() public {
-        _dealUSDC(address(_fundManager), DEFAULT_DEPOSIT);
-
-        vm.prank(address(_vault));
-        _fundManager.move(KAREN, DEFAULT_DEPOSIT);
-
-        vm.assertEq(_usdc.balanceOf(KAREN), DEFAULT_DEPOSIT);
-    }
-
     //   _    ___                 ______                 __  _                ______          __
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____     /_  __/__  _____/ /______
     //  | | / / / _ \ | /| / /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \     / / / _ \/ ___/ __/ ___/
@@ -504,7 +425,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _dealUSDC(address(_fundManager), usdcBalance);
         _dealUSDCx(address(_fundManager), expectedBalance);
 
-        uint256 expectedScaled = expectedBalance / _fundManager.SUPER_TOKEN_SCALE();
+        uint256 expectedScaled = expectedBalance / _fundManager.SCALING_FACTOR();
         vm.assertEq(_fundManager.scaledYieldAssetsBalance(), expectedScaled);
     }
 
@@ -606,52 +527,20 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.take(amount);
     }
 
-    function test_upgrade_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 * 1e6);
-
-        _dealUSDC(address(_fundManager), amount);
-
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.upgrade(amount);
-    }
-
-    function test_downgrade_accessControl(address nonFundOperator, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 ether);
-
-        _dealUSDCx(address(_fundManager), amount);
-
-        vm.prank(nonFundOperator);
-        vm.expectRevert();
-
-        _fundManager.downgrade(amount);
-    }
-
-    function test_setAnnualRate_accessControl(address nonFundOperator, uint256 newRate) public {
+    function test_setStableYieldRate_accessControl(address nonFundOperator, uint256 newRate) public {
         vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
         vm.prank(nonFundOperator);
         vm.expectRevert();
 
-        _fundManager.setAnnualRate(newRate);
+        _fundManager.setStableYieldRate(newRate);
     }
 
     function test_setGuaranteedFlowDuration_accessControl(address nonFundOperator, uint256 newDuration) public {
-        vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
+        vm.assume(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), nonFundOperator) == false);
         vm.prank(nonFundOperator);
         vm.expectRevert();
 
         _fundManager.setGuaranteedFlowDuration(newDuration);
-    }
-
-    function test_setVault_accessControl(address nonAdmin, address newVault) public {
-        vm.assume(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), nonAdmin) == false);
-        vm.prank(nonAdmin);
-        vm.expectRevert();
-
-        _fundManager.setVault(newVault);
     }
 
     function test_onRequestRedeem_accessControl(address nonVault, address redeemer, uint256 shareAmount) public {
@@ -670,15 +559,6 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.expectRevert();
 
         _fundManager.onClaimDeposit(depositor, depositAmount);
-    }
-
-    function test_move_accessControl(address nonVault, address recipient, uint256 amount) public {
-        vm.assume(_fundManager.hasRole(_fundManager.VAULT_ROLE(), nonVault) == false);
-
-        vm.prank(nonVault);
-        vm.expectRevert();
-
-        _fundManager.move(recipient, amount);
     }
 
 }
