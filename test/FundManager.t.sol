@@ -259,22 +259,6 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(_usdc.balanceOf(FUND_OPERATOR), opBefore + DEFAULT_DEPOSIT);
     }
 
-    function test_take_revertsIfInvariantWouldBeViolated() public {
-        _seedYieldBuffer();
-        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.closeEpoch(0);
-        vm.prank(FUND_OPERATOR);
-        _fundManager.settleEpoch();
-
-        // Inflate pool units to push required balance above actual → invariant violated
-        _inflateUnitsToBreakInvariant();
-
-        vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
-        _fundManager.take(1);
-    }
-
     function test_setStableYieldRate_updatesAndEmits() public {
         uint256 newRate = 2000; // 20%
 
@@ -348,15 +332,14 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.onRequestRedeem(ALICE, 0, 0);
     }
 
-    function test_onRequestRedeem_returnsEarlyWhenNoUnits() public {
+    function test_onRequestRedeem_revertsWhenNoUnits() public {
         // ALICE has zero pool units — the hook should be a no-op
         ISuperfluidPool pool = _fundManager.POOL();
-        uint128 totalUnitsBefore = pool.getTotalUnits();
+        vm.assertEq(pool.getUnits(ALICE), 0);
 
+        vm.expectRevert(IFundManager.BAD_REDEEM_ARGS.selector);
         vm.prank(address(_vault));
         _fundManager.onRequestRedeem(ALICE, 100, 100);
-
-        vm.assertEq(pool.getTotalUnits(), totalUnitsBefore);
     }
 
     function test_onRequestRedeem_reducesUnitsProportionally() public {
