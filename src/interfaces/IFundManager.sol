@@ -19,7 +19,7 @@ interface IFundManager {
      * @param oldRate Previous annualized era rate, expressed in basis points
      * @param newRate New annualized era rate, expressed in basis points
      */
-    event EraStableYieldRateChanged(uint256 oldRate, uint256 newRate);
+    event StableYieldRateChanged(uint256 oldRate, uint256 newRate);
 
     /**
      * @notice Emitted when the operator updates the minimum forward stream-solvency horizon.
@@ -227,7 +227,7 @@ interface IFundManager {
      * @notice The current era's annualized rate committed to per-unit streaming
      * @dev Expressed in basis point (e.g. 100 <=> 1%)
      */
-    function eraStableYieldRate() external view returns (uint256);
+    function stableYieldRate() external view returns (uint256);
 
     /**
      * @notice The minimum forward stream-solvency horizon the FundManager maintains

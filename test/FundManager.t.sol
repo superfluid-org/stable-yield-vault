@@ -9,7 +9,7 @@ import { IFundManager } from "src/interfaces/IFundManager.sol";
 
 contract FundManagerTest is StableYieldVaultTestBase {
 
-    event EraStableYieldRateChanged(uint256 oldRate, uint256 newRate);
+    event StableYieldRateChanged(uint256 oldRate, uint256 newRate);
     event GuaranteedFlowDurationChanged(uint256 oldDuration, uint256 newDuration);
     event Gave(address indexed from, uint256 amount);
     event Took(address indexed to, uint256 amount);
@@ -29,7 +29,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
     function _calculateExpectedFlowRate(uint128 poolUnits) internal view returns (int96 expectedFlowRate) {
         int96 flowRatePerUnit = int96(
-            int256(_fundManager.SCALING_FACTOR() * _fundManager.eraStableYieldRate() / (_fundManager.YEAR() * 10_000))
+            int256(_fundManager.SCALING_FACTOR() * _fundManager.stableYieldRate() / (_fundManager.YEAR() * 10_000))
         );
 
         expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
@@ -45,7 +45,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(address(_fundManager.UNDERLYING_ASSET()), address(_usdc), "incorrect underlying asset");
         vm.assertEq(address(_fundManager.YIELD_ASSET()), address(_usdcx), "incorrect yield asset");
         vm.assertEq(_fundManager.SCALING_FACTOR(), 1e12, "incorrect scaling factor");
-        vm.assertEq(_fundManager.eraStableYieldRate(), INITIAL_ERA_STABLE_YIELD_RATE, "incorrect stable yield rate");
+        vm.assertEq(_fundManager.stableYieldRate(), INITIAL_ERA_STABLE_YIELD_RATE, "incorrect stable yield rate");
         vm.assertEq(
             _fundManager.guaranteedFlowDuration(), GUARANTEED_FLOW_DURATION, "incorrect guaranteed flow duration"
         );
@@ -256,12 +256,12 @@ contract FundManagerTest is StableYieldVaultTestBase {
         uint256 newRate = 2000; // 20%
 
         vm.expectEmit(false, false, false, true, address(_fundManager));
-        emit EraStableYieldRateChanged(INITIAL_ERA_STABLE_YIELD_RATE, newRate);
+        emit StableYieldRateChanged(INITIAL_ERA_STABLE_YIELD_RATE, newRate);
 
         vm.prank(FUND_OPERATOR);
         _fundManager.setStableYieldRate(newRate);
 
-        vm.assertEq(_fundManager.eraStableYieldRate(), newRate);
+        vm.assertEq(_fundManager.stableYieldRate(), newRate);
     }
 
     function test_setStableYieldRate_revertsIfInvariantWouldBeViolated() public {
