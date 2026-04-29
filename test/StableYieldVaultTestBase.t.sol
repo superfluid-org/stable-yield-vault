@@ -56,7 +56,7 @@ contract StableYieldVaultTestBase is Test {
                 underlyingAsset: address(_usdc),
                 yieldAsset: address(_usdcx),
                 fundOperator: FUND_OPERATOR,
-                fundAdmin: FUND_OPERATOR,
+                fundAdmin: FUND_ADMIN,
                 initialEraStableYieldRate: INITIAL_ERA_STABLE_YIELD_RATE,
                 guaranteedFlowDuration: GUARANTEED_FLOW_DURATION,
                 shareName: "Stable Yield Vault Share",

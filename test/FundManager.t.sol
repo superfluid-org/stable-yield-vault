@@ -49,16 +49,20 @@ contract FundManagerTest is StableYieldVaultTestBase {
     //  \____/\____/_/ /_/____/\__/_/   \__,_/\___/\__/\____/_/       /_/  \___/____/\__/____/
 
     function test_constructor_initialState() public view {
-        vm.assertEq(address(_fundManager.UNDERLYING_ASSET()), address(_usdc));
-        vm.assertEq(address(_fundManager.YIELD_ASSET()), address(_usdcx));
-        vm.assertEq(_fundManager.SCALING_FACTOR(), 1e12);
-        vm.assertEq(_fundManager.eraStableYieldRate(), INITIAL_ERA_STABLE_YIELD_RATE);
-        vm.assertEq(_fundManager.guaranteedFlowDuration(), GUARANTEED_FLOW_DURATION);
-        vm.assertTrue(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), FUND_OPERATOR));
-        vm.assertTrue(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), DEPLOYER));
-        vm.assertTrue(_fundManager.hasRole(_fundManager.VAULT_ROLE(), address(_vault)));
-        vm.assertEq(address(_fundManager.VAULT()), address(_vault));
-        vm.assertNotEq(address(_fundManager.POOL()), address(0));
+        vm.assertEq(address(_fundManager.UNDERLYING_ASSET()), address(_usdc), "incorrect underlying asset");
+        vm.assertEq(address(_fundManager.YIELD_ASSET()), address(_usdcx), "incorrect yield asset");
+        vm.assertEq(_fundManager.SCALING_FACTOR(), 1e12, "incorrect scaling factor");
+        vm.assertEq(_fundManager.eraStableYieldRate(), INITIAL_ERA_STABLE_YIELD_RATE, "incorrect stable yield rate");
+        vm.assertEq(
+            _fundManager.guaranteedFlowDuration(), GUARANTEED_FLOW_DURATION, "incorrect guaranteed flow duration"
+        );
+        vm.assertTrue(
+            _fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), FUND_OPERATOR), "Fund Operator role mismatch"
+        );
+        vm.assertTrue(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), FUND_ADMIN), "Fund Admin role mismatch");
+        vm.assertTrue(_fundManager.hasRole(_fundManager.VAULT_ROLE(), address(_vault)), "Vault role mismatch");
+        vm.assertEq(address(_fundManager.VAULT()), address(_vault), "incorrect vault address");
+        vm.assertNotEq(address(_fundManager.POOL()), address(0), "GDA pool not created");
     }
 
     function test_constructor_revertsOnMismatchedSuperToken() public {
@@ -304,7 +308,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.expectEmit(false, false, false, true, address(_fundManager));
         emit GuaranteedFlowDurationChanged(GUARANTEED_FLOW_DURATION, newDuration);
 
-        vm.prank(FUND_OPERATOR);
+        vm.prank(FUND_ADMIN);
         _fundManager.setGuaranteedFlowDuration(newDuration);
 
         vm.assertEq(_fundManager.guaranteedFlowDuration(), newDuration);
@@ -313,7 +317,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
     function test_setGuaranteedFlowDuration_revertsBelowFloor() public {
         uint256 below = _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1;
 
-        vm.prank(FUND_OPERATOR);
+        vm.prank(FUND_ADMIN);
         vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
         _fundManager.setGuaranteedFlowDuration(below);
     }
@@ -327,8 +331,8 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.settleEpoch();
 
         // Raising the horizon to 1000 years would require far more yield buffer than we hold
-        vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
+        vm.prank(FUND_ADMIN);
+        vm.expectRevert(IFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setGuaranteedFlowDuration(365 days * 1000);
     }
 
