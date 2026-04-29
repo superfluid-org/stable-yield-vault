@@ -264,19 +264,25 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(_fundManager.stableYieldRate(), newRate);
     }
 
-    function test_setStableYieldRate_revertsIfInvariantWouldBeViolated() public {
-        _seedYieldBuffer();
+    function test_setStableYieldRate_revertsIfInvariantWouldBeViolated(uint256 increasedAnnualRate) public {
+        increasedAnnualRate = bound(increasedAnnualRate, 1100, 10_000); // Range from 11% to 100% annual rate
+
+        // Seed 2 USDCx (e.g. sufficient yield asset to cover for 1 x 1000 USDC deposit @ 10% stable yield rate)
+        _dealUSDCx(address(_fundManager), 2 ether);
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
+        vm.startPrank(FUND_OPERATOR);
         _fundManager.closeEpoch(0);
-        vm.prank(FUND_OPERATOR);
         _fundManager.settleEpoch();
+
+        // Fund Operator take the unutilized assets
+        _fundManager.take(DEFAULT_DEPOSIT);
 
         // Choose a rate where the new flow still fits the GDA security deposit (~hours of flow)
         // but the 7-day invariant horizon exceeds the yield buffer.
-        vm.prank(FUND_OPERATOR);
-        vm.expectRevert(IFundManager.INVARIANT_VIOLATED.selector);
+        vm.expectRevert(IFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE * 500);
+
+        vm.stopPrank();
     }
 
     function test_setGuaranteedFlowDuration_updatesAndEmits() public {

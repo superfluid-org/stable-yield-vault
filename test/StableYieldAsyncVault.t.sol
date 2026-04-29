@@ -278,12 +278,6 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         vm.assertEq(snap.rate, 2e18);
     }
 
-    function test_closeEpoch_revertsOnZeroTotalAssets() public {
-        vm.prank(address(_fundManager));
-        vm.expectRevert(IStableYieldAsyncVault.INVALID_PARAMETERS.selector);
-        _vault.onCloseEpoch(0);
-    }
-
     function test_closeEpoch_revertsIfPreviousNotSettled() public {
         _vaultCloseEpoch(1000e6);
 
@@ -313,12 +307,12 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
     function test_settleEpoch_surplusPushedToFundManager() public {
         _primeForDeposit(ALICE, DEFAULT_DEPOSIT);
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        _vaultCloseEpoch(DEFAULT_DEPOSIT);
+        _vaultCloseEpoch(0);
 
         uint256 fmBalanceBefore = _usdc.balanceOf(address(_fundManager));
 
         vm.expectEmit(true, false, false, true, address(_vault));
-        emit EpochSettled(1, 0, 1e18, DEFAULT_DEPOSIT, 0);
+        emit EpochSettled(1, DEFAULT_DEPOSIT, 1e18, DEFAULT_DEPOSIT, 0);
 
         _vaultSettleEpoch();
 
