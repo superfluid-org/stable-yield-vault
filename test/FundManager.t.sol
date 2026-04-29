@@ -2,17 +2,10 @@
 pragma solidity ^0.8.34;
 
 import { StableYieldVaultTestBase } from "./StableYieldVaultTestBase.t.sol";
-
-import { IAccessControl } from "@openzeppelin-v5/contracts/access/AccessControl.sol";
-
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
-import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
 import { FundManager } from "src/FundManager.sol";
-
-import { StableYieldAsyncVault } from "src/StableYieldAsyncVault.sol";
 import { IFundManager } from "src/interfaces/IFundManager.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
 
 contract FundManagerTest is StableYieldVaultTestBase {
 

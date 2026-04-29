@@ -205,6 +205,8 @@ interface IFundManager {
     /**
      * @notice Whether the current epoch satisfies all preconditions required to call {settleEpoch}.
      * @return canSettle True if {settleEpoch} can be called without reverting on preconditions.
+     * @return reason The reason for which precondition is not satisfied
+     * @return snap The settling epoch snapshot
      */
     function canSettleEpoch()
         external

@@ -239,7 +239,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         totalPendingRedeemShares = 0;
 
         // Increment current epoch (future requests will be included in the new epoch)
-        currentEpoch++;
+        ++currentEpoch;
 
         // Persist the last reported total assets for view functions
         _lastReportedTotalAssets = _totalAssets;
