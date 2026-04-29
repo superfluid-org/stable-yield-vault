@@ -287,13 +287,26 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     /// @inheritdoc IFundManager
     function evaluateFunding() external view returns (int256 funding) {
         IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
+
+        uint128 newTotalUnits = POOL.getTotalUnits() + uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
+        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
+        uint256 requiredYieldAssetsBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
         uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
 
-        int256 underlyingAssetDeficit =
-            int256(redeemingAssets) - int256(unutilizedAssetsBalance()) - int256(snap.depositingAssets);
-        int256 scaledYieldAssetDeficit = evaluateYieldAssetsDeficit() / int256(SCALING_FACTOR);
+        // Evaluate pre-settlement yield asset deficit
+        int256 yieldAssetDeficit = int256(requiredYieldAssetsBalance) - int256(yieldAssetsBalance());
 
-        funding = underlyingAssetDeficit + scaledYieldAssetDeficit;
+        // Evaluate pre-settlement underlying deficit
+        int256 underlyingAssetDeficit =
+            int256(redeemingAssets) - int256(unutilizedAssetsBalance() + snap.depositingAssets);
+
+        if (yieldAssetDeficit <= 0) {
+            // If there is yield asset excess, we do not consider it "takeable"
+            funding = underlyingAssetDeficit;
+        } else {
+            // If there is yield asset deficit, we substract it from the "takeable" underlying assets
+            funding = underlyingAssetDeficit + (yieldAssetDeficit / int256(SCALING_FACTOR)) + 1;
+        }
     }
 
     /// @inheritdoc IFundManager
