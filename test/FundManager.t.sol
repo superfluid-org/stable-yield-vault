@@ -2,12 +2,20 @@
 pragma solidity ^0.8.34;
 
 import { StableYieldVaultTestBase } from "./StableYieldVaultTestBase.t.sol";
+
+import { SuperTokenV1Library } from "@superfluid-finance/ethereum-contracts/contracts/apps/SuperTokenV1Library.sol";
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
+
+import { ISuperToken, SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
+import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
+
 import { FundManager } from "src/FundManager.sol";
 import { IFundManager } from "src/interfaces/IFundManager.sol";
 
 contract FundManagerTest is StableYieldVaultTestBase {
+
+    using SuperTokenV1Library for ISuperToken;
 
     event StableYieldRateChanged(uint256 oldRate, uint256 newRate);
     event GuaranteedFlowDurationChanged(uint256 oldDuration, uint256 newDuration);
@@ -19,20 +27,6 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
     function setUp() public override {
         super.setUp();
-    }
-
-    /// @dev Seeds the FundManager with USDCx so flow recalibration / invariant checks succeed.
-    ///      Called only by tests that exercise the streaming flow (keeps fuzz-balance tests unaffected).
-    function _seedYieldBuffer() internal {
-        _dealUSDCx(address(_fundManager), USDCX_SEED);
-    }
-
-    function _calculateExpectedFlowRate(uint128 poolUnits) internal view returns (int96 expectedFlowRate) {
-        int96 flowRatePerUnit = int96(
-            int256(_fundManager.SCALING_FACTOR() * _fundManager.stableYieldRate() / (_fundManager.YEAR() * 10_000))
-        );
-
-        expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
     }
 
     //     ______                 __                  __                ______          __
@@ -225,16 +219,16 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
     function test_give_pullsAndEmits() public {
         _dealUSDC(FUND_OPERATOR, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
-        _usdc.approve(address(_fundManager), DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
 
+        _usdc.approve(address(_fundManager), DEFAULT_DEPOSIT);
         uint256 fmBefore = _usdc.balanceOf(address(_fundManager));
 
         vm.expectEmit(true, false, false, true, address(_fundManager));
         emit Gave(FUND_OPERATOR, DEFAULT_DEPOSIT);
-
-        vm.prank(FUND_OPERATOR);
         _fundManager.give(DEFAULT_DEPOSIT);
+
+        vm.stopPrank();
 
         vm.assertEq(_usdc.balanceOf(address(_fundManager)), fmBefore + DEFAULT_DEPOSIT);
     }
@@ -252,15 +246,39 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(_usdc.balanceOf(FUND_OPERATOR), opBefore + DEFAULT_DEPOSIT);
     }
 
-    function test_setStableYieldRate_updatesAndEmits() public {
-        uint256 newRate = 2000; // 20%
+    function test_setStableYieldRate_updatesAndEmits(uint256 newRate) public {
+        newRate = bound(newRate, 1, 100_000); // ranges from 0.01% and 1000%
+
+        // Prefund FM with underlying assets and yield asset (to cover for yield rebalance)
+        _dealUSDCx(address(_fundManager), 100_000e18);
+        _dealUSDC(address(_fundManager), 100_000e6);
+
+        // Put the system in a state where its already flowing yield to users
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+
+        uint128 totalUnits = _fundManager.POOL().getTotalUnits();
+
+        int96 previousFlowRatePerUnits = int96(
+            int256(_fundManager.SCALING_FACTOR() * INITIAL_ERA_STABLE_YIELD_RATE / (_fundManager.YEAR() * 10_000))
+        );
+
+        vm.assertEq(
+            int256(_fundManager.POOL().getTotalFlowRate()), int256(int128(totalUnits) * previousFlowRatePerUnits)
+        );
 
         vm.expectEmit(false, false, false, true, address(_fundManager));
         emit StableYieldRateChanged(INITIAL_ERA_STABLE_YIELD_RATE, newRate);
 
-        vm.prank(FUND_OPERATOR);
         _fundManager.setStableYieldRate(newRate);
+        vm.stopPrank();
 
+        int96 newFlowRatePerUnits =
+            int96(int256(_fundManager.SCALING_FACTOR() * newRate / (_fundManager.YEAR() * 10_000)));
+
+        vm.assertEq(int256(_fundManager.POOL().getTotalFlowRate()), int256(int128(totalUnits) * newFlowRatePerUnits));
         vm.assertEq(_fundManager.stableYieldRate(), newRate);
     }
 
@@ -280,13 +298,13 @@ contract FundManagerTest is StableYieldVaultTestBase {
         // Choose a rate where the new flow still fits the GDA security deposit (~hours of flow)
         // but the 7-day invariant horizon exceeds the yield buffer.
         vm.expectRevert(IFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
-        _fundManager.setStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE * 500);
+        _fundManager.setStableYieldRate(increasedAnnualRate);
 
         vm.stopPrank();
     }
 
-    function test_setGuaranteedFlowDuration_updatesAndEmits() public {
-        uint256 newDuration = 30 days;
+    function test_setGuaranteedFlowDuration_updatesAndEmits(uint256 newDuration) public {
+        newDuration = bound(newDuration, _fundManager.MIN_GUARANTEED_FLOW_DURATION(), 100 days);
 
         vm.expectEmit(false, false, false, true, address(_fundManager));
         emit GuaranteedFlowDurationChanged(GUARANTEED_FLOW_DURATION, newDuration);
@@ -297,15 +315,15 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(_fundManager.guaranteedFlowDuration(), newDuration);
     }
 
-    function test_setGuaranteedFlowDuration_revertsBelowFloor() public {
-        uint256 below = _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1;
+    function test_setGuaranteedFlowDuration_revertsBelowFloor(uint256 belowFloorDuration) public {
+        belowFloorDuration = bound(belowFloorDuration, 0, _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1);
 
         vm.prank(FUND_ADMIN);
         vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
-        _fundManager.setGuaranteedFlowDuration(below);
+        _fundManager.setGuaranteedFlowDuration(belowFloorDuration);
     }
 
-    function test_setGuaranteedFlowDuration_revertsIfInvariantWouldBeViolated() public {
+    function test_setGuaranteedFlowDuration_cannotRebalanceYieldAssets() public {
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
         vm.prank(FUND_OPERATOR);
@@ -319,11 +337,21 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.setGuaranteedFlowDuration(365 days * 1000);
     }
 
-    function test_onRequestRedeem_revertsOnBadArgs() public {
+    //     ______      ______               __      ______          __
+    //    / ____/___ _/ / / /_  ____ ______/ /__   /_  __/__  _____/ /______
+    //   / /   / __ `/ / / __ \/ __ `/ ___/ //_/    / / / _ \/ ___/ __/ ___/
+    //  / /___/ /_/ / / / /_/ / /_/ / /__/ ,<      / / /  __(__  ) /_(__  )
+    //  \____/\__,_/_/_/_.___/\__,_/\___/_/|_|    /_/  \___/____/\__/____/
+
+    function test_onRequestRedeem_revertsOnBadArgs(uint256 sharesOwned, uint256 sharesRedeemed) public {
+        // Cap shares redeemed to strictly greated than share owned
+        sharesOwned = bound(sharesOwned, 1, ONE_BILLION * 1e18);
+        sharesRedeemed = bound(sharesRedeemed, sharesOwned, ONE_BILLION * 1e18);
+
         // sharesRedeemed > totalSharesOwned
         vm.prank(address(_vault));
         vm.expectRevert(IFundManager.BAD_REDEEM_ARGS.selector);
-        _fundManager.onRequestRedeem(ALICE, 10, 5);
+        _fundManager.onRequestRedeem(ALICE, sharesRedeemed, sharesOwned);
 
         // totalSharesOwned == 0
         vm.prank(address(_vault));
@@ -331,17 +359,22 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.onRequestRedeem(ALICE, 0, 0);
     }
 
-    function test_onRequestRedeem_revertsWhenNoUnits() public {
-        // ALICE has zero pool units — the hook should be a no-op
+    function test_onRequestRedeem_revertsWhenNoUnits(uint256 sharesOwned, uint256 sharesRedeemed) public {
+        // Cap shares redeemed to strictly lower than share owned
+        sharesOwned = bound(sharesOwned, 1, ONE_BILLION * 1e18);
+        sharesRedeemed = bound(sharesRedeemed, 1, sharesOwned);
+
+        // ALICE has zero pool units — the hook shall revert
         ISuperfluidPool pool = _fundManager.POOL();
         vm.assertEq(pool.getUnits(ALICE), 0);
 
         vm.expectRevert(IFundManager.BAD_REDEEM_ARGS.selector);
         vm.prank(address(_vault));
-        _fundManager.onRequestRedeem(ALICE, 100, 100);
+        _fundManager.onRequestRedeem(ALICE, sharesRedeemed, sharesOwned);
     }
 
-    function test_onRequestRedeem_reducesUnitsProportionally() public {
+    function test_onRequestRedeem_reducesUnitsProportionally(uint256 proportion) public {
+        proportion = bound(proportion, 100, 9900); // ranges from 1% to 99% of ALICE shares being redeemed
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
         vm.prank(FUND_OPERATOR);
@@ -359,20 +392,22 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
         // Redeem half — units should drop by ~half
         vm.prank(ALICE);
-        _vault.requestRedeem(aliceShares / 2, ALICE, ALICE);
+        _vault.requestRedeem(aliceShares * proportion / 10_000, ALICE, ALICE);
 
         uint128 aliceUnitsAfter = pool.getUnits(ALICE);
+
         vm.assertLt(aliceUnitsAfter, aliceUnitsBefore);
-        vm.assertApproxEqAbs(aliceUnitsAfter, aliceUnitsBefore / 2, 1);
+        vm.assertEq(aliceUnitsAfter, aliceUnitsBefore - (aliceUnitsBefore * proportion / 10_000));
     }
 
     function test_onClaimDeposit_movesUnitsFromFmToController() public {
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
+
+        vm.startPrank(FUND_OPERATOR);
         _fundManager.closeEpoch(0);
-        vm.prank(FUND_OPERATOR);
         _fundManager.settleEpoch();
+        vm.stopPrank();
 
         ISuperfluidPool pool = _fundManager.POOL();
         uint128 fmUnitsBefore = pool.getUnits(address(_fundManager));
@@ -398,8 +433,8 @@ contract FundManagerTest is StableYieldVaultTestBase {
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/    /_/  \___/____/\__/____/
 
     function test_unutilizedAssetsBalance(uint256 expectedBalance, uint256 usdcxBalance) public {
-        usdcxBalance = bound(usdcxBalance, 0, 100e9 ether);
-        expectedBalance = bound(expectedBalance, 0, 100e9 * 1e6);
+        usdcxBalance = bound(usdcxBalance, 0, ONE_BILLION * 1 ether);
+        expectedBalance = bound(expectedBalance, 0, ONE_BILLION * 1e6);
 
         _dealUSDC(address(_fundManager), expectedBalance);
         _dealUSDCx(address(_fundManager), usdcxBalance);
@@ -408,8 +443,8 @@ contract FundManagerTest is StableYieldVaultTestBase {
     }
 
     function test_yieldAssetsBalance(uint256 expectedBalance, uint256 usdcBalance) public {
-        usdcBalance = bound(usdcBalance, 0, 100e9 * 1e6);
-        expectedBalance = bound(expectedBalance, 0, 100e9 ether);
+        usdcBalance = bound(usdcBalance, 0, ONE_BILLION * 1e6);
+        expectedBalance = bound(expectedBalance, 0, ONE_BILLION * 1 ether);
 
         _dealUSDC(address(_fundManager), usdcBalance);
         _dealUSDCx(address(_fundManager), expectedBalance);
@@ -418,8 +453,8 @@ contract FundManagerTest is StableYieldVaultTestBase {
     }
 
     function test_scaledYieldAssetsBalance(uint256 expectedBalance, uint256 usdcBalance) public {
-        usdcBalance = bound(usdcBalance, 0, 100e9 * 1e6);
-        expectedBalance = bound(expectedBalance, 0, 100e9 ether);
+        usdcBalance = bound(usdcBalance, 0, ONE_BILLION * 1e6);
+        expectedBalance = bound(expectedBalance, 0, ONE_BILLION * 1 ether);
 
         _dealUSDC(address(_fundManager), usdcBalance);
         _dealUSDCx(address(_fundManager), expectedBalance);
@@ -428,60 +463,135 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(_fundManager.scaledYieldAssetsBalance(), expectedScaled);
     }
 
-    function test_evaluateYieldAssetsDeficit_zeroWhenFullyFunded() public view {
-        // No units yet => target flow 0 => deficit 0
-        vm.assertEq(_fundManager.evaluateYieldAssetsDeficit(), 0);
-    }
-
     function test_evaluateYieldAssetsDeficit_positiveWhenUnderfunded() public {
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(FUND_OPERATOR);
+        vm.startPrank(FUND_OPERATOR);
         _fundManager.closeEpoch(0);
-        vm.prank(FUND_OPERATOR);
         _fundManager.settleEpoch();
-
-        // Push required balance above actual by inflating pool units
-        _inflateUnitsToBreakInvariant();
+        vm.stopPrank();
 
         vm.assertGt(_fundManager.evaluateYieldAssetsDeficit(), 0);
     }
 
-    function _requestDeposit(address user, uint256 amount) internal {
-        _dealUSDC(user, amount);
-        vm.prank(user);
-        _usdc.approve(address(_vault), type(uint256).max);
-        vm.prank(user);
-        _vault.requestDeposit(amount, user, user);
+    function test_evaluateYieldAssetsDeficit() public {
+        // No units yet => target flow 0 => deficit 0
+        vm.assertEq(_fundManager.evaluateYieldAssetsDeficit(), 0);
+
+        _seedYieldBuffer();
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        // After settlement, yield asset is approximately balanced
+        // So, we move forward 3 days (to stream-out the yield balance)
+        vm.warp(block.timestamp + 3 days);
+
+        int96 expectedFlowRate = _calculateExpectedFlowRate(_fundManager.POOL().getTotalUnits());
+        uint256 requiredYieldAssetBalance =
+            uint256(int256(expectedFlowRate) * int256(_fundManager.guaranteedFlowDuration()));
+
+        int256 expectedDeficit = int256(requiredYieldAssetBalance) - int256(_fundManager.yieldAssetsBalance());
+
+        // Deficit shall be positive (e.g. there are not enough yield assets)
+        vm.assertGt(_fundManager.evaluateYieldAssetsDeficit(), 0);
+        vm.assertEq(_fundManager.evaluateYieldAssetsDeficit(), expectedDeficit);
+
+        _dealUSDCx(address(_fundManager), 1000 ether);
+
+        expectedDeficit = int256(requiredYieldAssetBalance) - int256(_fundManager.yieldAssetsBalance());
+
+        // Deficit shall be negative (e.g. there are more yield assets than needed)
+        vm.assertLt(_fundManager.evaluateYieldAssetsDeficit(), 0);
+        vm.assertEq(_fundManager.evaluateYieldAssetsDeficit(), expectedDeficit);
     }
 
-    /// @dev Inflates the pool's total units so the target flow rate exceeds what the yield buffer can sustain.
-    ///      Does not call distributeFlow, so the real stream keeps running at the old rate; only the
-    ///      required-balance calculation in `evaluateYieldAssetsDeficit` tips over into a deficit.
-    function _inflateUnitsToBreakInvariant() internal {
-        ISuperfluidPool pool = _fundManager.POOL(); // resolve before the prank is consumed
+    function test_ensureYieldFlowDuration_upgradeUnderlyingAsset() public {
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+
+        // Move 3 days forward (yield asset deficit shall be positive now)
+        vm.warp(block.timestamp + 3 days);
+
+        // Seed underlying assets (necessary for reblaancing the yield assets)
+        _dealUSDC(address(_fundManager), 100 * 1e6);
+
+        uint256 yieldAssetBefore = _fundManager.yieldAssetsBalance();
+        uint256 underlyingAssetBefore = _fundManager.unutilizedAssetsBalance();
+
+        _fundManager.ensureYieldFlowDuration();
+        vm.stopPrank();
+
+        vm.assertGt(_fundManager.yieldAssetsBalance(), yieldAssetBefore);
+        vm.assertLt(_fundManager.unutilizedAssetsBalance(), underlyingAssetBefore);
+    }
+
+    function test_ensureYieldFlowDuration_downgradeYieldAsset() public {
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        // Move 3 days forward (yield asset deficit shall be positive now)
+        vm.warp(block.timestamp + 3 days);
+
+        // Seed more yield assets (more than necessary to trigger rebalancing into underlying assets)
+        _dealUSDCx(address(_fundManager), 100 * 1e18);
+
+        uint256 yieldAssetBefore = _fundManager.yieldAssetsBalance();
+        uint256 underlyingAssetBefore = _fundManager.unutilizedAssetsBalance();
+
+        int256 deficit = _fundManager.evaluateYieldAssetsDeficit();
+        vm.assertLt(deficit, 0);
+
+        vm.prank(FUND_OPERATOR);
+        _fundManager.ensureYieldFlowDuration();
+
+        vm.assertLt(_fundManager.yieldAssetsBalance(), yieldAssetBefore);
+        vm.assertGt(_fundManager.unutilizedAssetsBalance(), underlyingAssetBefore);
+    }
+
+    function test_ensureYieldFlowDuration_restartFlow() public {
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        ISuperfluidPool pool = _fundManager.POOL();
+
+        int96 flowRateBefore = pool.getTotalFlowRate();
+
+        // Stop the flow (to simulate stream "liquidation")
         vm.prank(address(_fundManager));
-        pool.updateMemberUnits(address(0xbeef), uint128(1e12));
+        _sf.gdaV1Forwarder.distributeFlow(_usdcx, address(_fundManager), pool, 0, "");
+
+        vm.assertEq(int256(pool.getTotalFlowRate()), 0);
+
+        vm.prank(FUND_OPERATOR);
+        _fundManager.ensureYieldFlowDuration();
+
+        vm.assertEq(int256(pool.getTotalFlowRate()), int256(flowRateBefore));
     }
 
-    /// @dev Deploys a fresh wrapper super-token pair using the base's framework deployer.
-    function _deployFreshWrapper(string memory name, uint8 decimals)
-        internal
-        returns (address underlying, address superToken)
-    {
-        (, address stk) = (address(0), address(0));
-        bytes memory callData = abi.encodeWithSignature(
-            "deployWrapperSuperToken(string,string,uint8,uint256,address)",
-            name,
-            name,
-            decimals,
-            type(uint256).max,
-            address(0)
-        );
-        (bool ok, bytes memory ret) = address(_deployer).call(callData);
-        require(ok, "deployWrapperSuperToken failed");
-        (underlying, stk) = abi.decode(ret, (address, address));
-        superToken = stk;
+    function test_evaluateFunding() public {
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        // Seed an excess in yield asset
+        _dealUSDCx(address(_fundManager), 10 * 1e18);
+
+        int256 funding = _fundManager.evaluateFunding();
+
+        vm.assertEq(funding, -1 * int256(_fundManager.unutilizedAssetsBalance()));
     }
 
     //      ___                               ______            __             __   ______          __
@@ -516,7 +626,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
     function test_take_accessControl(address nonFundOperator, uint256 amount) public {
         vm.assume(_fundManager.hasRole(_fundManager.FUND_OPERATOR_ROLE(), nonFundOperator) == false);
-        amount = bound(amount, 1, 100e9 * 1e6);
+        amount = bound(amount, 1, ONE_BILLION * 1e6);
 
         _dealUSDC(address(_fundManager), amount);
 
@@ -558,6 +668,56 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.expectRevert();
 
         _fundManager.onClaimDeposit(depositor, depositAmount);
+    }
+
+    //    ______          __     __  __     __                   ______                 __  _
+    //   /_  __/__  _____/ /_   / / / /__  / /___  ___  _____   / ____/_  ______  _____/ /_(_)___  ____  _____
+    //    / / / _ \/ ___/ __/  / /_/ / _ \/ / __ \/ _ \/ ___/  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
+    //   / / /  __(__  ) /_   / __  /  __/ / /_/ /  __/ /     / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
+    //  /_/  \___/____/\__/  /_/ /_/\___/_/ .___/\___/_/     /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
+    //                                   /_/
+
+    function _requestDeposit(address user, uint256 amount) internal {
+        _dealUSDC(user, amount);
+        vm.prank(user);
+        _usdc.approve(address(_vault), type(uint256).max);
+        vm.prank(user);
+        _vault.requestDeposit(amount, user, user);
+    }
+
+    /// @dev Inflates the pool's total units so the target flow rate exceeds what the yield buffer can sustain.
+    ///      Does not call distributeFlow, so the real stream keeps running at the old rate; only the
+    ///      required-balance calculation in `evaluateYieldAssetsDeficit` tips over into a deficit.
+    function _inflateUnitsToBreakInvariant() internal {
+        ISuperfluidPool pool = _fundManager.POOL(); // resolve before the prank is consumed
+        vm.prank(address(_fundManager));
+        pool.updateMemberUnits(address(0xbeef), uint128(1e12));
+    }
+
+    /// @dev Deploys a fresh wrapper super-token pair using the base's framework deployer.
+    function _deployFreshWrapper(string memory name, uint8 decimals)
+        internal
+        returns (address underlying, address superToken)
+    {
+        (TestToken underlyingToken, SuperToken superTokenToken) =
+            _deployer.deployWrapperSuperToken(name, name, decimals, type(uint256).max, address(0));
+
+        underlying = address(underlyingToken);
+        superToken = address(superTokenToken);
+    }
+
+    /// @dev Seeds the FundManager with USDCx so flow recalibration / invariant checks succeed.
+    ///      Called only by tests that exercise the streaming flow (keeps fuzz-balance tests unaffected).
+    function _seedYieldBuffer() internal {
+        _dealUSDCx(address(_fundManager), USDCX_SEED);
+    }
+
+    function _calculateExpectedFlowRate(uint128 poolUnits) internal view returns (int96 expectedFlowRate) {
+        int96 flowRatePerUnit = int96(
+            int256(_fundManager.SCALING_FACTOR() * _fundManager.stableYieldRate() / (_fundManager.YEAR() * 10_000))
+        );
+
+        expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
     }
 
 }
