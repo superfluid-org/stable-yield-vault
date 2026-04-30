@@ -120,9 +120,9 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         _grantRole(DEFAULT_ADMIN_ROLE, _fundAdmin);
         _grantRole(VAULT_ROLE, msg.sender);
 
-        // Pool Configuration : units are non-transferable; any-sender distribution allowed
+        // Pool Configuration : units are non-transferable; any-sender distribution not allowed
         PoolConfig memory poolConfig =
-            PoolConfig({ transferabilityForUnitsOwner: false, distributionFromAnyAddress: true });
+            PoolConfig({ transferabilityForUnitsOwner: false, distributionFromAnyAddress: false });
 
         // Create the pool with FM as pool admin
         POOL = YIELD_ASSET.createPool(address(this), poolConfig);
