@@ -12,6 +12,7 @@ import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/util
 
 import { FundManager } from "src/FundManager.sol";
 import { IFundManager } from "src/interfaces/IFundManager.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
 
 contract FundManagerTest is StableYieldVaultTestBase {
 
@@ -579,19 +580,188 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(int256(pool.getTotalFlowRate()), int256(flowRateBefore));
     }
 
-    function test_evaluateFunding() public {
+    /// @dev Empty state: no pool units, no balances, no snapshot.
+    ///      Both branches collapse to zero — exercises the trivial path.
+    function test_evaluateFunding_emptyState() public view {
+        vm.assertEq(_fundManager.evaluateFunding(), 0);
+    }
+
+    /// @dev No pool units → requiredYieldAssetsBalance = 0 → branch 1 (yield excess).
+    ///      Unutilized underlying is fully takeable, regardless of yield balance.
+    function test_evaluateFunding_noUnits_unutilizedFullyTakeable(uint256 unutilized, uint256 yieldBalance) public {
+        unutilized = bound(unutilized, 0, ONE_BILLION * 1e6);
+        yieldBalance = bound(yieldBalance, 0, ONE_BILLION * 1 ether);
+
+        _dealUSDC(address(_fundManager), unutilized);
+        _dealUSDCx(address(_fundManager), yieldBalance);
+
+        // Branch 1: funding = redeemingAssets(0) - (unutilized + 0) = -unutilized
+        // Yield excess is intentionally NOT counted as takeable.
+        vm.assertEq(_fundManager.evaluateFunding(), -int256(unutilized));
+    }
+
+    /// @dev Post-settlement steady state with extra yield buffer:
+    ///      pool has units but yield balance covers the requirement → branch 1, funding = -unutilized.
+    function test_evaluateFunding_postSettle_yieldExcess_isTakeable() public {
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
         vm.startPrank(FUND_OPERATOR);
         _fundManager.closeEpoch(0);
         _fundManager.settleEpoch();
         vm.stopPrank();
 
-        // Seed an excess in yield asset
-        _dealUSDCx(address(_fundManager), 10 * 1e18);
+        // Top up the buffer well past the target so we land squarely in branch 1.
+        _dealUSDCx(address(_fundManager), 10 ether);
 
-        int256 funding = _fundManager.evaluateFunding();
+        vm.assertLe(_fundManager.evaluateYieldAssetsDeficit(), 0);
+        vm.assertEq(_fundManager.evaluateFunding(), -int256(_fundManager.unutilizedAssetsBalance()));
+    }
 
-        vm.assertEq(funding, -1 * int256(_fundManager.unutilizedAssetsBalance()));
+    /// @dev Post-settlement, time-warped so yield streams below the required buffer → branch 2.
+    ///      Operator-takeable amount shrinks by the deficit (rescaled to underlying decimals) +1.
+    function test_evaluateFunding_postSettle_yieldDeficit_branch2() public {
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        // Drain enough of the buffer to flip the deficit positive
+        vm.warp(block.timestamp + 4 days);
+
+        int256 yieldDeficit = _fundManager.evaluateYieldAssetsDeficit();
+        vm.assertGt(yieldDeficit, 0);
+
+        int256 unutilized = int256(_fundManager.unutilizedAssetsBalance());
+        int256 expected = -unutilized + yieldDeficit / int256(_fundManager.SCALING_FACTOR()) + 1;
+
+        vm.assertEq(_fundManager.evaluateFunding(), expected);
+    }
+
+    /// @dev Open snapshot with pending deposit only (no redeem).
+    ///      depositingAssets is added on the "covered" side of underlyingAssetDeficit.
+    function test_evaluateFunding_pendingDeposit() public {
+        _seedYieldBuffer();
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+
+        vm.prank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+
+        IStableYieldAsyncVault.Snapshot memory snap = _vault.getSnapshot();
+        vm.assertEq(snap.depositingAssets, DEFAULT_DEPOSIT);
+        vm.assertEq(snap.redeemingShares, 0);
+
+        // Yield buffer was seeded generously → branch 1.
+        // funding = 0 - (unutilizedFM + DEFAULT_DEPOSIT)
+        int256 expected = -int256(_fundManager.unutilizedAssetsBalance() + DEFAULT_DEPOSIT);
+        vm.assertEq(_fundManager.evaluateFunding(), expected);
+    }
+
+    /// @dev Open snapshot with pending redeem only (no new deposit).
+    ///      redeemingShares × rate must show up as a positive funding requirement
+    ///      net of whatever unutilized assets the FM already holds.
+    function test_evaluateFunding_pendingRedeem() public {
+        _seedYieldBuffer();
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.prank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        vm.prank(FUND_OPERATOR);
+        _fundManager.settleEpoch();
+
+        vm.prank(ALICE);
+        _vault.deposit(DEFAULT_DEPOSIT, ALICE);
+        uint256 aliceShares = _vault.balanceOf(ALICE);
+
+        vm.prank(ALICE);
+        _vault.requestRedeem(aliceShares, ALICE, ALICE);
+
+        vm.prank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+
+        IStableYieldAsyncVault.Snapshot memory snap = _vault.getSnapshot();
+        vm.assertEq(snap.depositingAssets, 0);
+        vm.assertEq(snap.redeemingShares, aliceShares);
+        uint256 redeemingAssets = snap.redeemingShares * snap.rate / 1e18;
+
+        // Yield buffer was seeded → branch 1.
+        // funding = redeemingAssets - (unutilizedFM + 0)
+        int256 expected = int256(redeemingAssets) - int256(_fundManager.unutilizedAssetsBalance());
+        vm.assertEq(_fundManager.evaluateFunding(), expected);
+    }
+
+    /// @dev Open snapshot, pending deposit, yield-deficit branch 2.
+    ///      depositingAssets must inflate newTotalUnits → larger required buffer.
+    function test_evaluateFunding_pendingDeposit_yieldDeficit_branch2() public {
+        // First settle to anchor units in the pool, then drain time so yield is below target.
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 5 days);
+
+        // New deposit lands in a fresh snapshot, expanding the unit base.
+        _requestDeposit(BOB, DEFAULT_DEPOSIT);
+        vm.prank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+
+        IStableYieldAsyncVault.Snapshot memory snap = _vault.getSnapshot();
+        vm.assertEq(snap.depositingAssets, DEFAULT_DEPOSIT);
+
+        // Mirror the contract's own deficit calculation (uses *new* units, not current units).
+        int256 yieldDeficit = _expectedYieldDeficitWithSnapshotUnits(snap);
+        vm.assertGt(yieldDeficit, 0);
+
+        int256 unutilized = int256(_fundManager.unutilizedAssetsBalance());
+        int256 expected =
+            -int256(uint256(unutilized) + DEFAULT_DEPOSIT) + yieldDeficit / int256(_fundManager.SCALING_FACTOR()) + 1;
+
+        vm.assertEq(_fundManager.evaluateFunding(), expected);
+    }
+
+    /// @dev Fuzz over post-settle branch 1 (yield excess): adding USDCx and USDC must keep us
+    ///      in branch 1 and produce funding = -unutilized regardless of how much extra yield we hold.
+    ///      Lower bound of 1 ether comfortably covers the GDA security deposit deducted at flow start.
+    function test_evaluateFunding_fuzz_branch1_postSettle(uint256 extraYield, uint256 extraUnutilized) public {
+        extraYield = bound(extraYield, 1 ether, ONE_BILLION * 1 ether);
+        extraUnutilized = bound(extraUnutilized, 0, ONE_BILLION * 1e6);
+
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        _dealUSDCx(address(_fundManager), extraYield);
+        _dealUSDC(address(_fundManager), extraUnutilized);
+
+        // After settle, deficit is non-positive; topping up only deepens the excess → branch 1.
+        vm.assertLe(_fundManager.evaluateYieldAssetsDeficit(), 0);
+        vm.assertEq(_fundManager.evaluateFunding(), -int256(_fundManager.unutilizedAssetsBalance()));
+    }
+
+    /// @dev Fuzz over post-settle branch 2 (yield deficit): warp by a bounded duration to
+    ///      drain the buffer below required, vary unutilized, and assert the closed-form result.
+    function test_evaluateFunding_fuzz_branch2_postSettle(uint256 timeWarp, uint256 extraUnutilized) public {
+        timeWarp = bound(timeWarp, 1 days, 6 days);
+        extraUnutilized = bound(extraUnutilized, 0, ONE_BILLION * 1e6);
+
+        _requestDeposit(ALICE, DEFAULT_DEPOSIT);
+        vm.startPrank(FUND_OPERATOR);
+        _fundManager.closeEpoch(0);
+        _fundManager.settleEpoch();
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + timeWarp);
+        _dealUSDC(address(_fundManager), extraUnutilized);
+
+        int256 yieldDeficit = _fundManager.evaluateYieldAssetsDeficit();
+        vm.assertGt(yieldDeficit, 0);
+
+        int256 unutilized = int256(_fundManager.unutilizedAssetsBalance());
+        int256 expected = -unutilized + yieldDeficit / int256(_fundManager.SCALING_FACTOR()) + 1;
+
+        vm.assertEq(_fundManager.evaluateFunding(), expected);
     }
 
     //      ___                               ______            __             __   ______          __
@@ -718,6 +888,20 @@ contract FundManagerTest is StableYieldVaultTestBase {
         );
 
         expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
+    }
+
+    /// @dev Mirrors the deficit calculation embedded inside `evaluateFunding`: required balance is sized
+    ///      for `currentUnits + snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED`, not just current units.
+    function _expectedYieldDeficitWithSnapshotUnits(IStableYieldAsyncVault.Snapshot memory snap)
+        internal
+        view
+        returns (int256 deficit)
+    {
+        uint128 newTotalUnits = _fundManager.POOL().getTotalUnits()
+            + uint128(snap.depositingAssets * _fundManager.UNIT_PER_ASSET_DEPOSITED());
+        int96 expectedNewFlowRate = _calculateExpectedFlowRate(newTotalUnits);
+        uint256 requiredBalance = uint256(uint96(expectedNewFlowRate)) * _fundManager.guaranteedFlowDuration();
+        deficit = int256(requiredBalance) - int256(_fundManager.yieldAssetsBalance());
     }
 
 }
