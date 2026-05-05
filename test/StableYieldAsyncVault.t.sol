@@ -509,6 +509,87 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         _vault.mint(0, ALICE);
     }
 
+    function test_deposit_revertsOnZeroAssets() public {
+        vm.prank(ALICE);
+        vm.expectRevert(IStableYieldAsyncVault.INVALID_PARAMETERS.selector);
+        _vault.deposit(0, ALICE);
+    }
+
+    function test_deposit_operatorClaimsOnBehalf(uint256 depositAmount) public {
+        depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
+
+        _prepareForDeposit(ALICE, depositAmount);
+        _requestDeposit(ALICE, depositAmount);
+        _vaultCloseEpoch(0);
+        _vaultSettleAndGrantUnits();
+
+        vm.prank(ALICE);
+        _vault.setOperator(BOB, true);
+
+        vm.prank(BOB);
+        uint256 shares = _vault.deposit(depositAmount, ALICE, ALICE);
+
+        vm.assertEq(shares, depositAmount); // rate=1e18
+        vm.assertEq(_vault.balanceOf(ALICE), depositAmount);
+        vm.assertEq(_vault.claimableDepositRequest(0, ALICE), 0);
+    }
+
+    function test_mint_operatorMintsOnBehalf(uint256 depositAmount) public {
+        depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
+
+        _prepareForDeposit(ALICE, depositAmount);
+        _requestDeposit(ALICE, depositAmount);
+        _vaultCloseEpoch(0);
+        _vaultSettleAndGrantUnits();
+
+        vm.prank(ALICE);
+        _vault.setOperator(BOB, true);
+
+        vm.prank(BOB);
+        uint256 assets = _vault.mint(depositAmount, ALICE, ALICE);
+
+        vm.assertEq(assets, depositAmount); // rate=1e18
+        vm.assertEq(_vault.balanceOf(ALICE), depositAmount);
+    }
+
+    function test_mint_revertsOnInvalidController(uint256 depositAmount, address invalidController) public {
+        depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
+        vm.assume(invalidController != ALICE);
+
+        _prepareForDeposit(ALICE, depositAmount);
+        _requestDeposit(ALICE, depositAmount);
+        _vaultCloseEpoch(0);
+        _vaultSettleAndGrantUnits();
+
+        vm.prank(invalidController);
+        vm.expectRevert(IStableYieldAsyncVault.INVALID_CALLER.selector);
+        _vault.mint(depositAmount, invalidController, ALICE);
+    }
+
+    /// @dev Inflated NAV in cycle 2 → settled `claimableShares` round to 0; any deposit claim
+    ///      for the dust pending balance must revert at the `shares == 0` guard in `_deposit`.
+    function test_deposit_revertsOnDustShares_afterRateInflation(uint256 partialAssets) public {
+        // Cycle 1: Alice claims at the bootstrap rate (1e18) so totalSupply > 0 going into cycle 2
+        _completeDepositFlow(ALICE, DEFAULT_DEPOSIT);
+
+        // Bob requests a tiny pending deposit
+        uint256 bobDeposit = 100;
+        _prepareForDeposit(BOB, bobDeposit);
+        _requestDeposit(BOB, bobDeposit);
+
+        // Inflate NAV so that the cycle-2 rate makes Bob's pending atoms round to 0 shares.
+        // effectiveSupply == totalSupply (DEFAULT_DEPOSIT). Reporting 1000× supply makes rate = 1e21,
+        // which is large enough that bobDeposit * 1e18 / rate floors to 0.
+        _vaultCloseEpoch(1000 * DEFAULT_DEPOSIT);
+        _vaultSettleAndGrantUnits();
+
+        // Any non-zero claim against Bob's dust pending balance reverts
+        partialAssets = bound(partialAssets, 1, bobDeposit);
+        vm.prank(BOB);
+        vm.expectRevert(IStableYieldAsyncVault.INVALID_PARAMETERS.selector);
+        _vault.deposit(partialAssets, BOB);
+    }
+
     //     ________      _              ____           __                       ______          __
     //    / ____/ /___ _(_)___ ___     / __ \___  ____/ /__  ___  ____ ___     /_  __/__  _____/ /______
     //   / /   / / __ `/ / __ `__ \   / /_/ / _ \/ __  / _ \/ _ \/ __ `__ \     / / / _ \/ ___/ __/ ___/
@@ -585,6 +666,52 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         vm.prank(ALICE);
         vm.expectRevert(IStableYieldAsyncVault.INVALID_PARAMETERS.selector);
         _vault.redeem(0, ALICE, ALICE);
+    }
+
+    function test_withdraw_revertsOnInvalidController(uint256 depositAmount, address invalidController) public {
+        depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
+        vm.assume(invalidController != ALICE);
+
+        _completeDepositFlow(ALICE, depositAmount);
+        uint256 aliceShares = _vault.balanceOf(ALICE);
+
+        vm.prank(ALICE);
+        _vault.requestRedeem(aliceShares, ALICE, ALICE);
+        _vaultCloseEpoch(_vault.totalSupply() == 0 ? depositAmount : _vault.totalSupply());
+        _vaultSettleAndGrantUnits();
+
+        vm.prank(invalidController);
+        vm.expectRevert(IStableYieldAsyncVault.INVALID_CALLER.selector);
+        _vault.withdraw(depositAmount, invalidController, ALICE);
+    }
+
+    function test_withdraw_revertsOnZeroAssets() public {
+        vm.prank(ALICE);
+        vm.expectRevert(IStableYieldAsyncVault.INVALID_PARAMETERS.selector);
+        _vault.withdraw(0, ALICE, ALICE);
+    }
+
+    /// @dev Deflated NAV in cycle 2 → claimableAssets is positive (=1) but tiny; partial redeems
+    ///      below the share-per-asset threshold round to 0 assets and must revert in `_redeem`.
+    function test_redeem_revertsOnDustAssets_afterRateDeflation(uint256 partialShares) public {
+        // Use a large deposit so a deflated rate yields exactly one redeemable atom.
+        uint256 depositAmount = ONE_BILLION * 1e6;
+        _completeDepositFlow(ALICE, depositAmount);
+        uint256 aliceShares = _vault.balanceOf(ALICE);
+
+        vm.prank(ALICE);
+        _vault.requestRedeem(aliceShares, ALICE, ALICE);
+
+        // Close at NAV=1: effectiveSupply == aliceShares so rate = 1e18 / aliceShares.
+        // redeemingAssets = aliceShares * rate / 1e18 == 1 → claimableAssets is non-zero
+        // but any partial claim with shares < aliceShares rounds assets to 0.
+        _vaultCloseEpoch(1);
+        _vaultSettleAndGrantUnits();
+
+        partialShares = bound(partialShares, 1, aliceShares - 1);
+        vm.prank(ALICE);
+        vm.expectRevert(IStableYieldAsyncVault.INVALID_PARAMETERS.selector);
+        _vault.redeem(partialShares, ALICE, ALICE);
     }
 
     function test_setOperator(address operator) public {
@@ -669,6 +796,35 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         _vaultSettleEpoch();
 
         vm.assertEq(_vault.convertToShares(1e6), 1e6);
+    }
+
+    /// @dev When `currentEpoch - 1` is closed but not yet settled, `_lastSettledRate` must fall
+    ///      back to `currentEpoch - 2`'s settled rate rather than to the bootstrap default.
+    function test_lastSettledRate_duringCloseWindow_fallsBackToTwoEpochsAgo(uint256 rateMultiplier) public {
+        rateMultiplier = bound(rateMultiplier, 2, 100);
+
+        // Cycle 1 (epoch 1): bootstrap deposit at rate=1e18
+        _completeDepositFlow(ALICE, DEFAULT_DEPOSIT);
+
+        // Cycle 2 (epoch 2): close+settle reporting rateMultiplier × outstanding shares so rate
+        // for epoch 2 settles to rateMultiplier * 1e18.
+        uint256 nav2 = rateMultiplier * _vault.totalSupply();
+        _vaultCloseEpoch(nav2);
+        _vaultSettleAndGrantUnits();
+
+        vm.assertTrue(_vault.isEpochSettled(2));
+        vm.assertEq(_vault.currentEpoch(), 3);
+
+        // Cycle 3 (epoch 3): close but DO NOT settle → currentEpoch=4, epoch 3 closed-not-settled.
+        _vaultCloseEpoch(_vault.totalSupply());
+        vm.assertEq(_vault.currentEpoch(), 4);
+        vm.assertFalse(_vault.isEpochSettled(3));
+        vm.assertTrue(_vault.isEpochSettled(2));
+
+        // Conversions must use epoch 2's rate (rateMultiplier * 1e18), not the bootstrap default.
+        uint256 sampleAssets = 1000e6;
+        vm.assertEq(_vault.convertToShares(sampleAssets * rateMultiplier), sampleAssets);
+        vm.assertEq(_vault.convertToAssets(sampleAssets), sampleAssets * rateMultiplier);
     }
 
     function test_endToEnd_twoUsers_depositAndRedeem() public {
