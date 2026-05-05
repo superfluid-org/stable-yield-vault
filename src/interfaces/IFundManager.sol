@@ -49,11 +49,6 @@ interface IFundManager {
     // /_____/_/  /_/   \____/_/  /____/
 
     /**
-     * @notice Thrown when an operation would leave the stream-solvency invariant violated.
-     */
-    error INVARIANT_VIOLATED();
-
-    /**
      * @notice Thrown when the vault's redeem hook is called with incoherent share arguments.
      */
     error BAD_REDEEM_ARGS();
@@ -68,8 +63,15 @@ interface IFundManager {
      */
     error SETTLEMENT_PRECONDITIONS_NOT_MET(string reason);
 
+    /**
+     * @notice Thrown when constructing the FundManager with a SuperToken contract not wrapping the vault underlying
+     * asset
+     */
     error ASSET_MISMATCH();
 
+    /**
+     * @notice Thrown when there aren't enough unutilized assets to rebalance into yield assets
+     */
     error INSUFFICIENT_UNUTILIZED_ASSETS();
 
     //      ______     __                        __   ______                 __  _
