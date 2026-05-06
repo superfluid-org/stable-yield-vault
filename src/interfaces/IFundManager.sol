@@ -74,6 +74,11 @@ interface IFundManager {
      */
     error INSUFFICIENT_UNUTILIZED_ASSETS();
 
+    /**
+     * @notice Thrown at construction when the underlying asset's decimals are outside the supported range [6, 18].
+     */
+    error UNSUPPORTED_DECIMALS();
+
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //    / __/ | |/_/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/

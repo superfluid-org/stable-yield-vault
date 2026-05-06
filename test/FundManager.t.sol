@@ -134,7 +134,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         _fundManager.settleEpoch();
 
         uint128 totalUnits = pool.getTotalUnits();
-        uint128 expectedUnits = uint128(DEFAULT_DEPOSIT * _fundManager.UNIT_PER_ASSET_DEPOSITED());
+        uint128 expectedUnits = uint128(DEFAULT_DEPOSIT / _fundManager.RAW_PER_UNIT());
         vm.assertEq(totalUnits, expectedUnits);
         vm.assertEq(pool.getUnits(address(_fundManager)), expectedUnits);
         vm.assertEq(pool.getTotalFlowRate(), _calculateExpectedFlowRate(totalUnits));
@@ -883,22 +883,21 @@ contract FundManagerTest is StableYieldVaultTestBase {
     }
 
     function _calculateExpectedFlowRate(uint128 poolUnits) internal view returns (int96 expectedFlowRate) {
-        int96 flowRatePerUnit = int96(
-            int256(_fundManager.SCALING_FACTOR() * _fundManager.stableYieldRate() / (_fundManager.YEAR() * 10_000))
-        );
+        // Mirrors FundManager: SCALING_FACTOR · RAW_PER_UNIT = 10^12 for any supported decimals.
+        int96 flowRatePerUnit = int96(int256(1e12 * _fundManager.stableYieldRate() / (_fundManager.YEAR() * 10_000)));
 
         expectedFlowRate = flowRatePerUnit * int96(int128(poolUnits));
     }
 
     /// @dev Mirrors the deficit calculation embedded inside `evaluateFunding`: required balance is sized
-    ///      for `currentUnits + snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED`, not just current units.
+    ///      for `currentUnits + snap.depositingAssets / RAW_PER_UNIT`, not just current units.
     function _expectedYieldDeficitWithSnapshotUnits(IStableYieldAsyncVault.Snapshot memory snap)
         internal
         view
         returns (int256 deficit)
     {
-        uint128 newTotalUnits = _fundManager.POOL().getTotalUnits()
-            + uint128(snap.depositingAssets * _fundManager.UNIT_PER_ASSET_DEPOSITED());
+        uint128 newTotalUnits =
+            _fundManager.POOL().getTotalUnits() + uint128(snap.depositingAssets / _fundManager.RAW_PER_UNIT());
         int96 expectedNewFlowRate = _calculateExpectedFlowRate(newTotalUnits);
         uint256 requiredBalance = uint256(uint96(expectedNewFlowRate)) * _fundManager.guaranteedFlowDuration();
         deficit = int256(requiredBalance) - int256(_fundManager.yieldAssetsBalance());
