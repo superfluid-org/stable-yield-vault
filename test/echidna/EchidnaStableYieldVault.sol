@@ -182,8 +182,17 @@ contract EchidnaStableYieldVault {
         uint256 amt = _clamp(amount, bal);
         if (amt == 0) return;
 
+        ISuperfluidPool pool = _fundManager.POOL();
+        uint128 actorUnitsBefore = pool.getUnits(actor);
+
         HEVM.prank(actor);
-        try _vault.requestDeposit(amt, actor, actor) { } catch { }
+        try _vault.requestDeposit(amt, actor, actor) returns (uint256 reqId) {
+            // A.6 — request id is the constant REQUEST_ID == 0
+            assert(reqId == 0);
+            // D.1 (negative form) — yield stream commences at claim, NOT at request:
+            //                       requestDeposit must not change pool units.
+            assert(pool.getUnits(actor) == actorUnitsBefore);
+        } catch { }
 
         _check();
     }
@@ -194,9 +203,19 @@ contract EchidnaStableYieldVault {
         uint256 amt = _clamp(shares, bal);
         if (amt == 0) return;
 
+        ISuperfluidPool pool = _fundManager.POOL();
+        uint128 actorUnitsBefore = pool.getUnits(actor);
+
         HEVM.prank(actor);
-        try _vault.requestRedeem(amt, actor, actor) returns (uint256) {
+        try _vault.requestRedeem(amt, actor, actor) returns (uint256 reqId) {
             _ghostInflightRedeemShares += amt;
+            // A.6 — request id is the constant REQUEST_ID == 0
+            assert(reqId == 0);
+            // D.2 — yield stream stops at requestRedeem: redeemer's units must decrease.
+            //        (Skip if before == 0, which means the actor never claimed.)
+            if (actorUnitsBefore > 0) {
+                assert(pool.getUnits(actor) < actorUnitsBefore);
+            }
         } catch { }
 
         _check();
@@ -212,6 +231,7 @@ contract EchidnaStableYieldVault {
         ISuperfluidPool pool = _fundManager.POOL();
         uint128 unitsBefore = pool.getTotalUnits();
         int96 flowBefore = pool.getTotalFlowRate();
+        uint128 actorUnitsBefore = pool.getUnits(actor);
 
         HEVM.prank(actor);
         bool ok;
@@ -223,8 +243,13 @@ contract EchidnaStableYieldVault {
             // D.3a — totalUnits is conserved by FM.onClaimDeposit (decrement FM, increment
             //        receiver by the same amount). This holds.
             assert(pool.getTotalUnits() == unitsBefore);
-            // D.3b — totalFlowRate temporarily disabled; see finding F-2 below.
+            // D.3b — totalFlowRate temporarily disabled; see finding F-2.
             (flowBefore);
+            // D.1 — yield stream commences at claim: receiver gains units. Strict-only
+            //        when the deposited amount maps to ≥ 1 GDA unit.
+            if (amt >= _fundManager.RAW_PER_UNIT()) {
+                assert(pool.getUnits(actor) > actorUnitsBefore);
+            }
         }
 
         _check();
@@ -245,8 +270,42 @@ contract EchidnaStableYieldVault {
         _check();
     }
 
+    /// @dev Asset-denominated claim of a settled redeem. Counterpart to `claim_redeem`
+    ///      (which is share-denominated). Exercises the `withdraw` codepath and C.5.
+    function claim_withdraw(uint8 actorIdx, uint96 portion) external {
+        address actor = _actor(actorIdx);
+        uint256 maxA = _vault.maxWithdraw(actor);
+        if (maxA == 0) return;
+        uint256 amt = _clamp(portion, maxA);
+        if (amt == 0) return;
+
+        HEVM.prank(actor);
+        try _vault.withdraw(amt, actor, actor) returns (uint256 shares) {
+            _ghostInflightRedeemShares -= shares;
+            // C.5 — `withdraw` rounds shares up so any non-zero asset withdrawal
+            //       burns at least one share.
+            assert(shares >= 1);
+        } catch { }
+
+        _check();
+    }
+
     function close_epoch() external {
-        try _fundManager.closeEpoch(0) { } catch { }
+        // E.3 — vault.totalAssets() reported on close MUST equal
+        //        workingAssets + unutilizedAssetsBalance + scaledYieldAssetsBalance.
+        //        We pass workingAssets = 0; FM reads its own balances at the same block.
+        uint256 expectedTotal = _fundManager.unutilizedAssetsBalance() + _fundManager.scaledYieldAssetsBalance();
+        bool ok;
+        try _fundManager.closeEpoch(0) {
+            ok = true;
+        } catch { }
+        if (ok) {
+            // A.2 — pending counters are reset on close (moved into the snapshot).
+            assert(_vault.totalPendingDepositAssets() == 0);
+            assert(_vault.totalPendingRedeemShares() == 0);
+            // E.3
+            assert(_vault.totalAssets() == expectedTotal);
+        }
         _check();
     }
 
@@ -285,10 +344,8 @@ contract EchidnaStableYieldVault {
         assert(!ok);
     }
 
-    /// @dev B.1 — while a snapshot is open (between closeEpoch and settleEpoch), every
-    ///      `requestDeposit` MUST revert with EPOCH_SETTLEMENT_IN_PROGRESS. The fuzzer
-    ///      guarantees this state is reached often enough by the natural close→settle
-    ///      ordering of `close_epoch` and `settle_epoch` handlers.
+    /// @dev A.3 / B.1 — while a snapshot is open (between closeEpoch and settleEpoch),
+    ///      every `requestDeposit` MUST revert with EPOCH_SETTLEMENT_IN_PROGRESS.
     function probe_request_deposit_during_settlement(uint8 actorIdx, uint96 amount) external {
         if (_vault.getSnapshot().epoch == 0) return;
         address actor = _actor(actorIdx);
@@ -298,6 +355,30 @@ contract EchidnaStableYieldVault {
         HEVM.prank(actor);
         (bool ok,) = address(_vault).call(
             abi.encodeWithSelector(bytes4(keccak256("requestDeposit(uint256,address,address)")), amt, actor, actor)
+        );
+        assert(!ok);
+    }
+
+    /// @dev A.3 — same window: `requestRedeem` MUST revert with EPOCH_SETTLEMENT_IN_PROGRESS.
+    function probe_request_redeem_during_settlement(uint8 actorIdx, uint96 shares) external {
+        if (_vault.getSnapshot().epoch == 0) return;
+        address actor = _actor(actorIdx);
+        uint256 bal = _vault.balanceOf(actor);
+        uint256 amt = _clamp(shares, bal);
+        if (amt == 0) return;
+        HEVM.prank(actor);
+        (bool ok,) = address(_vault).call(
+            abi.encodeWithSelector(bytes4(keccak256("requestRedeem(uint256,address,address)")), amt, actor, actor)
+        );
+        assert(!ok);
+    }
+
+    /// @dev A.3 / B.1 — same window: a second `closeEpoch` MUST revert with
+    ///      PREVIOUS_EPOCH_NOT_SETTLED.
+    function probe_close_epoch_during_snapshot() external {
+        if (_vault.getSnapshot().epoch == 0) return;
+        (bool ok,) = address(_fundManager).call(
+            abi.encodeWithSelector(bytes4(keccak256("closeEpoch(uint256)")), uint256(0))
         );
         assert(!ok);
     }
