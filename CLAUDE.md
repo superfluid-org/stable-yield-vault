@@ -13,6 +13,7 @@ Foundry project; `solc 0.8.34`, optimizer on (200 runs).
 - `forge fmt` (CI runs `forge fmt --check`) — formatter is enforced; uses 120-col, bracket spacing, sorted imports, blank-line between contracts
 - `forge coverage --report lcov` — produces `lcov.info` (already tracked at repo root)
 - CI uses `FOUNDRY_PROFILE=ci` (identical settings to default; the variable just selects the profile).
+- `make echidna-smoke` — 50k-tx Echidna campaign against `test/echidna/EchidnaStableYieldVault.sol` (full Superfluid deploy in harness constructor). `make echidna-long` for 1M-tx; `make echidna-clean` to wipe corpus. Targets export `FOUNDRY_PROFILE=echidna`, which pins all 16 Superfluid external libraries to fixed addresses (`foundry.toml`); the harness `_plantSuperfluidLibraries()` then etches each library's runtime bytecode at its pinned address before deploying the framework. Requires `echidna`, `slither`, `crytic-compile`, and `solc 0.8.34` on `PATH`.
 
 Tests deploy a full Superfluid framework in `setUp` via `SuperfluidFrameworkDeployer`, which is slow — prefer running a focused subset while iterating.
 
