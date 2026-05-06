@@ -57,7 +57,7 @@ sequenceDiagram
     else depositing < redeeming
         AV->>FM: ERC-20 transferFrom for deficit (FM granted allowance at deploy)
     end
-    Note right of FM: If snap.depositingAssets > 0:<br/>POOL.increaseMemberUnits(FM, depositingAssets * UNIT_PER_ASSET_DEPOSITED)<br/>_rebalanceYieldAssets() (upgrade if needed)<br/>_recalibrateFlow()
+    Note right of FM: If snap.depositingAssets > 0:<br/>POOL.increaseMemberUnits(FM, _toUnit(depositingAssets))<br/>_rebalanceYieldAssets() (upgrade if needed)<br/>_recalibrateFlow()
     end
 
     rect rgb(230, 255, 230)
@@ -173,9 +173,10 @@ commences at claim time, not at request time.
       Back in FM.settleEpoch():
         - If snap.depositingAssets > 0:                     (3.3)
             POOL.increaseMemberUnits(
-                FM, snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED)
-              (UNIT_PER_ASSET_DEPOSITED = 1; units track depositingAssets 1:1
-               in underlying decimals)
+                FM, _toUnit(snap.depositingAssets))
+              where _toUnit(amount) = amount / RAW_PER_UNIT.
+              RAW_PER_UNIT = 10 ** (underlyingDecimals - 6), so one whole
+              underlying token maps to 1e6 pool units.
             _rebalanceYieldAssets():
               if yield-asset reserve falls short of
                 _flowRatePerUnit * totalUnits * guaranteedFlowDuration,
@@ -183,7 +184,7 @@ commences at claim time, not at request time.
                 if it has excess, FM downgrades back into underlying.
             _recalibrateFlow():
               flowRate = _flowRatePerUnit * POOL.totalUnits
-              with _flowRatePerUnit = SCALING_FACTOR * stableYieldRate
+              with _flowRatePerUnit = 1e12 * stableYieldRate
                                       / (YEAR * BP_DENOMINATOR)
         - If snap.depositingAssets == 0, none of the unit / flow / rebalance
           steps run; the FM emerges unchanged on the streaming side.
@@ -206,8 +207,8 @@ The freshly-minted units belong to FM until individual depositors claim. FM
         pushed to FM during settlement, or kept to cover redeems)
 
 (4.2) Vault → FundManager: onClaimDeposit(receiver, assets)
-      - FM transfers `assets * UNIT_PER_ASSET_DEPOSITED` units from its own
-        pool slot to `receiver` via decreaseMemberUnits + increaseMemberUnits
+      - FM transfers `_toUnit(assets)` units from its own pool slot to
+        `receiver` via decreaseMemberUnits + increaseMemberUnits
         (no flow-rate change, no totalUnits change)
       - Investor now receives the yield stream in the underlying's super-token
 ```
@@ -283,5 +284,7 @@ view calls before each settlement.
 8. **Settlement preconditions.** `settleEpoch` reverts up-front via
    `canSettleEpoch` if the FM cannot cover both the net redeem deficit and
    the post-settlement yield-asset reserve (`requiredScaledYieldAssetsBalance =
-   _flowRatePerUnit * newTotalUnits * guaranteedFlowDuration / SCALING_FACTOR`).
+   expectedNewFlowRate * guaranteedFlowDuration / SCALING_FACTOR`, where
+   `expectedNewFlowRate = _flowRatePerUnit * newTotalUnits` and
+   `newTotalUnits = POOL.totalUnits + _toUnit(snap.depositingAssets)`).
    No partial settlement is possible.

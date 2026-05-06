@@ -42,9 +42,9 @@
 
 **GDA Pool** : the Superfluid General Distribution Agreement pool created and owned by the FundManager. Streams the yield super-token to unit holders; not transferable, single-distributor (FM only).
 
-**unit** : a member's share of the pool's total flow. The vault grants units 1:1 with deposited underlying (`UNIT_PER_ASSET_DEPOSITED = 1`): a deposit of N underlying yields N units. Units belong to the FM until claimed at `deposit` / `mint`.
+**unit** : a member's share of the pool's total flow. Pool units are denominated in micro-tokens: one whole underlying token maps to `1e6` units. The FM computes units with `_toUnit(amount) = amount / RAW_PER_UNIT`, where `RAW_PER_UNIT = 10 ** (underlyingDecimals - 6)`. Units belong to the FM until claimed at `deposit` / `mint`.
 
-**flow rate per unit** : `_flowRatePerUnit = SCALING_FACTOR * stableYieldRate / (YEAR * BP_DENOMINATOR)`, recomputed when `stableYieldRate` changes.
+**flow rate per unit** : `_flowRatePerUnit = 1e12 * stableYieldRate / (YEAR * BP_DENOMINATOR)`, recomputed when `stableYieldRate` changes. The `1e12` factor is decimals-independent for supported underlyings because `SCALING_FACTOR * RAW_PER_UNIT == 1e12`.
 
 **total flow rate** : `_flowRatePerUnit * POOL.getTotalUnits()`, set on the pool by `_recalibrateFlow()`.
 
@@ -53,6 +53,8 @@
 **stable yield rate** : the annualised rate committed to per-unit streaming, expressed in basis points (e.g. `100` ↔ 1%). Stored as `stableYieldRate`; updated via `setStableYieldRate`.
 
 **scaling factor** : `SCALING_FACTOR = 10 ** (18 - underlyingDecimals)` — the factor that lifts underlying amounts into the super-token's 18-decimal space. For 6-dec USDC, `SCALING_FACTOR = 10**12`.
+
+**raw per unit** : `RAW_PER_UNIT = 10 ** (underlyingDecimals - 6)` — the number of raw underlying atoms represented by one pool unit. For 6-dec USDC, `RAW_PER_UNIT = 1`; for an 18-dec underlying, `RAW_PER_UNIT = 10**12`.
 
 **rebalance** : `_rebalanceYieldAssets()` — the FM upgrades unutilized underlying into the yield-asset reserve when it is short of `_targetFlowRate * guaranteedFlowDuration`, and downgrades back into underlying when in excess. Called at `settleEpoch` (when there are new deposits), `setStableYieldRate`, `setGuaranteedFlowDuration`, and `ensureYieldFlowDuration`.
 

@@ -6,7 +6,7 @@
 |---|---|
 | **StableYieldAsyncVault** | Redeeming shares (locked), pending deposit assets, claimable redeem assets, share accounting |
 | **FundManager** | Unutilized underlying (`unutilizedAssetsBalance()`) and a separate yield-asset super-token reserve (`yieldAssetsBalance()`); owner of the GDA pool |
-| **GDA Pool** | Units representing yield claims; distributes a flow at `_flowRatePerUnit * totalUnits`, where `_flowRatePerUnit = SCALING_FACTOR * stableYieldRate / (YEAR * BP_DENOMINATOR)` |
+| **GDA Pool** | Units representing yield claims; distributes a flow at `_flowRatePerUnit * totalUnits`, where `_flowRatePerUnit = 1e12 * stableYieldRate / (YEAR * BP_DENOMINATOR)` |
 
 Settlement is **driven by the FundManager**. The operator calls
 `FundManager.closeEpoch(workingAssets)` and `FundManager.settleEpoch()`, which
@@ -77,7 +77,7 @@ sequenceDiagram
     deactivate AV
 
     opt snap.depositingAssets greater than 0
-        FM->>POOL: (2.5) FM.units += snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED
+        FM->>POOL: (2.5) FM.units += _toUnit(snap.depositingAssets)
         Note right of FM: _rebalanceYieldAssets — upgrade unutilized into super-token if reserve is short, downgrade if it is in excess. _recalibrateFlow — flowRate = _flowRatePerUnit * totalUnits
     end
     FM-->>FO: ok
@@ -174,12 +174,15 @@ Entry point on the **FundManager**; callable only by `FUND_OPERATOR_ROLE`;
              + snap.depositingAssets
               >= redeemingAssets + requiredScaledYieldAssetsBalance
              where requiredScaledYieldAssetsBalance =
-                 _flowRatePerUnit * newTotalUnits * guaranteedFlowDuration
-                 / SCALING_FACTOR
+                 expectedNewFlowRate * guaranteedFlowDuration / SCALING_FACTOR
+             expectedNewFlowRate = _flowRatePerUnit * newTotalUnits
+             newTotalUnits = POOL.totalUnits + _toUnit(snap.depositingAssets)
       - Vault.onSettleEpoch()              (onlyFundManager)
       - If snap.depositingAssets > 0:
-          POOL.increaseMemberUnits(FM, snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED)
-            (UNIT_PER_ASSET_DEPOSITED = 1; units track depositingAssets 1:1)
+          POOL.increaseMemberUnits(FM, _toUnit(snap.depositingAssets))
+            where _toUnit(amount) = amount / RAW_PER_UNIT.
+            RAW_PER_UNIT = 10 ** (underlyingDecimals - 6), so one whole
+            underlying token maps to 1e6 pool units.
           _rebalanceYieldAssets():
             if yield-asset reserve is short, upgrade unutilized underlying into
             super-token; if it is in excess, downgrade super-token back
@@ -240,7 +243,7 @@ Depositors:
   - Lazy settlement converts pending → claimable at epoch rate
   - Vault mints shares to receiver (no asset movement)
   - FM.onClaimDeposit(receiver, assets) transfers
-        `assets * UNIT_PER_ASSET_DEPOSITED` units FM → receiver
+        `_toUnit(assets)` units FM → receiver
       (totalUnits unchanged; flowRate unchanged; yield now streams to receiver)
 
 Redeemers:
@@ -319,7 +322,7 @@ Assume rate at close is 1 share = 1 USDC (1e18).
    - Redeem: units decrement at `requestRedeem` (from owner) via
      `onRequestRedeem`; flow recalibrates down.
    - Deposit: units increment at `settleEpoch` (self-granted to FM, scaled
-     by `UNIT_PER_ASSET_DEPOSITED = 1`); flow recalibrates up.
+     by `_toUnit(depositingAssets)`); flow recalibrates up.
    - Claim-deposit: units transfer FM → controller at `deposit` / `mint`
      via `onClaimDeposit`; total units and flow rate unchanged.
 
