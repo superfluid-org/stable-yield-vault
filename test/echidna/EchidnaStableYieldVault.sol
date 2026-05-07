@@ -640,17 +640,18 @@ contract EchidnaStableYieldVault {
             // G.4 — settle is the only event that legitimately changes convertTo* output.
             //        Rebase the stable-convert ghost.
             _ghostStableConvert = _vault.convertToAssets(1e18);
+            // D.5 — post-maintenance forward-solvency. Only asserted when the settle
+            //        actually triggered rebalance + recalibrate (the `depositingAssets > 0`
+            //        branch in FundManager.settleEpoch). Empty or redeem-only epochs skip
+            //        that branch, so the stream-out accrual since the last maintenance op
+            //        can leave a transient deficit — that's not a contract violation, just
+            //        a property of when the invariant holds.
+            if (snap.depositingAssets > 0) {
+                _assertForwardSolvency();
+            }
         }
 
         _check();
-        // NOTE on D.5 (forward-solvency, post-settle):
-        // A naive `evaluateYieldAssetsDeficit() <= 0` check fails immediately after
-        // settle_epoch because Superfluid's GDA reserves a buffer at distributeFlow,
-        // and `yieldAssetsBalance()` (= balanceOf, the real-time available balance)
-        // already excludes that buffer. The spec wording in docs/invariants.md D.5
-        // doesn't account for this gap. Tracking as a finding rather than asserting
-        // here; a stricter check would have to add the GDA buffer back into actual
-        // balance. See docs/audit/echidna-findings.md.
     }
 
     /// @dev A.3 (negative form) — when no snapshot is open, `settleEpoch` MUST revert
@@ -843,7 +844,11 @@ contract EchidnaStableYieldVault {
     //                                                   /____/
 
     function set_stable_yield_rate(uint16 rate) external {
-        try _fundManager.setStableYieldRate(uint256(rate) % (MAX_RATE + 1)) { } catch { }
+        bool ok;
+        try _fundManager.setStableYieldRate(uint256(rate) % (MAX_RATE + 1)) {
+            ok = true;
+        } catch { }
+        if (ok) _assertForwardSolvency(); // D.5 — post-recalibrate
         _check();
     }
 
@@ -852,14 +857,22 @@ contract EchidnaStableYieldVault {
     ///      capital. Triggers `_rebalanceYieldAssets` internally — exercises D.5/D.6
     function set_guaranteed_flow_duration(uint32 duration) external {
         uint256 d = (uint256(duration) % 90 days) + 1 days;
-        try _fundManager.setGuaranteedFlowDuration(d) { } catch { }
+        bool ok;
+        try _fundManager.setGuaranteedFlowDuration(d) {
+            ok = true;
+        } catch { }
+        if (ok) _assertForwardSolvency(); // D.5 — post-rebalance
         _check();
     }
 
     /// @dev Operator-triggered top-up. Idempotent in the no-deficit case; restarts the
     ///      stream if `totalUnits > 0` but `totalFlowRate == 0`.
     function ensure_yield_flow_duration() external {
-        try _fundManager.ensureYieldFlowDuration() { } catch { }
+        bool ok;
+        try _fundManager.ensureYieldFlowDuration() {
+            ok = true;
+        } catch { }
+        if (ok) _assertForwardSolvency(); // D.5 — explicit top-up
         _check();
     }
 
@@ -999,6 +1012,45 @@ contract EchidnaStableYieldVault {
     //   / /| /  __/ /_/ /  / ___ |(__  |__  )  __/ /  / /_/ / /_/ / / / (__  )
     //  /_/ |_\___/\__, /  /_/  |_/____/____/\___/_/   \__/_/\____/_/ /_/____/
     //            /____/
+
+    /// @dev D.5 — forward-solvency post-condition. After any maintenance op (settle,
+    ///      setStableYieldRate, setGuaranteedFlowDuration, ensureYieldFlowDuration),
+    ///      FM must hold enough yield-asset reserve to fund the target stream for at
+    ///      least `guaranteedFlowDuration`. Including the GDA-locked buffer is required
+    ///      because Superfluid reserves it from FM's super-token at `distributeFlow`
+    ///      and refunds it when the stream is reduced or stopped — it's still FM's
+    ///      collateral, just temporarily inaccessible via `balanceOf`.
+    ///
+    ///      Equivalent: `evaluateYieldAssetsDeficit() ≤ buffer`. Surplus is trivially fine.
+    ///      See `docs/audit/echidna-findings.md` F-1 for the original removal rationale
+    ///      and the reasoning for this stronger form.
+    /// @dev D.5 forward-solvency post-condition. Asserts the literal invariant from
+    ///      `docs/invariants.md` D.5, with the GDA-locked buffer added back into the
+    ///      available balance:
+    ///
+    ///        `evaluateYieldAssetsDeficit() ≤ GDA_buffer`
+    ///        ⟺ `yieldAssetsBalance() + GDA_buffer ≥ targetFlowRate · guaranteedFlowDuration`
+    ///
+    ///      The buffer comes from `realtimeBalanceOf(FM)` — the SuperToken aggregates
+    ///      deposit fields across all agreements; for FM (only GDA active, only
+    ///      outgoing flow), this equals the GDA's locked liquidation buffer.
+    ///
+    ///      ⚠ THIS ASSERTION IS EXPECTED TO FIRE on Finding F-3 reproducers (see
+    ///      `docs/audit/echidna-findings.md`). The reproducer IS the value:
+    ///       1. `_rebalanceYieldAssets` reads `balanceOf` (clamped at 0 for critical FM)
+    ///          and under-upgrades when `availableBalance < 0`.
+    ///       2. `setStableYieldRate` rate-raises lock a larger buffer in `_recalibrateFlow`
+    ///          than the rebalance accounted for.
+    ///      Until the contract is fixed (rebalance against unclamped balance + preflight
+    ///      check on rate/duration setters), this assertion will produce reproducers
+    ///      that demonstrate the gap. Once F-3 is addressed, it serves as a regression
+    ///      sentinel that the fix actually maintains the invariant.
+    function _assertForwardSolvency() internal view {
+        int256 deficit = _fundManager.evaluateYieldAssetsDeficit();
+        if (deficit <= 0) return;
+        (, uint256 buffer,) = _usdcx.realtimeBalanceOf(address(_fundManager), block.timestamp);
+        assert(uint256(deficit) <= buffer);
+    }
 
     /// @dev Rate-direction invariant — fired opportunistically. When the only state
     ///      change since the last settle was operator-driven NAV movement (no investor
