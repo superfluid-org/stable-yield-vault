@@ -241,13 +241,11 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function onClaimDeposit(address shareholder, uint256 depositAssets) external onlyRole(VAULT_ROLE) {
-        // Transfer the units associated to the claimed deposit from FM to the shareholder
         uint128 units = _toUnit(depositAssets);
-        _toUnit(depositAssets);
-        POOL.decreaseMemberUnits(address(this), units);
-        POOL.increaseMemberUnits(shareholder, units);
 
-        // pool.totalUnits unchanged -> flowRate unchanged -> invariant unchanged
+        // Transfer the units associated to the claimed deposit from FM to the shareholder
+        POOL.increaseMemberUnits(shareholder, units);
+        POOL.decreaseMemberUnits(address(this), units);
     }
 
     /// @inheritdoc IFundManager
