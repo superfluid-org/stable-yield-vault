@@ -850,7 +850,6 @@ contract EchidnaStableYieldVault {
     /// @dev Admin-set forward-solvency horizon. Clamped to [1 day, 90 days + 1 day]
     ///      so the rebalance step has a chance to succeed against available unutilized
     ///      capital. Triggers `_rebalanceYieldAssets` internally — exercises D.5/D.6
-    ///      and may surface gap I.1 (`INVARIANT_VIOLATED` is declared but never raised).
     function set_guaranteed_flow_duration(uint32 duration) external {
         uint256 d = (uint256(duration) % 90 days) + 1 days;
         try _fundManager.setGuaranteedFlowDuration(d) { } catch { }
