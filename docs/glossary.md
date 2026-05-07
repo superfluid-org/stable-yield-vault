@@ -32,7 +32,7 @@
 
 **effective supply** : `totalSupply() + unclaimedDepositShares − unclaimedRedeemShares`. The denominator used to compute the epoch rate at `closeEpoch`.
 
-**epoch rate / assets-per-share** : the rate locked at `closeEpoch` for the closing epoch, equal to `totalAssets * 1e18 / effectiveSupply` (or `1e18` if `effectiveSupply == 0`). Stored in `_epochRate[epoch]` once settled. Forward pricing — every request in an epoch settles at the same rate.
+**epoch rate / assets-per-share** : the rate locked at `closeEpoch` for the closing epoch, equal to `totalAssets * ASSETS_PER_SHARE_SCALE / effectiveSupply` (or `ASSETS_PER_SHARE_SCALE` if `effectiveSupply == 0`; currently `1e18`). Stored in `_epochRate[epoch]` once settled. Forward pricing — every request in an epoch settles at the same rate.
 
 ## Snapshot
 

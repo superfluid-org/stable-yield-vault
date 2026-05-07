@@ -75,7 +75,7 @@
 | Visibility | external |
 | Caller | Anyone (`controller == msg.sender` or operator-approved) |
 | Parameters | `assets` (user-controlled), `receiver` (user-controlled), `controller` (user-controlled) |
-| Call chain | `→ _deposit → _resolveClaimableDeposit (lazy-settle) → _claimDeposit → _mint(receiver) → FundManager.onClaimDeposit → POOL.{decreaseMemberUnits, increaseMemberUnits}` |
+| Call chain | `→ _deposit → _resolveClaimableDeposit (lazy-settle) → _claimDeposit → _mint(receiver) → FundManager.onClaimDeposit → POOL.{increaseMemberUnits, decreaseMemberUnits}` |
 | State modified | `_controllerStates[controller].claimable*`, `_unclaimedDepositShares`, ERC20 balances; FM POOL units (admin write via Superfluid) |
 | Value flow | shares: `vault → receiver` (mint); pool units: `FM → receiver` |
 | Reentrancy guard | no |
@@ -277,7 +277,7 @@
 | Visibility | external, `onlyRole(VAULT_ROLE)` |
 | Caller | Pinned vault contract |
 | Parameters | `shareholder` (protocol-derived from claim path), `depositAssets` (protocol-derived) |
-| Call chain | `→ POOL.decreaseMemberUnits(FM, units) → POOL.increaseMemberUnits(shareholder, units)` |
+| Call chain | `→ POOL.increaseMemberUnits(shareholder, units) → POOL.decreaseMemberUnits(FM, units)` |
 | State modified | POOL member units (FM ↓, shareholder ↑); `totalUnits` and flow rate unchanged (D.3) |
 | Value flow | pool units: `FM → shareholder`; underlying yield stream begins for shareholder |
 | Reentrancy guard | no |

@@ -48,7 +48,7 @@ The epoch rate uses an *effective supply* that adds phantom shares for settled-b
 
 ```
 effectiveSupply = totalSupply() + _unclaimedDepositShares − _unclaimedRedeemShares
-rate = effectiveSupply == 0 ? 1e18 : totalFundAssets · 1e18 / effectiveSupply
+rate = effectiveSupply == 0 ? ASSETS_PER_SHARE_SCALE : totalFundAssets · ASSETS_PER_SHARE_SCALE / effectiveSupply
 ```
 
 This corrects for the lag between settlement (assets move) and claim (shares mint/burn), so a controller who delays claiming neither dilutes nor concentrates the next epoch's pricing.
@@ -99,7 +99,9 @@ All requests in a closed epoch settle in one transaction. `FundManager.settleEpo
 `FundManager.settleEpoch` calls `canSettleEpoch()` first and reverts with `SETTLEMENT_PRECONDITIONS_NOT_MET(reason)` if either:
 
 1. `snap.epoch == 0` — no closed epoch (`reason = "CURRENT_EPOCH_NOT_CLOSED"`).
-2. `scaledYieldAssetsBalance() + unutilizedAssetsBalance() + depositingAssets < redeemingAssets + requiredScaledYieldAssetsBalance` — FM can't cover the redeem deficit *and* the post-settlement yield-asset reserve (`reason = "INSUFFICIENT_ASSETS_IN_FUND_MANAGER"`).
+2. `scaledYieldAssetsBalance() + unutilizedAssetsBalance() + depositingAssets < redeemingAssets + requiredScaledYieldAssetsBalance` — FM does not have enough total value, across yield assets, unutilized underlying, and settling deposits, to cover redeeming assets *and* the post-settlement yield-asset reserve (`reason = "INSUFFICIENT_ASSETS_IN_FUND_MANAGER"`).
+
+This is a solvency check, not a guarantee that all required liquidity is already in underlying form. If `redeemingAssets > depositingAssets` and the coverage exists as excess yield assets, the operator must rebalance/downgrade that excess before calling `settleEpoch`; otherwise the vault hook can still revert when it pulls the underlying deficit from the FM. In that case `ensureYieldFlowDuration()` is the intended pre-settlement rebalance path.
 
 **Where.** `FundManager.sol:157–158, 322–352`.
 
@@ -107,8 +109,8 @@ All requests in a closed epoch settle in one transaction. `FundManager.settleEpo
 
 `onCloseEpoch` does **not** explicitly reject `_totalAssets == 0`. Behavior splits on `effectiveSupply`:
 
-- If `effectiveSupply == 0` → `epochRate = 1e18` (the bootstrap branch).
-- If `effectiveSupply > 0` and `_totalAssets == 0` → `epochRate = 0`, which then makes `_settleDepositIfNeeded` revert via division-by-zero (`pendingAssets.mulDiv(1e18, 0)`), permanently freezing any controller's deposit pending in that epoch. Redeemers in the same epoch would resolve to 0 claimable assets.
+- If `effectiveSupply == 0` → `epochRate = ASSETS_PER_SHARE_SCALE` (`1e18`, the bootstrap branch).
+- If `effectiveSupply > 0` and `_totalAssets == 0` → `epochRate = 0`, which then makes `_settleDepositIfNeeded` revert via division-by-zero (`pendingAssets.mulDiv(ASSETS_PER_SHARE_SCALE, 0)`), permanently freezing any controller's deposit pending in that epoch. Redeemers in the same epoch would resolve to 0 claimable assets.
 
 This is not currently a documented invariant; flagged for audit attention as a soft denial-of-service path on a total-loss epoch.
 
@@ -172,7 +174,7 @@ Units are decremented from the redeemer at `onRequestRedeem`, immediately after 
 
 ### D.3 — totalUnits and flow rate are conserved on claim-deposit
 
-`onClaimDeposit` decreases the FM's units by `depositAssets · UNIT_PER_ASSET_DEPOSITED` and increases the receiver's units by the same amount. Total pool units and `_targetFlowRate()` are unchanged.
+`onClaimDeposit` increases the receiver's units by `_toUnit(depositAssets)` and then decreases the FM's units by the same amount, where `_toUnit(underlyingAmount) = underlyingAmount / RAW_PER_UNIT`. Pool units are denominated in micro-tokens (`1e6` units per whole underlying token), so `RAW_PER_UNIT = 10 ** (underlyingDecimals − 6)`. Total pool units and `_targetFlowRate()` are unchanged. The increase-before-decrease order avoids a transient zero-total-units state when the FM is the only member.
 
 **Where.** `FundManager.sol:236–242`.
 
@@ -180,12 +182,14 @@ Units are decremented from the redeemer at `onRequestRedeem`, immediately after 
 
 ```
 _targetFlowRate = _flowRatePerUnit · POOL.getTotalUnits()
-_flowRatePerUnit = SCALING_FACTOR · stableYieldRate / (YEAR · BP_DENOMINATOR)
+_flowRatePerUnit = 1e12 · stableYieldRate / (YEAR · BP_DENOMINATOR)
 ```
+
+The `1e12` factor is decimals-independent for supported underlyings because `SCALING_FACTOR · RAW_PER_UNIT = 10 ** (18 − d) · 10 ** (d − 6) = 1e12`.
 
 After every change to total units (`onSettleEpoch`, `onRequestRedeem`) or to the rate (`setStableYieldRate`), `_recalibrateFlow()` is called to bring the actual stream rate to target.
 
-**Where.** `FundManager.sol:136, 168, 205, 208, 262, 369–371, 392–394`.
+**Where.** `FundManager.sol:142–143, 171–175, 210–215, 270–271, 378–402`.
 
 ### D.5 — Forward-solvency horizon (yield-asset reserve)
 
@@ -200,8 +204,8 @@ yieldAssetsBalance() ≥ _targetFlowRate · guaranteedFlowDuration
 **Where.** `FundManager.sol:313–319, 322–352, 373–390`.
 
 **Caveats.**
-- The `INVARIANT_VIOLATED` error is declared (`IFundManager.sol:54`) and the interface notes claim it's enforced on `setStableYieldRate` and `setGuaranteedFlowDuration`, but **no code path actually reverts with it** — the only run-time enforcement of D.5 today is `canSettleEpoch` (pre-settle) and the `INSUFFICIENT_UNUTILIZED_ASSETS` revert in `_rebalanceYieldAssets` when an upgrade can't be funded. Setting `setStableYieldRate` to an unreachable rate, or `setGuaranteedFlowDuration` to an unreachable horizon, will revert at the upgrade step but only after attempting to rebalance — there is no preflight check.
-- `setStableYieldRate` and `setGuaranteedFlowDuration` admin paths therefore depend on the rebalance succeeding to maintain D.5.
+- `setStableYieldRate` and `setGuaranteedFlowDuration` do not perform a separate preflight forward-solvency check. They depend on `_rebalanceYieldAssets()` succeeding to maintain D.5; if the required upgrade cannot be funded, `_rebalanceYieldAssets()` reverts with `INSUFFICIENT_UNUTILIZED_ASSETS`.
+- The current reserve formula neglects Superfluid's GDA buffer/security deposit. After `_recalibrateFlow()` starts or updates the stream, part of the FM's super-token balance may be reserved by Superfluid and excluded from `yieldAssetsBalance()` / `balanceOf`. As a result, the literal `yieldAssetsBalance() ≥ _targetFlowRate · guaranteedFlowDuration` check can be false immediately after successful settlement even though the missing amount is locked as protocol buffer rather than lost. A stricter invariant would include the GDA buffer in the actual balance side or require an additional buffer above the bare duration target.
 
 ### D.6 — Stream-solvency floor on duration
 
@@ -233,11 +237,12 @@ Constructor reverts with `ASSET_MISMATCH` otherwise.
 
 ```
 SCALING_FACTOR = 10 ** (18 − underlyingDecimals)
+RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
 ```
 
-Underlying amounts are multiplied by `SCALING_FACTOR` to enter super-token space (18-dec), and divided to leave it. **Caveat:** the math currently assumes `underlyingDecimals ≤ 18` — there is no support for >18-dec underlyings, and the flow-rate formula in `setStableYieldRate` is flagged with a `FIXME` for 18-dec underlyings (would yield `SCALING_FACTOR == 1`, which is fine arithmetically but the `FIXME` notes generality concerns).
+Underlying amounts are multiplied by `SCALING_FACTOR` to enter super-token space (18-dec), and divided to leave it. Pool units use `RAW_PER_UNIT` so one whole underlying token maps to `1e6` pool units for every supported decimal count. The constructor supports `underlyingDecimals ∈ [6, 18]` and reverts with `UNSUPPORTED_DECIMALS` outside that range.
 
-**Where.** `FundManager.sol:115–116, 136, 205`.
+**Where.** `FundManager.sol:117–123, 142–143, 210–212, 405–406`.
 
 ### E.3 — Total NAV reported to the vault at close
 
@@ -335,7 +340,7 @@ When the underlying epoch settles, the balance migrates to `claimableX` semantic
 
 ### G.4 — `convertTo*` uses last-settled rate, never the in-flight snapshot
 
-`convertToShares` / `convertToAssets` use `_lastSettledRate()` (the rate of the most recently settled epoch, falling back further if the immediate previous epoch closed but is not settled, and to `1e18` before any settlement).
+`convertToShares` / `convertToAssets` use `_lastSettledRate()` (the rate of the most recently settled epoch, falling back further if the immediate previous epoch closed but is not settled, and to `ASSETS_PER_SHARE_SCALE` before any settlement).
 
 **Where.** `StableYieldAsyncVault.sol:335–347, 551–563`.
 
@@ -357,15 +362,15 @@ When the underlying epoch settles, the balance migrates to `claimableX` semantic
 
 ### H.1 — `int96` flow rate fits in Superfluid's range
 
-`_flowRatePerUnit · totalUnits` is cast to `int96` for `distributeFlow`. Reverts (truncated) silently if the product overflows int96. **No explicit check** — relies on operator-set `stableYieldRate` and pool size staying within range.
+`_flowRatePerUnit · totalUnits` is computed as `int96` for `distributeFlow`. **No explicit bounds check** — relies on operator-set `stableYieldRate` and pool size staying within Superfluid's accepted flow-rate range.
 
-**Where.** `FundManager.sol:136, 205, 393`.
+**Where.** `FundManager.sol:142–143, 210–212, 401–402`.
 
 ### H.2 — `uint128` unit math fits in Superfluid pool's range
 
-Pool unit deltas are cast to `uint128`. `depositingAssets * UNIT_PER_ASSET_DEPOSITED` (with `UNIT_PER_ASSET_DEPOSITED = 1`) and proportional redeem deltas are unchecked for u128 overflow.
+Pool unit deltas are cast to `uint128`. `_toUnit(depositingAssets) = depositingAssets / RAW_PER_UNIT` and proportional redeem deltas are unchecked for u128 overflow/truncation.
 
-**Where.** `FundManager.sol:165, 238–239, 258, 261, 291, 340`.
+**Where.** `FundManager.sol:171–172, 245–248, 260–270, 300, 349, 405–406`.
 
 ### H.3 — Rate rounding: shares-on-deposit favor vault, assets-on-withdraw favor vault
 
@@ -402,11 +407,6 @@ When converting a yield-asset deficit (super-token, 18-dec) into an underlying t
 
 These are not invariants; they are properties the code claims (or implicitly relies upon) but does not robustly enforce. Listed here so they're not lost.
 
-1. **`INVARIANT_VIOLATED` is dead.** Declared in `IFundManager.sol:54`, never `revert`-ed. The interface NatSpec at `IFundManager.sol:126, 136` still claims `setStableYieldRate` and `setGuaranteedFlowDuration` revert with this error if the post-operation state would break the forward-solvency invariant — but the implementation does no preflight check; it relies entirely on `_rebalanceYieldAssets` succeeding (or reverting with `INSUFFICIENT_UNUTILIZED_ASSETS`). The flow docs (`deposit-flow.md`, `settlement-flow.md`) have been updated to no longer claim `_assertInvariant` exists; the interface NatSpec has not been similarly updated.
-2. **Zero-NAV freezes deposits in the closing epoch.** See B.4. Code does not reject `_totalAssets == 0`; if `effectiveSupply > 0` the resulting `epochRate = 0` causes div-by-zero on every subsequent depositor claim. Not currently in any documented invariant — recommend either an explicit revert in `onCloseEpoch` or an operator-side guard.
-3. **No minimum era duration for yield-rate changes.** `setStableYieldRate` is flagged `FIXME: enforce minimum era duration` (`FundManager.sol:198`). An operator can flip the rate every block.
-4. **Flow-rate formula is not generalized for 18-dec underlyings.** Two `FIXME`s (`FundManager.sol:135, 204`) flag that `SCALING_FACTOR · rate / (YEAR · BP_DENOMINATOR)` round-tripping is decimals-sensitive.
-5. **`onSettleEpoch` total-asset emission formula.** `StableYieldAsyncVault.sol:282` carries `FIXME: verify below formula (should this account for unclaimed redeeming shares?)`. Affects the `EpochSettled` event payload, not on-chain accounting.
-6. **`canSettleEpoch` `1e18` footgun comment.** `FundManager.sol:338` flags a hard-coded scaling factor; would matter if rate semantics ever change.
-7. **`evaluateYieldAssetsDeficit` lacks a buffer.** `FundManager.sol:314` notes a `FIXME` — current calculation has no slack above the bare `_targetFlowRate · guaranteedFlowDuration`, which can leave the FM repeatedly tripping the duration floor if streams drift.
-8. **`take` has no solvency check (now an explicit operator-coordination requirement).** Promoted to invariant E.5 above. The FM does not stop the operator from draining underlying mid-epoch; settlement-time precondition checks are the only safety net. Recommend at least a comment-level acknowledgment on `take` in the source — currently, only the docs flag the responsibility.
+1. **Zero-NAV freezes deposits in the closing epoch.** See B.4. Code does not reject `_totalAssets == 0`; if `effectiveSupply > 0` the resulting `epochRate = 0` causes div-by-zero on every subsequent depositor claim. Not currently in any documented invariant — recommend either an explicit revert in `onCloseEpoch` or an operator-side guard.
+2. **No minimum era duration for yield-rate changes.** `setStableYieldRate` is flagged `FIXME: enforce minimum era duration` (`FundManager.sol:208`). An operator can flip the rate every block.
+3. **`evaluateYieldAssetsDeficit` lacks a buffer.** `FundManager.sol:324` notes a `FIXME` — current calculation has no slack above the bare `_targetFlowRate · guaranteedFlowDuration`, which can leave the FM repeatedly tripping the duration floor if streams drift.

@@ -134,7 +134,7 @@ totalAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalan
 After this call, the exact `redeemingAssets` is known:
 
 ```
-redeemingAssets = snapshot.redeemingShares * snapshot.rate / 1e18
+redeemingAssets = snapshot.redeemingShares * snapshot.rate / ASSETS_PER_SHARE_SCALE
 deficit         = max(0, redeemingAssets − snapshot.depositingAssets)
 ```
 
@@ -161,8 +161,9 @@ If a top-up is needed:
      or on demand via ensureYieldFlowDuration).
 ```
 
-The deficit is exact at this point — no buffer is needed beyond the
-`guaranteedFlowDuration` reserve that `canSettleEpoch` checks.
+The redeem deficit is exact at this point. Separately, `canSettleEpoch`
+also checks the post-settlement yield-asset reserve; the GDA buffer caveat
+from `docs/invariants.md` D.5 still applies to that reserve.
 
 ### Phase 3: settleEpoch (net flows)
 
@@ -177,7 +178,7 @@ The deficit is exact at this point — no buffer is needed beyond the
         calls Vault.onSettleEpoch()  (onlyFundManager)
 
       Inside Vault.onSettleEpoch():
-        - redeemingAssets = snap.redeemingShares * snap.rate / 1e18
+        - redeemingAssets = snap.redeemingShares * snap.rate / ASSETS_PER_SHARE_SCALE
         - totalClaimableRedeemAssets += redeemingAssets    (vault-side earmark)
         - If depositing >= redeeming:
             surplus → FM (vault.safeTransfer)

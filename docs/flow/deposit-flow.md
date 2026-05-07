@@ -123,7 +123,9 @@ commences at claim time, not at request time.
          dead shares still in totalSupply for settled-but-unclaimed redeems
          are subtracted)
       - Vault locks epoch rate
-            = effectiveSupply == 0 ? 1e18 : totalAssets * 1e18 / effectiveSupply
+            = effectiveSupply == 0
+                ? ASSETS_PER_SHARE_SCALE
+                : totalAssets * ASSETS_PER_SHARE_SCALE / effectiveSupply
       - Vault snapshots
             { epoch, depositingAssets, redeemingShares, rate }
       - Vault zeroes totalPendingDepositAssets and totalPendingRedeemShares
@@ -153,7 +155,7 @@ commences at claim time, not at request time.
       - FM calls Vault.onSettleEpoch()  (onlyFundManager)
 
       Inside Vault.onSettleEpoch():
-        - redeemingAssets = snap.redeemingShares * snap.rate / 1e18
+        - redeemingAssets = snap.redeemingShares * snap.rate / ASSETS_PER_SHARE_SCALE
         - totalClaimableRedeemAssets += redeemingAssets   (vault-side earmark)
         - If depositing >= redeeming:
             surplus = depositing - redeeming
@@ -164,7 +166,7 @@ commences at claim time, not at request time.
               → ERC-20 pull from FM's underlying balance using the
                 unlimited allowance the FM granted to the vault at deploy.
                 No super-token downgrade happens in this path.
-        - _unclaimedDepositShares += depositing * 1e18 / rate
+        - _unclaimedDepositShares += depositing * ASSETS_PER_SHARE_SCALE / rate
         - _unclaimedRedeemShares  += redeemingShares
         - _epochRate[settlingEpoch] = rate
         - _epochSettled[settlingEpoch] = true
@@ -208,7 +210,8 @@ The freshly-minted units belong to FM until individual depositors claim. FM
 
 (4.2) Vault → FundManager: onClaimDeposit(receiver, assets)
       - FM transfers `_toUnit(assets)` units from its own pool slot to
-        `receiver` via decreaseMemberUnits + increaseMemberUnits
+        `receiver` via increaseMemberUnits(receiver) then
+        decreaseMemberUnits(FM)
         (no flow-rate change, no totalUnits change)
       - Investor now receives the yield stream in the underlying's super-token
 ```

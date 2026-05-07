@@ -52,11 +52,11 @@ Operator.settleEpoch()
     └─ _rebalanceYieldAssets() + _recalibrateFlow()
 
 Investor.deposit(assets, receiver, controller)
- └─ _resolveClaimableDeposit (lazy-settle)
+    └─ _resolveClaimableDeposit (lazy-settle)
     └─ _mint(receiver, shares)                                         *shares minted at claim*
        └─ FundManager.onClaimDeposit(receiver, depositAssets)
-          └─ POOL.decreaseMemberUnits(FM, units)
           └─ POOL.increaseMemberUnits(receiver, units)                  *yield stream begins now*
+          └─ POOL.decreaseMemberUnits(FM, units)
 ```
 
 #### Redeem (request → close → settle → claim)
@@ -137,7 +137,7 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 - **`FUND_OPERATOR_ROLE` compromise — full operational blast radius.** A single compromised operator key can: (a) drain the FundManager via `take(amount)` (`FundManager.sol:198`) with no solvency check or epoch-state gate; (b) mis-report NAV through `closeEpoch(workingAssets)` (`FundManager.sol:156`) to set an arbitrary epoch rate; (c) flip `stableYieldRate` every block (`FundManager.sol:204`, `FIXME` flags missing minimum era duration), draining the SuperToken reserve faster than the duration horizon promises; (d) call `give` or `take` between `closeEpoch` and `settleEpoch`, which can either (i) make `settleEpoch` revert with `INSUFFICIENT_ASSETS_IN_FUND_MANAGER` (denying settlement) or (ii) require a re-rebalance after settle.
 - **NAV-manipulation through `workingAssets` — rate-locking attack on requests-in-flight.** The operator chooses `workingAssets` at `closeEpoch` (`FundManager.sol:158`); the vault formula is `totalAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance()`, of which only the first term is operator-controlled. With no oracle and no on-chain truth for working capital, the operator can re-price both depositors and redeemers in either direction relative to true fair value, since they all settle at the same locked `epochRate`.
 - **Zero-NAV permanently freezes deposits in the closing epoch.** `onCloseEpoch` does not reject `_totalAssets == 0`. With `effectiveSupply > 0`, `epochRate = 0`, and any subsequent `_settleDepositIfNeeded` call divides by zero in `pendingAssets.mulDiv(1e18, 0)` (`StableYieldAsyncVault.sol:582`). Documented in `docs/invariants.md` §B.4 as an unfixed soft-DoS path.
-- **`INVARIANT_VIOLATED` is dead code.** The interface NatSpec at `IFundManager.sol:126, 136` claims `setStableYieldRate` and `setGuaranteedFlowDuration` revert with `INVARIANT_VIOLATED` if the post-state would break the forward-solvency invariant; no such error is declared in the FM interface and no preflight check exists. Enforcement reduces to whatever `_rebalanceYieldAssets` happens to revert with (`INSUFFICIENT_UNUTILIZED_ASSETS`) or to `canSettleEpoch` (only at next settlement).
+- **No separate preflight forward-solvency check on rate/duration changes.** `setStableYieldRate` and `setGuaranteedFlowDuration` rely on `_rebalanceYieldAssets` to maintain the reserve horizon. If the required upgrade cannot be funded, the path reverts with `INSUFFICIENT_UNUTILIZED_ASSETS`; otherwise the change is accepted without a distinct post-state invariant assertion.
 - **First-epoch / empty-vault rate handling.** `_lastSettledRate` returns `1e18` until any epoch is settled (`StableYieldAsyncVault.sol:551–562`); `effectiveSupply == 0` short-circuits to `1e18`. The first depositor's claim rate is therefore deterministic, but the value of those shares relative to NAV is set by whatever `workingAssets` the operator reports at the first `closeEpoch`. Trace the empty-vault → first-deposit → first-redeem path under different operator-reported NAV scenarios.
 - **`int96` / `uint128` truncation in flow-rate and unit math.** `_flowRatePerUnit · totalUnits` is cast to `int96` for `distributeFlow` (`FundManager.sol:401–402`) with no bounds check; pool unit deltas are cast to `uint128` (`FundManager.sol:267, 270, 405–407`). Combined with operator-controlled rate, large pool size + high rate could overflow silently per `docs/invariants.md` §H.1, §H.2.
 - **Decimals-clipping `+1` behavior.** `_rebalanceYieldAssets` adds `+1` to the upgrade amount (`FundManager.sol:387`) and `evaluateFunding` adds `+1` on the deficit branch (`FundManager.sol:317`) to cover sub-atom rounding. Verify both behave correctly when the deficit is exactly representable (no over-upgrade) and at the underlying-decimals boundary (6 vs 18).
@@ -291,7 +291,7 @@ The `docs/invariants.md` document is unusually complete for a POC and self-flags
 |------|-------------:|------|
 | `src/StableYieldAsyncVault.sol` | 35 | Highest churn — primary target for review |
 | `src/FundManager.sol` | 28 | Second-highest churn — recent `fix: generalize flowRatePerUnit formula` (HEAD) |
-| `src/interfaces/IFundManager.sol` | 22 | Interface NatSpec out of sync (`INVARIANT_VIOLATED`) |
+| `src/interfaces/IFundManager.sol` | 22 | Frequently edited operator/admin interface surface |
 | `src/interfaces/vault/IStableYieldAsyncVault.sol` | 11 | Stable |
 
 ### Security-Relevant Commits
@@ -329,11 +329,9 @@ The `docs/invariants.md` document is unusually complete for a POC and self-flags
 | File:Line | Type | Text | Author | Date |
 |-----------|------|------|--------|------|
 | `src/FundManager.sol:205` | FIXME | enforce minimum era duration | Pilou | 2026-04-28 |
-| `src/FundManager.sol:323` | FIXME | add buffer to the required balance | Pilou | 2026-04-29 |
-| `src/FundManager.sol:347` | FIXME | 1e18 here might be a footgun | Pilou | 2026-04-29 |
-| `src/StableYieldAsyncVault.sol:282` | FIXME | verify below formula (should this account for unclaimed redeeming shares?) | Pilou | 2026-04-13 |
+| `src/FundManager.sol:321` | FIXME | add buffer to the required balance | Pilou | 2026-04-29 |
 
-Three of the four FIXMEs sit in security-critical paths (`setStableYieldRate`, `evaluateYieldAssetsDeficit`, `canSettleEpoch`).
+The remaining FIXME markers sit in security-critical paths (`setStableYieldRate`, `evaluateYieldAssetsDeficit`).
 
 There is also a dead statement at `FundManager.sol:246` — `_toUnit(depositAssets);` is called twice in `onClaimDeposit`, the second invocation has no assignment and no effect. Not a `FIXME` marker but worth review.
 
@@ -344,7 +342,7 @@ There is also a dead statement at `FundManager.sol:246` — `_toUnit(depositAsse
 - **Two `score=14` fix commits within four days of each other** (`838c293`, `a3bc5f4`, both 2026-04-22) overlap access control and token-transfer logic — the kind of dual-domain fix that warrants careful review of what they replaced.
 - **HEAD is a `fix:` commit** (`ba1cc7e: fix: generalize flowRatePerUnit formula`) touching the core flow-rate derivation and co-modifying tests. Last-second formula change increases risk of regression in §D.4.
 - **60% of fix-tagged commits don't co-modify tests** (file-level co-modification metric — coverage itself is 100% on `src/`, so this signals process pattern not coverage gap).
-- **Documentation drift is acknowledged**: interface NatSpec still references the dead `INVARIANT_VIOLATED` error per `docs/invariants.md` §I.1.
+- **Rate/duration enforcement is rebalance-based**: the current invariant docs describe no separate preflight forward-solvency assertion on `setStableYieldRate` or `setGuaranteedFlowDuration`; enforcement depends on `_rebalanceYieldAssets` succeeding.
 
 ### Cross-Reference Synthesis
 

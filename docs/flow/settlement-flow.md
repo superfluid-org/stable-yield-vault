@@ -31,7 +31,7 @@ sequenceDiagram
     FM->>AV: (1.2) onCloseEpoch(workingAssets + unutilizedAssetsBalance + scaledYieldAssetsBalance)
     activate AV
     Note right of AV: (a) snapshot pending flows. snap.depositingAssets = totalPendingDepositAssets. snap.redeemingShares = totalPendingRedeemShares
-    Note right of AV: (b) effectiveSupply = totalSupply + unclaimedDepositShares - unclaimedRedeemShares. snap.rate = totalAssets * 1e18 / effectiveSupply (defaults to 1e18 when effectiveSupply is 0)
+    Note right of AV: (b) effectiveSupply = totalSupply + unclaimedDepositShares - unclaimedRedeemShares. snap.rate = totalAssets * ASSETS_PER_SHARE_SCALE / effectiveSupply (defaults to ASSETS_PER_SHARE_SCALE when effectiveSupply is 0)
     Note right of AV: (c) currentEpoch++, totalPendingDepositAssets = 0, totalPendingRedeemShares = 0. _lastReportedTotalAssets = totalAssets. requestDeposit and requestRedeem revert until settle
     AV-->>FM: ok
     deactivate AV
@@ -72,7 +72,7 @@ sequenceDiagram
         Note over AV, FM: no asset movement between vault and FM
     end
 
-    Note right of AV: unclaimedDepositShares += depositing * 1e18 / rate. unclaimedRedeemShares += redeemingShares. epochRate of settlingEpoch is set to rate. epochSettled flag set. emit EpochSettled. delete snapshot
+    Note right of AV: unclaimedDepositShares += depositing * ASSETS_PER_SHARE_SCALE / rate. unclaimedRedeemShares += redeemingShares. epochRate of settlingEpoch is set to rate. epochSettled flag set. emit EpochSettled. delete snapshot
     AV-->>FM: ok
     deactivate AV
 
@@ -116,8 +116,8 @@ Inside Vault.onCloseEpoch:
                       - _unclaimedRedeemShares
 
 (A.3) snap.rate = effectiveSupply == 0
-                  ? 1e18
-                  : totalAssets * 1e18 / effectiveSupply
+                  ? ASSETS_PER_SHARE_SCALE
+                  : totalAssets * ASSETS_PER_SHARE_SCALE / effectiveSupply
 
 (A.4) snap = { epoch: currentEpoch,
                depositingAssets: totalPendingDepositAssets,
@@ -138,7 +138,7 @@ requestDeposit and requestRedeem revert with EPOCH_SETTLEMENT_IN_PROGRESS.
 With the snapshot locked, the operator knows the exact deficit:
 
 ```
-redeemingAssets = snap.redeemingShares * snap.rate / 1e18
+redeemingAssets = snap.redeemingShares * snap.rate / ASSETS_PER_SHARE_SCALE
 deficit         = max(0, redeemingAssets - snap.depositingAssets)
 ```
 
@@ -196,7 +196,7 @@ Inside Vault.onSettleEpoch:
 
 (B.1) settlingEpoch = snap.epoch; revert NO_EPOCH_TO_SETTLE if zero.
 
-(B.2) redeemingAssets = snap.redeemingShares * snap.rate / 1e18
+(B.2) redeemingAssets = snap.redeemingShares * snap.rate / ASSETS_PER_SHARE_SCALE
       totalClaimableRedeemAssets += redeemingAssets
 
 (B.3) Net flows (only one of three paths runs):
@@ -225,7 +225,7 @@ Inside Vault.onSettleEpoch:
     └──────────────────────────────────────────────────────────┘
 
 (B.4) Commit lag-correction counters and epoch rate:
-      _unclaimedDepositShares += depositingAssets * 1e18 / rate
+      _unclaimedDepositShares += depositingAssets * ASSETS_PER_SHARE_SCALE / rate
       _unclaimedRedeemShares  += redeemingShares
       _epochRate[settlingEpoch] = rate
       _epochSettled[settlingEpoch] = true
@@ -260,11 +260,11 @@ Alice requests deposit: 100 USDC
 Bob   requests redeem : 80 shares
 Carol requests redeem : 50 shares
 
-Assume rate at close is 1 share = 1 USDC (1e18).
+Assume rate at close is 1 share = 1 USDC (`ASSETS_PER_SHARE_SCALE`, currently `1e18`).
 
 **closeEpoch(workingAssets):**
 1. totalAssets = workingAssets + FM.unutilizedAssetsBalance() + FM.scaledYieldAssetsBalance()
-2. snap = { depositingAssets: 100, redeemingShares: 130, rate: 1e18 }
+2. snap = { depositingAssets: 100, redeemingShares: 130, rate: ASSETS_PER_SHARE_SCALE }
 3. redeemingAssets = 130 USDC
 4. deficit = 130 − 100 = 30 USDC
 5. currentEpoch advances; new requests revert until settle
