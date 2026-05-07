@@ -1,6 +1,6 @@
 testMode: assertion
 testLimit: 50000
-seqLen: 50
+seqLen: 100
 shrinkLimit: 5000
 corpusDir: echidna-corpus
 coverage: true
