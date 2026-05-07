@@ -130,8 +130,7 @@ interface IFundManager {
     /**
      * @notice Set the target annualized era stable yield rate
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Recalibrates the distribution flow; reverts with INVARIANT_VIOLATED if the new rate would break
-     *      the stream-solvency invariant.
+     *      Rebalance the yield assets (subject to unutilized asset balance) and recalibrates the distribution flow;
      * @param newRate The new annualized stable yield rate, expressed in basis points (e.g. 100 <=> 1%)
      */
     function setStableYieldRate(uint256 newRate) external;
@@ -139,8 +138,7 @@ interface IFundManager {
     /**
      * @notice Set the minimum forward stream-solvency horizon the FundManager must maintain.
      * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
-     *      Reverts with DURATION_BELOW_FLOOR if `newDuration` is below MIN_GUARANTEED_FLOW_DURATION,
-     *      or with INVARIANT_VIOLATED if the post-operation state would break the invariant.
+     *      Reverts with DURATION_BELOW_FLOOR if `newDuration` is below MIN_GUARANTEED_FLOW_DURATION
      * @param newDuration The new guaranteed flow duration, in seconds.
      */
     function setGuaranteedFlowDuration(uint256 newDuration) external;
