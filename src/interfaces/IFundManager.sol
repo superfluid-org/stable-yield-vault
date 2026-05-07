@@ -114,7 +114,9 @@ interface IFundManager {
     /**
      * @notice Deposit underlying assets into the FundManager.
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Pulls underlying from the caller into the FundManager.
+     *      Pulls underlying from the caller into the FundManager. This function is not gated by the
+     *      epoch settlement lifecycle and does not itself rebalance the yield-asset reserve; operators
+     *      should coordinate calls with `evaluateFunding`, `canSettleEpoch`, or `ensureYieldFlowDuration`.
      * @param amount The amount of underlying asset to give.
      */
     function give(uint256 amount) external;
@@ -122,7 +124,10 @@ interface IFundManager {
     /**
      * @notice Withdraw underlying assets from the FundManager.
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Transfers underlying from the FundManager to the caller.
+     *      Transfers underlying from the FundManager to the caller. This function is not gated by the
+     *      epoch settlement lifecycle and performs no solvency check against pending redeems or the
+     *      yield-asset reserve; operators must coordinate calls with `evaluateFunding` and
+     *      `canSettleEpoch` before settlement.
      * @param amount The amount of underlying asset to take.
      */
     function take(uint256 amount) external;

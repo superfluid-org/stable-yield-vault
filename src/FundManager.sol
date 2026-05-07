@@ -67,6 +67,9 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     ///         For USDC (6-dec) == 1; for DAI (18-dec) == 1e12.
     uint256 public immutable RAW_PER_UNIT;
 
+    /// @notice The asset per share exchange rate scale
+    uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
+
     //     _____ __        __
     //    / ___// /_____ _/ /____  _____
     //    \__ \/ __/ __ `/ __/ _ \/ ___/
@@ -298,7 +301,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         uint128 newTotalUnits = POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
         int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         uint256 requiredYieldAssetsBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
-        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
 
         // Evaluate pre-settlement yield asset deficit
         int256 yieldAssetDeficit = int256(requiredYieldAssetsBalance) - int256(yieldAssetsBalance());
@@ -342,8 +345,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
             reason = "CURRENT_EPOCH_NOT_CLOSED";
         }
 
-        /// FIXME 1e18 here might be a footgun
-        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
         uint128 newTotalUnits = POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
         int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         uint256 requiredScaledYieldAssetsBalance =
