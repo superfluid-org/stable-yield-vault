@@ -7,11 +7,11 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
-import { IERC7540Deposit } from "src/interfaces/vault/IERC7540Deposit.sol";
-import { IERC7540Operator } from "src/interfaces/vault/IERC7540Operator.sol";
-import { IERC7540Redeem } from "src/interfaces/vault/IERC7540Redeem.sol";
-import { IERC7575 } from "src/interfaces/vault/IERC7575.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
+import { IERC7540Deposit } from "src/interfaces/async-vault/IERC7540Deposit.sol";
+import { IERC7540Operator } from "src/interfaces/async-vault/IERC7540Operator.sol";
+import { IERC7540Redeem } from "src/interfaces/async-vault/IERC7540Redeem.sol";
+import { IERC7575 } from "src/interfaces/async-vault/IERC7575.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
 
 contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
 

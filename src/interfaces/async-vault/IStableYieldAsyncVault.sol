@@ -8,7 +8,7 @@ import { IERC7540Redeem } from "./IERC7540Redeem.sol";
 import { IERC7575 } from "./IERC7575.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
-import { IFundManager } from "src/interfaces/IFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
 
 /**
  * @title IStableYieldAsyncVault
@@ -236,7 +236,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      * @notice The paired FundManager that custodies invested assets and routes the yield stream.
      * @dev Set immutably at construction.
      */
-    function FUND_MANAGER() external view returns (IFundManager);
+    function FUND_MANAGER() external view returns (IAsyncFundManager);
 
     /**
      * @notice Returns the current epoch number.

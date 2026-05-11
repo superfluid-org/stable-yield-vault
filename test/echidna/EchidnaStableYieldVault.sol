@@ -30,9 +30,9 @@ import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
 import { SlotsBitmapLibrary } from "@superfluid-finance/ethereum-contracts/contracts/libs/SlotsBitmapLibrary.sol";
 
-import { FundManager } from "src/FundManager.sol";
-import { StableYieldAsyncVault } from "src/StableYieldAsyncVault.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
+import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
+import { StableYieldAsyncVault } from "src/async-vault/StableYieldAsyncVault.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
 
 interface IHevm {
 
@@ -69,7 +69,7 @@ contract EchidnaStableYieldVault {
     TestToken private _usdc;
     SuperToken private _usdcx;
 
-    FundManager private _fundManager;
+    AsyncFundManager private _fundManager;
     StableYieldAsyncVault private _vault;
 
     address[3] private _actors;
@@ -150,7 +150,7 @@ contract EchidnaStableYieldVault {
             "Echidna Vault Share",
             "EVS"
         );
-        _fundManager = FundManager(address(_vault.FUND_MANAGER()));
+        _fundManager = AsyncFundManager(address(_vault.FUND_MANAGER()));
 
         // Operator treasury — used to optionally seed FM via `operator_give` during fuzzing.
         // The FM itself starts EMPTY: at zero share supply the system has no NAV, and
@@ -262,7 +262,6 @@ contract EchidnaStableYieldVault {
 
         ISuperfluidPool pool = _fundManager.POOL();
         uint128 unitsBefore = pool.getTotalUnits();
-        int96 flowBefore = pool.getTotalFlowRate();
         uint128 actorUnitsBefore = pool.getUnits(actor);
 
         HEVM.prank(actor);

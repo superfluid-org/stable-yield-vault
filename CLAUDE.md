@@ -60,7 +60,7 @@ A request → settle → claim cycle, gated by an operator:
 
 - `@openzeppelin/contracts/` and `@openzeppelin-v5/contracts/` **both** map to `lib/openzeppelin-contracts-v5/`. The vault imports via `@openzeppelin/contracts/...`, FM via `@openzeppelin-v5/contracts/...` — same code; don't "fix" one to match the other.
 - Superfluid contracts come from `lib/superfluid-protocol-monorepo/packages/ethereum-contracts/`.
-- ERC-7540 reference interfaces are vendored locally in `src/interfaces/vault/` (not pulled from the `ERC-7540-Reference` lib).
+- ERC-7540 reference interfaces are vendored locally in `src/interfaces/async-vault/` (not pulled from the `ERC-7540-Reference` lib).
 
 ## Docs
 

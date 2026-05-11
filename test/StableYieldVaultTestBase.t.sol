@@ -14,8 +14,9 @@ import { Test } from "forge-std/Test.sol";
 
 import { StableYieldVaultDeployer } from "script/StableYieldVaultDeployer.sol";
 import { NetworkConfig } from "script/config/NetworkConfig.sol";
-import { FundManager } from "src/FundManager.sol";
-import { StableYieldAsyncVault } from "src/StableYieldAsyncVault.sol";
+
+import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
+import { StableYieldAsyncVault } from "src/async-vault/StableYieldAsyncVault.sol";
 
 contract StableYieldVaultTestBase is Test {
 
@@ -27,7 +28,7 @@ contract StableYieldVaultTestBase is Test {
     ISuperToken internal _usdcx;
     SuperToken internal _usdcSuperToken;
 
-    FundManager internal _fundManager;
+    AsyncFundManager internal _fundManager;
     StableYieldAsyncVault internal _vault;
 
     address internal immutable DEPLOYER = makeAddr("DEPLOYER");
@@ -65,7 +66,7 @@ contract StableYieldVaultTestBase is Test {
         );
         vm.stopPrank();
 
-        _fundManager = FundManager(deploymentResult.fundManager);
+        _fundManager = AsyncFundManager(deploymentResult.fundManager);
         _vault = StableYieldAsyncVault(deploymentResult.asyncVault);
     }
 

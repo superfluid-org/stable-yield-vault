@@ -4,9 +4,9 @@ pragma solidity ^0.8.34;
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
 import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
 
-interface IFundManager {
+interface IAsyncFundManager {
 
     //    ______                 __
     //   / ____/   _____  ____  / /______

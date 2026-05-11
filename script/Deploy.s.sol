@@ -54,7 +54,7 @@ contract Deploy is Script {
 
         console.log("");
         console.log("===> DEPLOYMENT RESULTS");
-        console.log(" --- Fund Manager          :", result.fundManager);
+        console.log(" --- Async Fund Manager    :", result.fundManager);
         console.log(" --- Async Vault           :", result.asyncVault);
         console.log("");
     }
