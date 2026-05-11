@@ -270,49 +270,6 @@ This is now an explicit invariant of the system (per `docs/flow/settlement-flow.
 
 ---
 
-## F. Access control
-
-### F.1 — Vault settlement hooks are FM-only
-
-`onCloseEpoch` and `onSettleEpoch` are gated by `onlyFundManager` (`msg.sender == address(FUND_MANAGER)`). The vault has no operator-callable settlement functions.
-
-**Where.** `StableYieldAsyncVault.sol:218, 249, 679–682`.
-
-### F.2 — FM operator-callable functions require FUND_OPERATOR_ROLE
-
-`closeEpoch`, `settleEpoch`, `ensureYieldFlowDuration`, `give`, `take`, `setStableYieldRate` are all `onlyRole(FUND_OPERATOR_ROLE)`.
-
-**Where.** `FundManager.sol:149, 156, 173, 185, 191, 197`.
-
-### F.3 — Admin role limited to forward-solvency horizon
-
-Only `setGuaranteedFlowDuration` is `onlyRole(DEFAULT_ADMIN_ROLE)`. The admin cannot move funds, change the yield rate, or settle epochs.
-
-**Where.** `FundManager.sol:214`.
-
-### F.4 — FM hooks back into the vault are vault-only
-
-`onClaimDeposit` and `onRequestRedeem` are `onlyRole(VAULT_ROLE)`. `VAULT_ROLE` is granted exactly once, in the FM constructor, to `msg.sender` (which is the deploying vault).
-
-**Where.** `FundManager.sol:121, 236, 247`.
-
-### F.5 — Vault/FM pair pinning is immutable
-
-`StableYieldAsyncVault.FUND_MANAGER` is `immutable`; `FundManager.VAULT` is `immutable`; FM is constructed inside the vault constructor with the vault as `msg.sender`. The pair is fixed at deployment — no factory, no migration, no role re-grant path.
-
-**Where.** `StableYieldAsyncVault.sol:34, 105–112`; `FundManager.sol:58, 105, 121`.
-
-### F.6 — Caller authorization on request/claim paths
-
-- `requestDeposit(assets, controller, owner)` — `msg.sender` must be `owner` or an operator approved by `owner`.
-- `requestRedeem(shares, controller, owner)` — same constraint on `owner`.
-- 3-arg `deposit/mint/redeem/withdraw` — `msg.sender` must be `controller` or an operator approved by `controller`.
-- 2-arg ERC-4626 overloads — `msg.sender` *is* the controller.
-
-**Where.** `StableYieldAsyncVault.sol:127, 152, 163, 175, 207, 213` and the `_isOperator[controller][operator]` mapping at `42`.
-
----
-
 ## G. ERC-7540 / ERC-4626 compliance
 
 ### G.1 — Preview functions revert
