@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { IFundManager } from "./interfaces/IFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
 
 import { AccessControl } from "@openzeppelin-v5/contracts/access/AccessControl.sol";
 import { IERC20 } from "@openzeppelin-v5/contracts/token/ERC20/IERC20.sol";
@@ -16,9 +16,9 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
 import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
 
-contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
+contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
     using Math for uint256;
     using SafeERC20 for IERC20;
@@ -76,12 +76,12 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   ___/ / /_/ /_/ / /_/  __(__  )
     //  /____/\__/\__,_/\__/\___/____/
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     uint256 public stableYieldRate;
 
     int96 private _flowRatePerUnit;
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     uint256 public guaranteedFlowDuration;
 
     //     ______                 __                  __
@@ -155,14 +155,14 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   / /____>  </ /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  /_____/_/|_|\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function closeEpoch(uint256 workingAssets) external onlyRole(FUND_OPERATOR_ROLE) {
         // totalAssets is reported in underlying decimals
         uint256 totalAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance();
         VAULT.onCloseEpoch(totalAssets);
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function settleEpoch() external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
         (bool canSettle, string memory reason, IStableYieldAsyncVault.Snapshot memory snap) = canSettleEpoch();
         if (!canSettle) revert SETTLEMENT_PRECONDITIONS_NOT_MET(reason);
@@ -179,7 +179,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         }
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function ensureYieldFlowDuration() external onlyRole(FUND_OPERATOR_ROLE) {
         // Rebalance underlying vs. yield assets
         _rebalanceYieldAssets();
@@ -191,19 +191,19 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         }
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function give(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) {
         UNDERLYING_ASSET.safeTransferFrom(msg.sender, address(this), amount);
         emit Gave(msg.sender, amount);
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function take(uint256 amount) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
         UNDERLYING_ASSET.safeTransfer(msg.sender, amount);
         emit Took(msg.sender, amount);
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function setStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
         /// FIXME : enforce minimum era duration
 
@@ -220,7 +220,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         emit StableYieldRateChanged(oldRate, newRate);
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function setGuaranteedFlowDuration(uint256 newDuration) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         if (newDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
         uint256 oldDuration = guaranteedFlowDuration;
@@ -242,7 +242,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //   | |/ / /_/ / /_/ / / /_   / /_/ / /_/ / /_/  __/ /_/ /
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function onClaimDeposit(address shareholder, uint256 depositAssets) external onlyRole(VAULT_ROLE) {
         uint128 units = _toUnit(depositAssets);
 
@@ -251,7 +251,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         POOL.decreaseMemberUnits(address(this), units);
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function onRequestRedeem(address shareholder, uint256 sharesRedeemed, uint256 totalSharesOwned)
         external
         onlyRole(VAULT_ROLE)
@@ -279,22 +279,22 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     //  | |/ / /  __/ |/ |/ /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function unutilizedAssetsBalance() public view returns (uint256 balance) {
         balance = UNDERLYING_ASSET.balanceOf(address(this));
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function yieldAssetsBalance() public view returns (uint256 balance) {
         balance = YIELD_ASSET.balanceOf(address(this));
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function scaledYieldAssetsBalance() public view returns (uint256 balance) {
         balance = yieldAssetsBalance() / SCALING_FACTOR;
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function evaluateFunding() external view returns (int256 funding) {
         IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
 
@@ -319,7 +319,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         }
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function evaluateYieldAssetsDeficit() public view returns (int256 deficit) {
         /// FIXME : add buffer to the required balance
         uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
@@ -328,7 +328,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         deficit = int256(requiredBalance) - int256(actualBalance);
     }
 
-    /// @inheritdoc IFundManager
+    /// @inheritdoc IAsyncFundManager
     function canSettleEpoch()
         public
         view

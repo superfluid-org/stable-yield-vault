@@ -289,10 +289,10 @@ The `docs/invariants.md` document is unusually complete for a POC and self-flags
 
 | File | Modifications | Note |
 |------|-------------:|------|
-| `src/StableYieldAsyncVault.sol` | 35 | Highest churn — primary target for review |
+| `src/async-vault/StableYieldAsyncVault.sol` | 35 | Highest churn — primary target for review |
 | `src/FundManager.sol` | 28 | Second-highest churn — recent `fix: generalize flowRatePerUnit formula` (HEAD) |
-| `src/interfaces/IFundManager.sol` | 22 | Frequently edited operator/admin interface surface |
-| `src/interfaces/vault/IStableYieldAsyncVault.sol` | 11 | Stable |
+| `src/interfaces/async-vault/IAsyncFundManager.sol` | 22 | Frequently edited operator/admin interface surface |
+| `src/interfaces/async-vault/IStableYieldAsyncVault.sol` | 11 | Stable |
 
 ### Security-Relevant Commits
 
@@ -319,7 +319,7 @@ The `docs/invariants.md` document is unusually complete for a POC and self-flags
 
 | Library | Path | Upstream | Status | Notes |
 |---------|------|----------|--------|-------|
-| ERC-7540-Reference | `lib/ERC-7540-Reference` | ERC-7540 reference impl | Submodule | 100 `.sol` files; the project does **not** import from this library (interfaces are vendored under `src/interfaces/vault/`). Submodule kept for reference only — no live dependency. |
+| ERC-7540-Reference | `lib/ERC-7540-Reference` | ERC-7540 reference impl | Submodule | 100 `.sol` files; the project does **not** import from this library (interfaces are vendored under `src/interfaces/async-vault/`). Submodule kept for reference only — no live dependency. |
 | openzeppelin-contracts-v5 | `lib/openzeppelin-contracts-v5` | OpenZeppelin v5 | Submodule | 274 files; both `@openzeppelin/contracts/` and `@openzeppelin-v5/contracts/` resolve to this single tree — vault and FM use different prefixes for the same code. |
 | superfluid-protocol-monorepo | `lib/superfluid-protocol-monorepo` | Superfluid Protocol | Submodule | 1786 files; supplies `SuperTokenV1Library`, `ISuperToken`, `ISuperfluidPool`. Wide pragma fanout in the submodule but only the GDA + SuperToken interfaces are consumed. |
 | (removed) openzeppelin-contracts | `lib/openzeppelin-contracts` | OpenZeppelin v4 | Removed at `e92a0b9` | Project consolidated on v5. |

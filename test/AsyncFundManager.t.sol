@@ -10,11 +10,11 @@ import { ISuperfluidPool } from
 import { ISuperToken, SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
 import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
 
-import { FundManager } from "src/FundManager.sol";
-import { IFundManager } from "src/interfaces/IFundManager.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/vault/IStableYieldAsyncVault.sol";
+import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
 
-contract FundManagerTest is StableYieldVaultTestBase {
+contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
     using SuperTokenV1Library for ISuperToken;
 
@@ -56,8 +56,8 @@ contract FundManagerTest is StableYieldVaultTestBase {
     function test_constructor_revertsOnMismatchedSuperToken() public {
         (, address otherUsdcx) = _deployFreshWrapper("XYZ", 6);
 
-        vm.expectRevert(IFundManager.ASSET_MISMATCH.selector);
-        new FundManager(
+        vm.expectRevert(IAsyncFundManager.ASSET_MISMATCH.selector);
+        new AsyncFundManager(
             address(_usdc),
             otherUsdcx,
             FUND_OPERATOR,
@@ -70,8 +70,8 @@ contract FundManagerTest is StableYieldVaultTestBase {
     function test_constructor_revertsOnDurationBelowFloor(uint256 belowFloorDuration) public {
         belowFloorDuration = bound(belowFloorDuration, 0, _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1);
 
-        vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
-        new FundManager(
+        vm.expectRevert(IAsyncFundManager.DURATION_BELOW_FLOOR.selector);
+        new AsyncFundManager(
             address(_usdc),
             address(_usdcx),
             FUND_OPERATOR,
@@ -115,7 +115,9 @@ contract FundManagerTest is StableYieldVaultTestBase {
     function test_settleEpoch_revertsIfNoEpochClosed() public {
         vm.prank(FUND_OPERATOR);
         vm.expectRevert(
-            abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, "CURRENT_EPOCH_NOT_CLOSED")
+            abi.encodeWithSelector(
+                IAsyncFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, "CURRENT_EPOCH_NOT_CLOSED"
+            )
         );
 
         _fundManager.settleEpoch();
@@ -159,7 +161,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(reason, "CURRENT_EPOCH_NOT_CLOSED");
 
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
+        vm.expectRevert(abi.encodeWithSelector(IAsyncFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
         _fundManager.settleEpoch();
     }
 
@@ -178,7 +180,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(reason, "INSUFFICIENT_ASSETS_IN_FUND_MANAGER");
 
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
+        vm.expectRevert(abi.encodeWithSelector(IAsyncFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
         _fundManager.settleEpoch();
     }
 
@@ -214,7 +216,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         vm.assertEq(reason, "INSUFFICIENT_ASSETS_IN_FUND_MANAGER");
 
         vm.prank(FUND_OPERATOR);
-        vm.expectRevert(abi.encodeWithSelector(IFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
+        vm.expectRevert(abi.encodeWithSelector(IAsyncFundManager.SETTLEMENT_PRECONDITIONS_NOT_MET.selector, reason));
         _fundManager.settleEpoch();
     }
 
@@ -298,7 +300,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
         // Choose a rate where the new flow still fits the GDA security deposit (~hours of flow)
         // but the 7-day invariant horizon exceeds the yield buffer.
-        vm.expectRevert(IFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
+        vm.expectRevert(IAsyncFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setStableYieldRate(increasedAnnualRate);
 
         vm.stopPrank();
@@ -320,7 +322,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         belowFloorDuration = bound(belowFloorDuration, 0, _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1);
 
         vm.prank(FUND_ADMIN);
-        vm.expectRevert(IFundManager.DURATION_BELOW_FLOOR.selector);
+        vm.expectRevert(IAsyncFundManager.DURATION_BELOW_FLOOR.selector);
         _fundManager.setGuaranteedFlowDuration(belowFloorDuration);
     }
 
@@ -334,7 +336,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
         // Raising the horizon to 1000 years would require far more yield buffer than we hold
         vm.prank(FUND_ADMIN);
-        vm.expectRevert(IFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
+        vm.expectRevert(IAsyncFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setGuaranteedFlowDuration(365 days * 1000);
     }
 
@@ -351,12 +353,12 @@ contract FundManagerTest is StableYieldVaultTestBase {
 
         // sharesRedeemed > totalSharesOwned
         vm.prank(address(_vault));
-        vm.expectRevert(IFundManager.BAD_REDEEM_ARGS.selector);
+        vm.expectRevert(IAsyncFundManager.BAD_REDEEM_ARGS.selector);
         _fundManager.onRequestRedeem(ALICE, sharesRedeemed, sharesOwned);
 
         // totalSharesOwned == 0
         vm.prank(address(_vault));
-        vm.expectRevert(IFundManager.BAD_REDEEM_ARGS.selector);
+        vm.expectRevert(IAsyncFundManager.BAD_REDEEM_ARGS.selector);
         _fundManager.onRequestRedeem(ALICE, 0, 0);
     }
 
@@ -369,7 +371,7 @@ contract FundManagerTest is StableYieldVaultTestBase {
         ISuperfluidPool pool = _fundManager.POOL();
         vm.assertEq(pool.getUnits(ALICE), 0);
 
-        vm.expectRevert(IFundManager.BAD_REDEEM_ARGS.selector);
+        vm.expectRevert(IAsyncFundManager.BAD_REDEEM_ARGS.selector);
         vm.prank(address(_vault));
         _fundManager.onRequestRedeem(ALICE, sharesRedeemed, sharesOwned);
     }

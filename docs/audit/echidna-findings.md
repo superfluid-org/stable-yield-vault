@@ -114,7 +114,7 @@ The **`setStableYieldRate` rate-raise path** is a related but distinct trigger: 
 **Why this matters.**
 
 - `docs/invariants.md` D.5 states `yieldAssetsBalance() ≥ targetFlowRate · guaranteedFlowDuration` and claims `canSettleEpoch` enforces a post-settlement form before settlement. The pre-settlement check passes (it uses `balanceOf` consistently with the rebalance), but the **post-maintenance state can violate D.5**, breaking any downstream assumption that "after a maintenance op, FM is forward-solvent for `guaranteedFlowDuration`."
-- Known-gap **I.1** (`INVARIANT_VIOLATED` declared but never raised) is a *symptom* of this same issue: the interface NatSpec at `IFundManager.sol:126,136` claims `setStableYieldRate` and `setGuaranteedFlowDuration` revert on D.5 violations, but no preflight check exists. They rely on `_rebalanceYieldAssets` succeeding — which it does, just by under-upgrading rather than reverting.
+- Known-gap **I.1** (`INVARIANT_VIOLATED` declared but never raised) is a *symptom* of this same issue: the interface NatSpec at `IAsyncFundManager.sol:126,136` claims `setStableYieldRate` and `setGuaranteedFlowDuration` revert on D.5 violations, but no preflight check exists. They rely on `_rebalanceYieldAssets` succeeding — which it does, just by under-upgrading rather than reverting.
 - Critical-state recovery is silent: there is no operator-visible signal that the FM is critical or that the last rebalance under-upgraded. `evaluateFunding()` and `evaluateYieldAssetsDeficit()` both read the clamped `balanceOf`, so they hide it.
 
 **Suggested fixes.**

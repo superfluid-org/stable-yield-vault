@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { IFundManager } from "./interfaces/IFundManager.sol";
-import { FundManager } from "src/FundManager.sol";
+import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
 
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     IERC4626,
     IERC7540Deposit,
@@ -11,9 +13,7 @@ import {
     IERC7540Redeem,
     IERC7575,
     IStableYieldAsyncVault
-} from "./interfaces/vault/IStableYieldAsyncVault.sol";
-import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+} from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
 
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -31,7 +31,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     uint256 internal constant REQUEST_ID = 0;
 
-    IFundManager public immutable FUND_MANAGER;
+    IAsyncFundManager public immutable FUND_MANAGER;
 
     uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
 
@@ -104,7 +104,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     ) ERC20(name, symbol) {
         underlyingAsset = IERC20(_underlyingAsset);
 
-        FUND_MANAGER = new FundManager(
+        FUND_MANAGER = new AsyncFundManager(
             _underlyingAsset,
             _yieldAsset,
             _fundOperator,

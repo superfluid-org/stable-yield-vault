@@ -4,8 +4,8 @@ pragma solidity ^0.8.34;
 import { Script } from "forge-std/Script.sol";
 import { NetworkConfig } from "script/config/NetworkConfig.sol";
 
-import { FundManager } from "src/FundManager.sol";
-import { StableYieldAsyncVault } from "src/StableYieldAsyncVault.sol";
+import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
+import { StableYieldAsyncVault } from "src/async-vault/StableYieldAsyncVault.sol";
 
 library StableYieldVaultDeployer {
 
