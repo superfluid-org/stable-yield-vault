@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1144" height="490" viewBox="0 0 458 196" font-family="Arial, sans-serif">
+  <defs>
+    <marker id="ah" viewBox="0 0 8 6" refX="8" refY="3"
+      markerWidth="4" markerHeight="3" orient="auto">
+      <path d="M0.5,0.5 L7,3 L0.5,5.5" fill="none" stroke="#94A3B8"
+        stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round"/>
+    </marker>
+    <filter id="shadow" x="-6%" y="-8%" width="112%" height="128%">
+      <feDropShadow dx="0" dy="0.5" stdDeviation="0.8"
+        flood-color="#000" flood-opacity="0.05"/>
+    </filter>
+  </defs>
+  <rect width="458" height="196" fill="#F8F9FB" rx="3"/>
+  <text x="229" y="11" text-anchor="middle" font-size="6" font-weight="700" fill="#1E293B">Stable Yield Async Vault Architecture</text>
+  <rect x="154" y="16" width="150" height="10" rx="3" fill="#fff" stroke="#E2E5EA" stroke-width="0.4"/>
+  <rect x="159" y="18.5" width="5" height="5" rx="2.5" fill="#fff" stroke="#E2E5EA" stroke-width="0.4"/>
+  <text x="167" y="22.5" font-size="3.5" fill="#1E293B">Actor</text>
+  <rect x="199" y="18.5" width="5" height="5" rx="1.5" fill="#fff" stroke="#E2E5EA" stroke-width="0.4"/>
+  <rect x="200" y="19.5" width="0.8" height="3" rx="0.4" fill="#3B82F6"/>
+  <text x="207" y="22.5" font-size="3.5" fill="#1E293B">Protocol</text>
+  <rect x="247" y="18.5" width="5" height="5" rx="1.5" fill="#fff" stroke="#E2E5EA" stroke-width="0.4"/>
+  <rect x="248" y="19.5" width="0.8" height="3" rx="0.4" fill="#F59E0B"/>
+  <text x="255" y="22.5" font-size="3.5" fill="#1E293B">External</text>
+  <rect x="21.6" y="84.0" width="273.8" height="40.0" rx="5" fill="#EDEEF2"/>
+  <text x="292.4" y="89.0" text-anchor="end" font-size="3.5" fill="#94A3B8" font-weight="500">Vault Pair (in scope)</text>
+  <path d="M76.0,46.0 C76.0,70.0 92.0,70.0 92.0,94.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M210.6,46.0 C210.6,70.0 239.4,70.0 239.4,94.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M317.4,46.0 C317.4,70.0 239.4,70.0 239.4,94.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M152.4,112.0 C164.7,126.0 181.1,126.0 193.4,114.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M193.4,112.0 C181.1,130.0 164.7,130.0 152.4,114.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M92.0,114.0 C92.0,135.0 144.1,135.0 144.1,156.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M239.4,114.0 C239.4,135.0 144.1,135.0 144.1,156.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M239.4,114.0 C239.4,135.0 251.5,135.0 251.5,156.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M239.4,114.0 C239.4,135.0 376.3,135.0 376.3,156.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <path d="M302.9,174.0 C309.5,188.0 318.3,188.0 324.9,176.0" fill="none" stroke="#94A3B8" stroke-width="0.5" marker-end="url(#ah)"/>
+  <g filter="url(#shadow)">
+    <rect x="30.0" y="32.0" width="92.0" height="14" rx="7" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <text x="76.0" y="40.8" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">Investor</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="168.2" y="32.0" width="84.8" height="14" rx="7" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <text x="210.6" y="40.8" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">Fund Operator</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="275.0" y="32.0" width="84.8" height="14" rx="7" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <text x="317.4" y="40.8" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">Fund Admin</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="31.6" y="94.0" width="120.8" height="20" rx="3" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <rect x="34.6" y="97.0" width="1.4" height="14" rx="0.6" fill="#3B82F6"/>
+    <text x="92.0" y="103.5" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">StableYieldAsyncVault</text>
+    <text x="92.0" y="108.5" text-anchor="middle" font-size="3.5" fill="#64748B">ERC-7540 epoch accounting</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="193.4" y="94.0" width="92.0" height="20" rx="3" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <rect x="196.4" y="97.0" width="1.4" height="14" rx="0.6" fill="#3B82F6"/>
+    <text x="239.4" y="103.5" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">FundManager</text>
+    <text x="239.4" y="108.5" text-anchor="middle" font-size="3.5" fill="#64748B">Treasury / GDA admin</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="110.1" y="156.0" width="68.0" height="20" rx="3" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <rect x="113.1" y="159.0" width="1.4" height="14" rx="0.6" fill="#F59E0B"/>
+    <text x="144.1" y="165.5" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">Underlying</text>
+    <text x="144.1" y="170.5" text-anchor="middle" font-size="3.5" fill="#64748B">USDC (ERC-20)</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="200.1" y="156.0" width="102.8" height="20" rx="3" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <rect x="203.1" y="159.0" width="1.4" height="14" rx="0.6" fill="#F59E0B"/>
+    <text x="251.5" y="165.5" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">Yield Asset</text>
+    <text x="251.5" y="170.5" text-anchor="middle" font-size="3.5" fill="#64748B">SuperToken (e.g. USDCx)</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="324.9" y="156.0" width="102.8" height="20" rx="3" fill="#fff" stroke="#E2E5EA" stroke-width="0.5"/>
+    <rect x="327.9" y="159.0" width="1.4" height="14" rx="0.6" fill="#F59E0B"/>
+    <text x="376.3" y="165.5" text-anchor="middle" font-size="4.8" font-weight="600" fill="#1E293B">GDA Pool</text>
+    <text x="376.3" y="170.5" text-anchor="middle" font-size="3.5" fill="#64748B">Superfluid distribution</text>
+  </g>
+  <rect x="64.0" y="65.0" width="40.0" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="84.0" y="70.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">request / claim</text>
+  <rect x="205.0" y="65.0" width="40.0" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="225.0" y="70.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">epoch + capital</text>
+  <rect x="263.2" y="65.0" width="30.4" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="278.4" y="70.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">set horizon</text>
+  <rect x="149.3" y="125.0" width="47.2" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="172.9" y="130.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">claim/redeem hooks</text>
+  <rect x="149.3" y="133.0" width="47.2" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="172.9" y="138.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">close/settle hooks</text>
+  <rect x="98.0" y="130.0" width="40.0" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="118.0" y="135.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">escrow / payout</text>
+  <rect x="180.1" y="142.0" width="23.2" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="191.7" y="147.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">treasury</text>
+  <rect x="223.0" y="130.0" width="44.8" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="245.4" y="135.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">upgrade/downgrade</text>
+  <rect x="283.0" y="130.0" width="49.6" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="307.8" y="135.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">manage units / flow</text>
+  <rect x="298.7" y="187.0" width="30.4" height="6.0" rx="1" fill="#F8F9FB"/>
+  <text x="313.9" y="192.0" font-size="4" fill="#1E293B" font-weight="500" text-anchor="middle">fund stream</text>
+</svg>

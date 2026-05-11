@@ -33,6 +33,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     IFundManager public immutable FUND_MANAGER;
 
+    uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
+
     //     _____ __        __
     //    / ___// /_____ _/ /____  _____
     //    \__ \/ __/ __ `/ __/ _ \/ ___/
@@ -43,7 +45,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     mapping(address controller => ControllerState state) private _controllerStates;
 
-    /// @notice Exchange rate snapshot per settled epoch (assetsPerShare, scaled by 1e18)
+    /// @notice Exchange rate snapshot per settled epoch (assetsPerShare, scaled by ASSETS_PER_SHARE_SCALE)
     mapping(uint256 epoch => uint256 assetsPerShare) private _epochRate;
 
     mapping(uint256 epoch => bool isSettled) private _epochSettled;
@@ -224,7 +226,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         uint256 effectiveSupply = totalSupply() + _unclaimedDepositShares - _unclaimedRedeemShares;
 
         // Calculate the epoch rate (assets per share) using the total assets reported by the FundManager
-        uint256 epochRate = effectiveSupply == 0 ? 1e18 : _totalAssets.mulDiv(1e18, effectiveSupply);
+        uint256 epochRate =
+            effectiveSupply == 0 ? ASSETS_PER_SHARE_SCALE : _totalAssets.mulDiv(ASSETS_PER_SHARE_SCALE, effectiveSupply);
 
         // Take a snapshot of the epoch's pending deposits and redeems to be used during settlement
         _snapshot = Snapshot({
@@ -252,7 +255,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         if (settlingEpoch == 0) revert NO_EPOCH_TO_SETTLE();
 
         // Convert pending redeeming shares to asset terms using the epoch rate
-        uint256 redeemingAssets = _snapshot.redeemingShares.mulDiv(_snapshot.rate, 1e18);
+        uint256 redeemingAssets = _snapshot.redeemingShares.mulDiv(_snapshot.rate, ASSETS_PER_SHARE_SCALE);
 
         // Earmark the redeemable assets against vault balance. Deposits and claimable redeems
         // coexist in the vault's underlying balance; this counter partitions the two.
@@ -272,15 +275,16 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         }
 
         // Track unclaimed positions for effective supply adjustment in future closeEpoch calls
-        _unclaimedDepositShares += _snapshot.depositingAssets.mulDiv(1e18, _snapshot.rate);
+        _unclaimedDepositShares += _snapshot.depositingAssets.mulDiv(ASSETS_PER_SHARE_SCALE, _snapshot.rate);
         _unclaimedRedeemShares += _snapshot.redeemingShares;
 
         // Commit the epoch rate for the settled epoch
         _epochRate[settlingEpoch] = _snapshot.rate;
         _epochSettled[settlingEpoch] = true;
 
-        // FIXME : verify below formula (should this account for unclaimed redeeming shares?)
-        uint256 totalAssetValue = _snapshot.rate.mulDiv(totalSupply() + _unclaimedDepositShares, 1e18);
+        uint256 totalAssetValue = _snapshot.rate.mulDiv(
+            totalSupply() + _unclaimedDepositShares - _unclaimedRedeemShares, ASSETS_PER_SHARE_SCALE
+        );
         emit EpochSettled(
             settlingEpoch, totalAssetValue, _snapshot.rate, _snapshot.depositingAssets, _snapshot.redeemingShares
         );
@@ -330,20 +334,20 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /**
      * @inheritdoc IERC4626
-     * @dev Uses the last settled epoch rate. Returns 1e18 (1:1) before any epoch has settled.
+     * @dev Uses the last settled epoch rate. Returns ASSETS_PER_SHARE_SCALE (1:1) before any epoch has settled.
      */
     function convertToShares(uint256 assets) public view returns (uint256 shares) {
         uint256 rate = _lastSettledRate();
-        shares = assets.mulDiv(1e18, rate);
+        shares = assets.mulDiv(ASSETS_PER_SHARE_SCALE, rate);
     }
 
     /**
      * @inheritdoc IERC4626
-     * @dev Uses the last settled epoch rate. Returns 1e18 (1:1) before any epoch has settled.
+     * @dev Uses the last settled epoch rate. Returns ASSETS_PER_SHARE_SCALE (1:1) before any epoch has settled.
      */
     function convertToAssets(uint256 shares) public view returns (uint256 assets) {
         uint256 rate = _lastSettledRate();
-        assets = shares.mulDiv(rate, 1e18);
+        assets = shares.mulDiv(rate, ASSETS_PER_SHARE_SCALE);
     }
 
     /// @inheritdoc IERC7540Deposit
@@ -545,7 +549,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /**
      * @dev Returns the exchange rate from the last settled epoch.
-     *      Before any epoch has settled, returns 1e18 (1:1).
+     *      Before any epoch has settled, returns ASSETS_PER_SHARE_SCALE (1:1).
      *      During close/settle window, falls back to the epoch before.
      */
     function _lastSettledRate() internal view returns (uint256 lastSettledRate) {
@@ -558,7 +562,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
             lastSettledRate = _epochRate[currentEpoch - 2];
         } else {
             // Bootstrap: no epochs settled yet
-            lastSettledRate = 1e18;
+            lastSettledRate = ASSETS_PER_SHARE_SCALE;
         }
     }
 
@@ -579,7 +583,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
         // Calculate the shares to be claimed using the epoch's settlement rate
         uint256 epochRate = _epochRate[depositRequestEpoch];
-        uint256 pendingShares = pendingAssets.mulDiv(1e18, epochRate);
+        uint256 pendingShares = pendingAssets.mulDiv(ASSETS_PER_SHARE_SCALE, epochRate);
 
         // Update the controller's claimable and pending amounts
         cs.claimableDepositAssets += pendingAssets;
@@ -604,7 +608,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
         // Calculate the assets to be claimed using the epoch's settlement rate
         uint256 epochRate = _epochRate[redeemRequestEpoch];
-        uint256 pendingAssets = pendingShares.mulDiv(epochRate, 1e18);
+        uint256 pendingAssets = pendingShares.mulDiv(epochRate, ASSETS_PER_SHARE_SCALE);
 
         // Update the controller's claimable and pending amounts
         cs.claimableRedeemShares += pendingShares;
@@ -637,7 +641,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         // Accumulate the converted pending assets if the request epoch has been settled (i.e. they are now claimable)
         if (pending > 0 && isEpochSettled(depositRequestEpoch)) {
             uint256 epochRate = _epochRate[depositRequestEpoch];
-            shares += pending.mulDiv(1e18, epochRate);
+            shares += pending.mulDiv(ASSETS_PER_SHARE_SCALE, epochRate);
         }
     }
 
@@ -666,7 +670,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         // Accumulate the converted pending assets if the request epoch has been settled (i.e. they are now claimable)
         if (pending > 0 && isEpochSettled(redeemRequestEpoch)) {
             uint256 epochRate = _epochRate[redeemRequestEpoch];
-            assets += pending.mulDiv(epochRate, 1e18);
+            assets += pending.mulDiv(epochRate, ASSETS_PER_SHARE_SCALE);
         }
     }
 

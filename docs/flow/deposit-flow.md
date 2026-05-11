@@ -5,7 +5,7 @@
 | Contract | Role |
 |---|---|
 | **StableYieldAsyncVault** | ERC-7540 vault. Accepts deposit requests, custodies pending deposit assets, mints shares at claim time |
-| **FundManager** | Holds unutilized assets (as super-token), reports NAV, drives epoch settlement, operates the GDA pool |
+| **FundManager** | Holds unutilized underlying directly, plus a separate yield-asset (super-token) reserve. Reports NAV, drives epoch settlement, operates the GDA pool |
 | **GDA Pool** | Superfluid pool owned by the FundManager. Streams yield (in super-token) to unit holders |
 | **Fund Operator** | EOA/bot holding `FUND_OPERATOR_ROLE`. Triggers epoch settlement and manages capital in/out of the FundManager |
 
@@ -17,7 +17,8 @@ Note: `DepositWaitingRoom` and `StableYieldReserve` are no longer separate contr
 |---|---|---|
 | ASSETS | Investor wallet | Underlying tokens held by the investor |
 | PENDING DEPOSIT ASSETS | StableYieldAsyncVault | Pending deposits awaiting settlement. Tracked by `totalPendingDepositAssets`. Not part of NAV |
-| UNUTILIZED ASSETS | FundManager (super-token) | Settled assets available to cover redeems or be taken out for investment. Equals `unutilizedAssetsBalance()` |
+| UNUTILIZED ASSETS | FundManager (underlying) | Settled underlying held by the FM, available to cover redeems or be taken out for investment. Equals `unutilizedAssetsBalance()` |
+| YIELD-ASSET RESERVE | FundManager (super-token) | Super-token reserve funding the GDA flow. Equals `yieldAssetsBalance()`; `scaledYieldAssetsBalance()` = same value rescaled to underlying decimals |
 | WORKING ASSETS | External investment | Assets taken out of the FundManager (via `take`) and deployed; reported back to `closeEpoch` as `workingAssets` |
 
 ## Sequence diagram
@@ -41,22 +42,22 @@ sequenceDiagram
     rect rgb(255, 245, 230)
     Note over FO, AV: Phase 2 — closeEpoch (snapshot & lock)
     FO->>FM: (2.1) closeEpoch(workingAssets)
-    FM->>AV: closeEpoch(workingAssets + unutilizedAssetsBalance())
+    FM->>AV: onCloseEpoch(workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance())
     Note right of AV: Snapshot pending flows<br/>Lock epoch rate = totalFundAssets / effectiveSupply<br/>Advance currentEpoch (new requests rejected while snapshot open)
     end
 
     rect rgb(255, 245, 230)
     Note over FO, POOL: Phase 3 — settleEpoch (net flows)
     FO->>FM: (3.1) settleEpoch()
-    FM->>AV: settleEpoch()
+    Note right of FM: canSettleEpoch() precondition check;<br/>reverts SETTLEMENT_PRECONDITIONS_NOT_MET otherwise
+    FM->>AV: onSettleEpoch()
     Note right of AV: Uses locked snapshot
     alt depositing >= redeeming
         AV->>FM: (3.2) transfer surplus = depositing - redeeming
-        Note right of FM: Wrap arriving underlying into super-token
     else depositing < redeeming
-        Note right of AV: No deposit-side asset movement in this branch
+        AV->>FM: ERC-20 transferFrom for deficit (FM granted allowance at deploy)
     end
-    FM->>POOL: (3.3) FM.units += depositingAssets (scaled)<br/>recalibrate flow rate
+    Note right of FM: If snap.depositingAssets > 0:<br/>POOL.increaseMemberUnits(FM, _toUnit(depositingAssets))<br/>_rebalanceYieldAssets() (upgrade if needed)<br/>_recalibrateFlow()
     end
 
     rect rgb(230, 255, 230)
@@ -84,14 +85,19 @@ sequenceDiagram
 
 ```
 (1.1) Investor → Vault: requestDeposit(assets, controller, owner)
-      - Reverts if a settlement is in progress (snapshot.epoch != 0)
-      - Reverts if assets == 0
-      - msg.sender must be owner or an approved operator of owner
-      - Lazy-settles any prior pending deposit this controller has from a settled epoch
+      Reverts (in order):
+      - INVALID_PARAMETERS  if assets == 0
+      - INVALID_CALLER      if owner != msg.sender and msg.sender is not an
+                            approved operator of owner
+      - EPOCH_SETTLEMENT_IN_PROGRESS  if a settlement is in progress
+                                      (i.e. _snapshot.epoch != 0)
+      Then:
+      - Lazy-settles any prior pending deposit this controller has from a
+        settled epoch (_settleDepositIfNeeded)
       - Transfers `assets` from owner → vault (vault custodies directly)
       - totalPendingDepositAssets += assets
-      - _pendingDepositRequest[controller] += assets
-      - _depositRequestEpoch[controller] = currentEpoch
+      - _controllerStates[controller].pendingDepositAssets += assets
+      - _controllerStates[controller].depositRequestEpoch = currentEpoch
       - Emits DepositRequest; returns requestId = 0
 ```
 
@@ -103,21 +109,29 @@ commences at claim time, not at request time.
 ```
 (2.1) Operator → FundManager: closeEpoch(workingAssets)
       - Only callable by an account with FUND_OPERATOR_ROLE
-      - FM computes totalFundAssets = workingAssets + unutilizedAssetsBalance()
-      - FM calls Vault.closeEpoch(totalFundAssets)
-      - Vault reverts if totalFundAssets == 0 (total-loss scenarios rejected)
-      - Vault reverts if the previous snapshot has not been settled
+      - FM computes
+            totalAssets = workingAssets
+                        + unutilizedAssetsBalance()
+                        + scaledYieldAssetsBalance()
+        (the yield-asset reserve is included in NAV alongside the
+         working underlying and the unutilized underlying)
+      - FM calls Vault.onCloseEpoch(totalAssets)  (onlyFundManager)
+      - Vault reverts with PREVIOUS_EPOCH_NOT_SETTLED if a snapshot is still open
       - Vault computes effectiveSupply
             = totalSupply + _unclaimedDepositShares - _unclaimedRedeemShares
         (phantom shares for settled-but-unclaimed deposits are added;
          dead shares still in totalSupply for settled-but-unclaimed redeems
          are subtracted)
       - Vault locks epoch rate
-            = effectiveSupply == 0 ? 1e18 : totalFundAssets * 1e18 / effectiveSupply
+            = effectiveSupply == 0
+                ? ASSETS_PER_SHARE_SCALE
+                : totalAssets * ASSETS_PER_SHARE_SCALE / effectiveSupply
       - Vault snapshots
             { epoch, depositingAssets, redeemingShares, rate }
       - Vault zeroes totalPendingDepositAssets and totalPendingRedeemShares
       - Vault increments currentEpoch (new requests land in the next epoch)
+      - Vault stores _lastReportedTotalAssets = totalAssets (used by ERC-4626
+        totalAssets() view; point-in-time-stale by design)
       - While a snapshot is open, requestDeposit / requestRedeem revert
         with EPOCH_SETTLEMENT_IN_PROGRESS
 ```
@@ -126,36 +140,56 @@ commences at claim time, not at request time.
 
 ```
 (3.1) Operator → FundManager: settleEpoch()
-      - Only callable by an account with FUND_OPERATOR_ROLE
-      - FM reads the snapshot from the vault (must be read before the vault
-        deletes it inside settleEpoch)
-      - FM snapshots its underlying balance, then calls Vault.settleEpoch()
+      - Only callable by an account with FUND_OPERATOR_ROLE; nonReentrant
+      - FM calls canSettleEpoch() and reverts with
+        SETTLEMENT_PRECONDITIONS_NOT_MET(reason) if any of:
+          (a) snap.epoch == 0 (closeEpoch not called)
+          (b) FM cannot cover the post-settlement state, i.e.
+              scaledYieldAssetsBalance() + unutilizedAssetsBalance()
+              + snap.depositingAssets
+                <  redeemingAssets + requiredScaledYieldAssetsBalance
+              where requiredScaledYieldAssetsBalance is the super-token
+              needed to sustain the new flow rate over guaranteedFlowDuration.
+      - canSettleEpoch returns the snapshot, which FM keeps in memory
+        (the vault deletes it inside onSettleEpoch).
+      - FM calls Vault.onSettleEpoch()  (onlyFundManager)
 
-      Inside Vault.settleEpoch():
-        - redeemingAssets = snap.redeemingShares * snap.rate / 1e18
-        - totalClaimableRedeemAssets += redeemingAssets   (earmark in vault)
+      Inside Vault.onSettleEpoch():
+        - redeemingAssets = snap.redeemingShares * snap.rate / ASSETS_PER_SHARE_SCALE
+        - totalClaimableRedeemAssets += redeemingAssets   (vault-side earmark)
         - If depositing >= redeeming:
             surplus = depositing - redeeming
             vault.safeTransfer(fundManager, surplus)       (3.2)
           Else:
             deficit = redeeming - depositing
-            fundManager.move(vault, deficit)
-              → FM downgrades super-token and transfers underlying to vault
-        - _unclaimedDepositShares += depositing / rate
+            underlyingAsset.safeTransferFrom(fundManager, vault, deficit)
+              → ERC-20 pull from FM's underlying balance using the
+                unlimited allowance the FM granted to the vault at deploy.
+                No super-token downgrade happens in this path.
+        - _unclaimedDepositShares += depositing * ASSETS_PER_SHARE_SCALE / rate
         - _unclaimedRedeemShares  += redeemingShares
         - _epochRate[settlingEpoch] = rate
         - _epochSettled[settlingEpoch] = true
-        - Emit EpochSettled; clear snapshot
+        - Emit EpochSettled; delete snapshot
 
       Back in FM.settleEpoch():
-        - Any underlying that arrived (net-inflow surplus) is upgraded
-          to super-token
         - If snap.depositingAssets > 0:                     (3.3)
-            FM grants itself pool units equal to
-              depositingAssets * SUPER_TOKEN_SCALE
-            Then _recalibrateFlow(): flowRate = totalUnits * annualRate / YEAR
-        - _assertInvariant(): superToken.availableBalance must cover
-            totalFlowRate * guaranteedFlowDuration
+            POOL.increaseMemberUnits(
+                FM, _toUnit(snap.depositingAssets))
+              where _toUnit(amount) = amount / RAW_PER_UNIT.
+              RAW_PER_UNIT = 10 ** (underlyingDecimals - 6), so one whole
+              underlying token maps to 1e6 pool units.
+            _rebalanceYieldAssets():
+              if yield-asset reserve falls short of
+                _flowRatePerUnit * totalUnits * guaranteedFlowDuration,
+                FM upgrades unutilized underlying into super-token;
+                if it has excess, FM downgrades back into underlying.
+            _recalibrateFlow():
+              flowRate = _flowRatePerUnit * POOL.totalUnits
+              with _flowRatePerUnit = 1e12 * stableYieldRate
+                                      / (YEAR * BP_DENOMINATOR)
+        - If snap.depositingAssets == 0, none of the unit / flow / rebalance
+          steps run; the FM emerges unchanged on the streaming side.
 ```
 
 The freshly-minted units belong to FM until individual depositors claim. FM
@@ -170,13 +204,15 @@ The freshly-minted units belong to FM until individual depositors claim. FM
       - msg.sender must be controller or an approved operator
       - Lazy-settles pending → claimable at the settled epoch's rate
       - Reverts with NOTHING_TO_CLAIM if nothing is claimable
-      - Proportional deduction from _claimableDepositAssets / _claimableDepositShares
+      - Proportional deduction from claimableDepositAssets / claimableDepositShares
       - Vault mints shares to receiver (no asset movement — assets were
         pushed to FM during settlement, or kept to cover redeems)
 
 (4.2) Vault → FundManager: onClaimDeposit(receiver, assets)
-      - FM transfers `assets * SUPER_TOKEN_SCALE` units from its own
-        pool slot to `receiver` (no flow-rate change, no totalUnits change)
+      - FM transfers `_toUnit(assets)` units from its own pool slot to
+        `receiver` via increaseMemberUnits(receiver) then
+        decreaseMemberUnits(FM)
+        (no flow-rate change, no totalUnits change)
       - Investor now receives the yield stream in the underlying's super-token
 ```
 
@@ -184,19 +220,28 @@ The freshly-minted units belong to FM until individual depositors claim. FM
 
 ```
 FO → FM: take(amount)
-      - Downgrades super-token → underlying, transfers to operator
-      - Asserts the forward-solvency invariant post-move
+      - safeTransfer of underlying directly from FM to operator.
+        No super-token downgrade. No solvency check enforced inside `take`
+        (settlement-time checks happen in canSettleEpoch). Operators must
+        therefore not drain FM below what is needed to cover the next
+        epoch's redeem deficit and the yield-asset reserve.
       - Used to deploy assets into external / offchain investments
-         (these become WORKING assets; their value is reported back via
-          workingAssets on the next closeEpoch)
+        (these become WORKING assets; their value is reported back via
+         `workingAssets` on the next closeEpoch)
 
 FO → FM: give(amount)
-      - Pulls underlying from operator, upgrades to super-token
-      - Used to return realized gains / liquidated principal to the FM
+      - safeTransferFrom of underlying from operator to FM.
+        No upgrade to super-token at this step (any rebalance into the
+        yield-asset reserve happens later via _rebalanceYieldAssets,
+        e.g. inside settleEpoch, setStableYieldRate, or
+        ensureYieldFlowDuration).
+      - Used to return realized gains / liquidated principal to the FM.
 ```
 
 `take` / `give` are not gated by the settlement lifecycle — the operator can
-move capital in/out at any time, provided the forward-solvency invariant holds.
+move capital in/out at any time. Because they perform no invariant check,
+the operator must coordinate them with `canSettleEpoch` / `evaluateFunding`
+view calls before each settlement.
 
 ## ERC-7540 compliance
 
@@ -219,8 +264,8 @@ move capital in/out at any time, provided the forward-solvency invariant holds.
    balance; the two counters keep them separable.
 
 2. **Pending deposit assets are not counted in NAV.** `closeEpoch` prices the
-   epoch using `totalFundAssets` (working + unutilized at the FM) and
-   `effectiveSupply`, both of which exclude pending deposits.
+   epoch using `workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance()`
+   and `effectiveSupply`, all of which exclude pending deposits.
 
 3. **effectiveSupply correction.** `effectiveSupply = totalSupply +
    unclaimedDepositShares − unclaimedRedeemShares`. This corrects for the lag
@@ -237,4 +282,12 @@ move capital in/out at any time, provided the forward-solvency invariant holds.
 7. **Settlement serialized.** Between `closeEpoch` and `settleEpoch`, new
    `requestDeposit` / `requestRedeem` calls revert with
    `EPOCH_SETTLEMENT_IN_PROGRESS`. A previous epoch must be settled before a
-   new one can close.
+   new one can close (`PREVIOUS_EPOCH_NOT_SETTLED`).
+
+8. **Settlement preconditions.** `settleEpoch` reverts up-front via
+   `canSettleEpoch` if the FM cannot cover both the net redeem deficit and
+   the post-settlement yield-asset reserve (`requiredScaledYieldAssetsBalance =
+   expectedNewFlowRate * guaranteedFlowDuration / SCALING_FACTOR`, where
+   `expectedNewFlowRate = _flowRatePerUnit * newTotalUnits` and
+   `newTotalUnits = POOL.totalUnits + _toUnit(snap.depositingAssets)`).
+   No partial settlement is possible.

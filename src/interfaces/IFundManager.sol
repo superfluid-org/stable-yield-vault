@@ -49,11 +49,6 @@ interface IFundManager {
     // /_____/_/  /_/   \____/_/  /____/
 
     /**
-     * @notice Thrown when an operation would leave the stream-solvency invariant violated.
-     */
-    error INVARIANT_VIOLATED();
-
-    /**
      * @notice Thrown when the vault's redeem hook is called with incoherent share arguments.
      */
     error BAD_REDEEM_ARGS();
@@ -68,9 +63,21 @@ interface IFundManager {
      */
     error SETTLEMENT_PRECONDITIONS_NOT_MET(string reason);
 
+    /**
+     * @notice Thrown when constructing the FundManager with a SuperToken contract not wrapping the vault underlying
+     * asset
+     */
     error ASSET_MISMATCH();
 
+    /**
+     * @notice Thrown when there aren't enough unutilized assets to rebalance into yield assets
+     */
     error INSUFFICIENT_UNUTILIZED_ASSETS();
+
+    /**
+     * @notice Thrown at construction when the underlying asset's decimals are outside the supported range [6, 18].
+     */
+    error UNSUPPORTED_DECIMALS();
 
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
@@ -107,7 +114,9 @@ interface IFundManager {
     /**
      * @notice Deposit underlying assets into the FundManager.
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Pulls underlying from the caller into the FundManager.
+     *      Pulls underlying from the caller into the FundManager. This function is not gated by the
+     *      epoch settlement lifecycle and does not itself rebalance the yield-asset reserve; operators
+     *      should coordinate calls with `evaluateFunding`, `canSettleEpoch`, or `ensureYieldFlowDuration`.
      * @param amount The amount of underlying asset to give.
      */
     function give(uint256 amount) external;
@@ -115,7 +124,10 @@ interface IFundManager {
     /**
      * @notice Withdraw underlying assets from the FundManager.
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Transfers underlying from the FundManager to the caller.
+     *      Transfers underlying from the FundManager to the caller. This function is not gated by the
+     *      epoch settlement lifecycle and performs no solvency check against pending redeems or the
+     *      yield-asset reserve; operators must coordinate calls with `evaluateFunding` and
+     *      `canSettleEpoch` before settlement.
      * @param amount The amount of underlying asset to take.
      */
     function take(uint256 amount) external;
@@ -123,8 +135,7 @@ interface IFundManager {
     /**
      * @notice Set the target annualized era stable yield rate
      * @dev Only callable by accounts holding FUND_OPERATOR_ROLE.
-     *      Recalibrates the distribution flow; reverts with INVARIANT_VIOLATED if the new rate would break
-     *      the stream-solvency invariant.
+     *      Rebalance the yield assets (subject to unutilized asset balance) and recalibrates the distribution flow;
      * @param newRate The new annualized stable yield rate, expressed in basis points (e.g. 100 <=> 1%)
      */
     function setStableYieldRate(uint256 newRate) external;
@@ -132,8 +143,7 @@ interface IFundManager {
     /**
      * @notice Set the minimum forward stream-solvency horizon the FundManager must maintain.
      * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
-     *      Reverts with DURATION_BELOW_FLOOR if `newDuration` is below MIN_GUARANTEED_FLOW_DURATION,
-     *      or with INVARIANT_VIOLATED if the post-operation state would break the invariant.
+     *      Reverts with DURATION_BELOW_FLOOR if `newDuration` is below MIN_GUARANTEED_FLOW_DURATION
      * @param newDuration The new guaranteed flow duration, in seconds.
      */
     function setGuaranteedFlowDuration(uint256 newDuration) external;

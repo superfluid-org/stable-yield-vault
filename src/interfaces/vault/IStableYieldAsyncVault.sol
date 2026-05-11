@@ -57,7 +57,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      * @param epoch The epoch number captured at closeEpoch
      * @param depositingAssets Total assets pending deposit at the time of close
      * @param redeemingShares Total shares pending redemption at the time of close
-     * @param rate Locked exchange rate for the epoch (assetsPerShare, scaled by 1e18)
+     * @param rate Locked exchange rate for the epoch (assetsPerShare, scaled by ASSETS_PER_SHARE_SCALE)
      */
     struct Snapshot {
         uint256 epoch;
@@ -141,7 +141,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      * @notice Emitted when the operator settles an epoch.
      * @param epoch The epoch number that was settled
      * @param totalAssets The NAV reported by the operator
-     * @param assetsPerShare The computed exchange rate (scaled by 1e18)
+     * @param assetsPerShare The computed exchange rate (scaled by ASSETS_PER_SHARE_SCALE)
      * @param totalDepositAssets Total assets deposited in this epoch
      * @param totalRedeemShares Total shares redeemed in this epoch
      */

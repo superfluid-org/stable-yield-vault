@@ -42,9 +42,6 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     // /// @notice Basis Point denominator for annualized stable yield rate calculations (e.g. 10_000 = 100%)
     uint256 private constant _BP_DENOMINATOR = 10_000;
 
-    // Every 1 USDC deposited gives 1e6 units to the depositor
-    uint256 public constant UNIT_PER_ASSET_DEPOSITED = 1;
-
     /// @notice Sanity floor for `guaranteedFlowDuration` to prevent operator-error zeroing-out the buffer
     uint256 public constant MIN_GUARANTEED_FLOW_DURATION = 1 days;
 
@@ -63,6 +60,15 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     /// @notice Scale factor lifting underlying amounts into super-token (18-dec) amounts.
     ///         = 10 ** (18 - underlyingDecimals). For USDC (6-dec) == 10**12.
     uint256 public immutable SCALING_FACTOR;
+
+    /// @notice Raw underlying atoms per pool unit. = 10 ** (underlyingDecimals - 6).
+    ///         Pool units are denominated in micro-tokens regardless of underlying decimals,
+    ///         so 1 whole token always corresponds to 1e6 pool units.
+    ///         For USDC (6-dec) == 1; for DAI (18-dec) == 1e12.
+    uint256 public immutable RAW_PER_UNIT;
+
+    /// @notice The asset per share exchange rate scale
+    uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
 
     //     _____ __        __
     //    / ___// /_____ _/ /____  _____
@@ -111,18 +117,22 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         if (ISuperToken(_yieldAsset).getUnderlyingToken() != _asset) revert ASSET_MISMATCH();
         YIELD_ASSET = ISuperToken(_yieldAsset);
 
-        // Calculate scaling factor
+        // Calculate scaling factors. Underlying decimals must be in [6, 18]:
+        //   - upper bound: 18-dec super-token cannot represent fractional sub-atoms.
+        //   - lower bound: keeping the units conversion as a divisor (raw → units) requires d ≥ 6.
         uint8 underlyingDecimals = ISuperToken(_yieldAsset).getUnderlyingDecimals();
+        if (underlyingDecimals < 6 || underlyingDecimals > 18) revert UNSUPPORTED_DECIMALS();
         SCALING_FACTOR = 10 ** (18 - underlyingDecimals);
+        RAW_PER_UNIT = 10 ** (underlyingDecimals - 6);
 
         // Grant access control permissions
         _grantRole(FUND_OPERATOR_ROLE, _fundOperator);
         _grantRole(DEFAULT_ADMIN_ROLE, _fundAdmin);
         _grantRole(VAULT_ROLE, msg.sender);
 
-        // Pool Configuration : units are non-transferable; any-sender distribution allowed
+        // Pool Configuration : units are non-transferable; any-sender distribution not allowed
         PoolConfig memory poolConfig =
-            PoolConfig({ transferabilityForUnitsOwner: false, distributionFromAnyAddress: true });
+            PoolConfig({ transferabilityForUnitsOwner: false, distributionFromAnyAddress: false });
 
         // Create the pool with FM as pool admin
         POOL = YIELD_ASSET.createPool(address(this), poolConfig);
@@ -132,8 +142,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
         stableYieldRate = _initialStableYieldRate;
 
-        /// FIXME : this formula needs to be generalized (eg. for regular 1e18 underlying decimals assets)
-        _flowRatePerUnit = int96(int256(SCALING_FACTOR * _initialStableYieldRate / (YEAR * _BP_DENOMINATOR)));
+        // Decimals-independent: SCALING_FACTOR · RAW_PER_UNIT = 10^(18-d) · 10^(d-6) = 10^12.
+        _flowRatePerUnit = int96(int256(1e12 * _initialStableYieldRate / (YEAR * _BP_DENOMINATOR)));
 
         if (_initialGuaranteedFlowDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
         guaranteedFlowDuration = _initialGuaranteedFlowDuration;
@@ -162,7 +172,7 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
         // Grant FM units for this epoch's depositors
         if (snap.depositingAssets > 0) {
-            POOL.increaseMemberUnits(address(this), uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED));
+            POOL.increaseMemberUnits(address(this), _toUnit(snap.depositingAssets));
 
             _rebalanceYieldAssets();
             _recalibrateFlow();
@@ -200,9 +210,9 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
         uint256 oldRate = stableYieldRate;
         stableYieldRate = newRate;
 
-        // Recalculate flow rate based on the new annualized era stable yield rate
-        /// FIXME : this formula needs to be generalized (eg. for regular 1e18 underlying decimals assets)
-        _flowRatePerUnit = int96(int256(SCALING_FACTOR * newRate / (YEAR * _BP_DENOMINATOR)));
+        // Recalculate flow rate based on the new annualized era stable yield rate.
+        // Decimals-independent: SCALING_FACTOR · RAW_PER_UNIT = 10^12.
+        _flowRatePerUnit = int96(int256(1e12 * newRate / (YEAR * _BP_DENOMINATOR)));
 
         _rebalanceYieldAssets();
         _recalibrateFlow();
@@ -234,11 +244,11 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     /// @inheritdoc IFundManager
     function onClaimDeposit(address shareholder, uint256 depositAssets) external onlyRole(VAULT_ROLE) {
-        // Transfer the units associated to the claimed deposit from FM to the shareholder
-        POOL.decreaseMemberUnits(address(this), uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
-        POOL.increaseMemberUnits(shareholder, uint128(depositAssets * UNIT_PER_ASSET_DEPOSITED));
+        uint128 units = _toUnit(depositAssets);
 
-        // pool.totalUnits unchanged -> flowRate unchanged -> invariant unchanged
+        // Transfer the units associated to the claimed deposit from FM to the shareholder
+        POOL.increaseMemberUnits(shareholder, units);
+        POOL.decreaseMemberUnits(address(this), units);
     }
 
     /// @inheritdoc IFundManager
@@ -288,10 +298,10 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
     function evaluateFunding() external view returns (int256 funding) {
         IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
 
-        uint128 newTotalUnits = POOL.getTotalUnits() + uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
+        uint128 newTotalUnits = POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
         int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         uint256 requiredYieldAssetsBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
-        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
 
         // Evaluate pre-settlement yield asset deficit
         int256 yieldAssetDeficit = int256(requiredYieldAssetsBalance) - int256(yieldAssetsBalance());
@@ -335,9 +345,8 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
             reason = "CURRENT_EPOCH_NOT_CLOSED";
         }
 
-        /// FIXME 1e18 here might be a footgun
-        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, 1e18);
-        uint128 newTotalUnits = POOL.getTotalUnits() + uint128(snap.depositingAssets * UNIT_PER_ASSET_DEPOSITED);
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
+        uint128 newTotalUnits = POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
         int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         uint256 requiredScaledYieldAssetsBalance =
             uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration / SCALING_FACTOR;
@@ -391,6 +400,10 @@ contract FundManager is IFundManager, AccessControl, ReentrancyGuard {
 
     function _targetFlowRate() internal view returns (int96 flowRate) {
         flowRate = _flowRatePerUnit * int96(int128(POOL.getTotalUnits()));
+    }
+
+    function _toUnit(uint256 underlyingAmount) internal view returns (uint128 units) {
+        units = uint128(underlyingAmount / RAW_PER_UNIT);
     }
 
 }

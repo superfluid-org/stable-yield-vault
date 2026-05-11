@@ -16,6 +16,35 @@ optimizer = true
 optimizer_runs = 200
 ignored_warnings_from = ["lib/"]
 
+# Echidna needs library addresses pinned at compile time; forge-test does not.
+# Activate with: FOUNDRY_PROFILE=echidna ...
+[profile.echidna]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.34"
+optimizer = true
+optimizer_runs = 200
+ignored_warnings_from = ["lib/"]
+libraries = [
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/libs/SlotsBitmapLibrary.sol:SlotsBitmapLibrary:0x0000000000000000000000000000000000000A01",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/agreements/gdav1/SuperfluidPoolDeployerLibrary.sol:SuperfluidPoolDeployerLibrary:0x0000000000000000000000000000000000000A02",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidGovDeployerLibrary:0x0000000000000000000000000000000000000A03",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidHostDeployerLibrary:0x0000000000000000000000000000000000000A04",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidCFAv1DeployerLibrary:0x0000000000000000000000000000000000000A05",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidIDAv1DeployerLibrary:0x0000000000000000000000000000000000000A06",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidPoolLogicDeployerLibrary:0x0000000000000000000000000000000000000A07",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidGDAv1DeployerLibrary:0x0000000000000000000000000000000000000A08",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:CFAv1ForwarderDeployerLibrary:0x0000000000000000000000000000000000000A09",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:GDAv1ForwarderDeployerLibrary:0x0000000000000000000000000000000000000A0a",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperTokenDeployerLibrary:0x0000000000000000000000000000000000000A0b",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidPoolNFTLogicDeployerLibrary:0x0000000000000000000000000000000000000A0c",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:ProxyDeployerLibrary:0x0000000000000000000000000000000000000A0d",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:TokenDeployerLibrary:0x0000000000000000000000000000000000000A0e",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperTokenFactoryDeployerLibrary:0x0000000000000000000000000000000000000A0f",
+    "lib/superfluid-protocol-monorepo/packages/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol:SuperfluidPeripheryDeployerLibrary:0x0000000000000000000000000000000000000A10"
+]
+
 [fmt]
 bracket_spacing = true
 sort_imports = true
