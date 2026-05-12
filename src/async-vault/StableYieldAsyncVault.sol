@@ -300,22 +300,6 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         success = true;
     }
 
-    // /**
-    //  * @inheritdoc IERC20
-    //  * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
-    //  */
-    // function transfer(address, uint256) public pure override(ERC20, IERC20) returns (bool) {
-    //     revert SHARES_NON_TRANSFERABLE();
-    // }
-
-    // /**
-    //  * @inheritdoc IERC20
-    //  * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
-    //  */
-    // function transferFrom(address, address, uint256) public pure override(ERC20, IERC20) returns (bool) {
-    //     revert SHARES_NON_TRANSFERABLE();
-    // }
-
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
     //  | | / / / _ \ | /| / /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
