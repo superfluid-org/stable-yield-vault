@@ -128,11 +128,6 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      */
     error NOTHING_TO_CLAIM();
 
-    /**
-     * @notice Thrown when share transfers are attempted. Shares are non-transferable by design (D6).
-     */
-    error SHARES_NON_TRANSFERABLE();
-
     // ──────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────

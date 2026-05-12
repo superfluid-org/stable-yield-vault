@@ -273,6 +273,17 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         // pool.totalUnits decreases -> flowRate decreases; invariant trivially safe
     }
 
+    /// @inheritdoc IAsyncFundManager
+    function onShareTransfer(address sender, address receiver, uint256 shares) external onlyRole(VAULT_ROLE) {
+        uint128 senderUnits = POOL.getUnits(sender);
+        if (senderUnits == 0) revert BAD_SHARE_TRANSFER();
+
+        uint128 delta = uint128(uint256(senderUnits).mulDiv(shares, VAULT.balanceOf(sender), Math.Rounding.Ceil));
+
+        POOL.increaseMemberUnits(receiver, delta);
+        POOL.decreaseMemberUnits(sender, delta);
+    }
+
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
     //  | | / / / _ \ | /| / /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/

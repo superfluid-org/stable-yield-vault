@@ -300,21 +300,21 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         success = true;
     }
 
-    /**
-     * @inheritdoc IERC20
-     * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
-     */
-    function transfer(address, uint256) public pure override(ERC20, IERC20) returns (bool) {
-        revert SHARES_NON_TRANSFERABLE();
-    }
+    // /**
+    //  * @inheritdoc IERC20
+    //  * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
+    //  */
+    // function transfer(address, uint256) public pure override(ERC20, IERC20) returns (bool) {
+    //     revert SHARES_NON_TRANSFERABLE();
+    // }
 
-    /**
-     * @inheritdoc IERC20
-     * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
-     */
-    function transferFrom(address, address, uint256) public pure override(ERC20, IERC20) returns (bool) {
-        revert SHARES_NON_TRANSFERABLE();
-    }
+    // /**
+    //  * @inheritdoc IERC20
+    //  * @dev Overrides the ERC20 implementation to disable share transfers, making shares non-transferable by design.
+    //  */
+    // function transferFrom(address, address, uint256) public pure override(ERC20, IERC20) returns (bool) {
+    //     revert SHARES_NON_TRANSFERABLE();
+    // }
 
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
@@ -460,6 +460,15 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     //     / // __ \/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
     //   _/ // / / / /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  /___/_/ /_/\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
+
+    /// @dev Overrides ERC20 _update function to hook into share transfers and notify the FundManager
+    function _update(address from, address to, uint256 value) internal override {
+        // Only notify FM on transfers between shareholder (not on mint/burn or redeem request/deposit claim)
+        if (from != address(0) && to != address(0) && from != address(this) && to != address(this)) {
+            FUND_MANAGER.onShareTransfer(from, to, value);
+        }
+        super._update(from, to, value);
+    }
 
     function _deposit(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();

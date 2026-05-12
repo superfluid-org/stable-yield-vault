@@ -54,6 +54,11 @@ interface IAsyncFundManager {
     error BAD_REDEEM_ARGS();
 
     /**
+     * @notice Thrown when the vault's share transfer hook is called with incoherent share arguments.
+     */
+    error BAD_SHARE_TRANSFER();
+
+    /**
      * @notice Thrown when a duration is set below MIN_GUARANTEED_FLOW_DURATION.
      */
     error DURATION_BELOW_FLOOR();
@@ -174,6 +179,17 @@ interface IAsyncFundManager {
      * @param totalSharesOwned The controller's total share balance before the redeem lock.
      */
     function onRequestRedeem(address controller, uint256 sharesRedeemed, uint256 totalSharesOwned) external;
+
+    /**
+     * @notice Hook invoked by the vault when a share holder transfers their shares.
+     * @dev Only callable by accounts holding VAULT_ROLE.
+     *      Decrements the sender's pool units proportionally to the amount of shares they transfer
+     *      and increments the receiver's pool units by the same amount.
+     * @param sender The address of the share sender.
+     * @param receiver The address of the share receiver.
+     * @param shares The amount of shares being transferred.
+     */
+    function onShareTransfer(address sender, address receiver, uint256 shares) external;
 
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
