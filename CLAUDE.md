@@ -47,7 +47,7 @@ A request → settle → claim cycle, gated by an operator:
 ### ERC-7540 specifics
 
 - `previewDeposit/Mint/Redeem/Withdraw` revert (required for fully async vaults).
-- Shares are **non-transferable** — `transfer`/`transferFrom` revert with `SHARES_NON_TRANSFERABLE`.
+- Shares are transferable. The vault's `_update` hook calls `FundManager.onShareTransfer(from, to, value)` on shareholder-to-shareholder transfers (skipping mint/burn and vault-custody legs), and FM moves a proportional slice of GDA pool units from sender to receiver so the yield stream follows the shares.
 - `convertToShares` / `convertToAssets` use the *last settled* epoch rate, falling back to 1e18 before the first settlement.
 
 ### Roles

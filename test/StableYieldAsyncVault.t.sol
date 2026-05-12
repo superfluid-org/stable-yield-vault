@@ -730,14 +730,55 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         vm.assertFalse(_vault.isOperator(ALICE, operator));
     }
 
-    function test_transfer_reverts() public {
-        vm.expectRevert(IStableYieldAsyncVault.SHARES_NON_TRANSFERABLE.selector);
-        _vault.transfer(BOB, 1);
+    function test_transfer_full(uint256 depositAmount, address receiver) public {
+        depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
+        vm.assume(receiver != address(0) && receiver != ALICE && receiver != address(_vault));
+
+        _completeDepositFlow(ALICE, depositAmount);
+        uint256 aliceSharesBefore = _vault.balanceOf(ALICE);
+        uint128 aliceUnitsBefore = _fundManager.POOL().getUnits(ALICE);
+        uint256 receiverSharesBefore = _vault.balanceOf(receiver);
+        uint128 receiverUnitsBefore = _fundManager.POOL().getUnits(receiver);
+
+        vm.prank(ALICE);
+        _vault.transfer(receiver, aliceSharesBefore);
+
+        vm.assertEq(_vault.balanceOf(ALICE), 0, "shares not transferred");
+        vm.assertEq(_vault.balanceOf(receiver), aliceSharesBefore + receiverSharesBefore, "shares not received");
+        vm.assertEq(_fundManager.POOL().getUnits(ALICE), 0, "units not transferred");
+        vm.assertEq(
+            _fundManager.POOL().getUnits(receiver), aliceUnitsBefore + receiverUnitsBefore, "units not transferred"
+        );
     }
 
-    function test_transferFrom_reverts() public {
-        vm.expectRevert(IStableYieldAsyncVault.SHARES_NON_TRANSFERABLE.selector);
-        _vault.transferFrom(ALICE, BOB, 1);
+    function test_transfer_partial(uint256 depositAmount, uint256 proportion, address receiver) public {
+        depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
+        proportion = bound(proportion, 100, 9900); // ranges from 1% to 99%
+        vm.assume(receiver != address(0) && receiver != ALICE && receiver != address(_vault));
+
+        _completeDepositFlow(ALICE, depositAmount);
+
+        uint256 aliceSharesBefore = _vault.balanceOf(ALICE);
+        uint128 aliceUnitsBefore = _fundManager.POOL().getUnits(ALICE);
+        uint256 receiverSharesBefore = _vault.balanceOf(receiver);
+        uint128 receiverUnitsBefore = _fundManager.POOL().getUnits(receiver);
+
+        uint256 sharesToTransfer = aliceSharesBefore.mulDiv(proportion, 10_000);
+        uint128 expectedUnitsToTransfer = aliceUnitsBefore * uint128(proportion) / 10_000;
+
+        vm.prank(ALICE);
+        _vault.transfer(receiver, sharesToTransfer);
+
+        vm.assertEq(_vault.balanceOf(ALICE), aliceSharesBefore - sharesToTransfer, "shares not transferred");
+        vm.assertEq(_vault.balanceOf(receiver), receiverSharesBefore + sharesToTransfer, "shares not received");
+        vm.assertEq(
+            _fundManager.POOL().getUnits(ALICE), aliceUnitsBefore - expectedUnitsToTransfer, "units not transferred"
+        );
+        vm.assertEq(
+            _fundManager.POOL().getUnits(receiver),
+            receiverUnitsBefore + expectedUnitsToTransfer,
+            "units not transferred"
+        );
     }
 
     function test_previewDeposit_reverts() public {
