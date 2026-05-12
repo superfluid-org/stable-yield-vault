@@ -253,8 +253,11 @@ view calls before each settlement.
 - `claimableDepositRequest` returns claimable assets, including pending that
   has become claimable by virtue of the epoch having been settled.
 - `previewDeposit` / `previewMint` revert — required for async vaults.
-- Shares are ERC-20 but non-transferable: `transfer` / `transferFrom` revert
-  with `SHARES_NON_TRANSFERABLE`.
+- Shares are transferable ERC-20. The vault's `_update` hook calls
+  `FundManager.onShareTransfer(from, to, value)` on shareholder-to-shareholder
+  transfers (skipping mint/burn and vault-custody legs), and FM moves a
+  proportional slice of GDA pool units from sender to receiver so the yield
+  stream follows the shares.
 
 ## Key invariants
 

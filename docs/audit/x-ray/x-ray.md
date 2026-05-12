@@ -13,7 +13,7 @@ Analyzed branch: `feat/test-coverage` at `ba1cc7e`.
 - **Users**: Investors (deposit underlying, claim shares, claim redeems); Fund Operator (runs epoch lifecycle and manages capital); Fund Admin (sets the forward-solvency horizon).
 - **Core flow**: `requestDeposit` → operator `closeEpoch` → operator `settleEpoch` → investor `deposit/mint` claim → yield stream begins.
 - **Key mechanism**: Epoch-based forward pricing — assets per share is locked at `closeEpoch` from a NAV reported by the operator, then applied at claim time. Yield is paid as a Superfluid GDA stream funded by a SuperToken reserve.
-- **Token model**: Underlying ERC-20 (e.g. USDC) → wrapped SuperToken (e.g. USDCx) → distributed via GDA pool to shareholders. Vault shares are non-transferable ERC-20.
+- **Token model**: Underlying ERC-20 (e.g. USDC) → wrapped SuperToken (e.g. USDCx) → distributed via GDA pool to shareholders. Vault shares are transferable ERC-20; a transfer drags the proportional GDA pool units along via the `FundManager.onShareTransfer` hook.
 - **Admin model**: Two operational roles in `FundManager` (`FUND_OPERATOR_ROLE`, `DEFAULT_ADMIN_ROLE`) plus an internal `VAULT_ROLE` granted only to the paired vault. No timelock, no multisig, no pause.
 
 For a visual overview of the protocol's architecture, see the [architecture diagram](architecture.svg).
@@ -27,7 +27,7 @@ For a visual overview of the protocol's architecture, see the [architecture diag
 
 ### How It Fits Together
 
-The core trick: the vault never sees the yield. Investors hold non-transferable shares whose NAV is settled epoch-by-epoch, and the actual payout is a Superfluid stream from the FundManager's SuperToken reserve to investor pool units — the two flows are accounted independently.
+The core trick: the vault never sees the yield. Investors hold transferable shares whose NAV is settled epoch-by-epoch, and the actual payout is a Superfluid stream from the FundManager's SuperToken reserve to investor pool units — the two flows are accounted independently. Share transfers are forwarded to `FundManager.onShareTransfer`, which moves a proportional slice of GDA pool units from sender to receiver so the yield stream tracks share ownership.
 
 #### Deposit (request → close → settle → claim)
 
@@ -190,7 +190,7 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 - **Underlying blocklist**: USDC blocklist of vault, FM, or any holder of pool units would freeze claim and stream paths respectively.
 
 **Shared State Exposure:**
-- The GDA pool is exposed to any other contract that reads pool state via Superfluid framework helpers, but member units are non-transferable so cross-protocol arbitrage on units is disabled by design.
+- The GDA pool is exposed to any other contract that reads pool state via Superfluid framework helpers. Pool units are not transferable through Superfluid APIs (config: `transferabilityForUnitsOwner = false`), but they do follow share ownership: the vault's `_update` → `FundManager.onShareTransfer` path moves a proportional slice of units between sender and receiver on every share transfer. Direct unit arbitrage is disabled; share-transfer-mediated unit movement is not.
 
 ---
 
@@ -204,7 +204,7 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 - **A.3 — Single-snapshot serialization** (`_snapshot.epoch == 0 ⇔ no epoch in close→settle window`). `StableYieldAsyncVault.sol:128, 176, 220, 252, 289`.
 - **A.4 — Effective supply correction** (`totalSupply + unclaimedDepositShares − unclaimedRedeemShares`) used for rate calc. `StableYieldAsyncVault.sol:224–227`.
 - **B.3 — `canSettleEpoch` preconditions enforced before vault hook runs**. `FundManager.sol:163–165, 331–361`.
-- **C.1 — Shares non-transferable**. `StableYieldAsyncVault.sol:303–313`.
+- **C.1 — Share transfers re-balance GDA pool units**. `StableYieldAsyncVault.sol:464–471` hooks ERC-20 transfers and calls `FundManager.onShareTransfer`, which moves a proportional slice of the sender's GDA pool units to the receiver (`AsyncFundManager.sol:277–285`). Mint/burn and vault-custody legs are skipped.
 - **D.1 — Yield stream commences at claim, not at request**. `FundManager.sol:243–251`.
 - **D.2 — Yield stream stops at requestRedeem, not at claim**. `FundManager.sol:254–273`.
 - **D.5 — Forward-solvency horizon** (`yieldAssetsBalance() ≥ targetFlowRate · guaranteedFlowDuration`). `FundManager.sol:322–328, 331–361, 382–399`. Per `docs/invariants.md` §D.5 caveat — only enforced via `canSettleEpoch` (pre-settle) and `_rebalanceYieldAssets` revert on missing underlying; no preflight on rate / duration setter.

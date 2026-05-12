@@ -22,7 +22,7 @@
 
 ## Shares
 
-**share** : the ERC-20 token minted by the vault to depositors at claim time, denominated in `1e18`. Non-transferable by design (D6); the only exit is `requestRedeem` → `redeem`/`withdraw`.
+**share** : the ERC-20 token minted by the vault to depositors at claim time, denominated in `1e18`. Freely transferable — the vault's `_update` hook notifies `FundManager.onShareTransfer`, which moves a proportional slice of GDA pool units from sender to receiver so the yield stream tracks share ownership.
 
 **pending redeem shares** : shares transferred from an owner to the vault on `requestRedeem` and locked there until the request's epoch is settled. Tracked by `totalPendingRedeemShares` and `_controllerStates[controller].pendingRedeemShares`.
 

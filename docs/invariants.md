@@ -126,11 +126,11 @@ All requests in a given epoch settle at the same `assetsPerShare`, frozen in `_s
 
 ## C. Shares (ERC-20 layer)
 
-### C.1 — Shares are non-transferable
+### C.1 — Share transfers re-balance GDA pool units
 
-`transfer` and `transferFrom` revert with `SHARES_NON_TRANSFERABLE`. The only way out of a position is `requestRedeem` → `redeem` / `withdraw`.
+Shares are transferable. The vault's `_update` override calls `FundManager.onShareTransfer(from, to, value)` on any shareholder-to-shareholder transfer (mint, burn, and the vault-custody legs of `requestRedeem`/claim are excluded). The FM moves a proportional slice of the sender's GDA pool units to the receiver (`delta = senderUnits * shares / vault.balanceOf(sender)`, rounded up) so the yield stream follows the shares. A transfer from an address with zero pool units reverts with `BAD_SHARE_TRANSFER`.
 
-**Where.** `StableYieldAsyncVault.sol:303–313`.
+**Where.** `StableYieldAsyncVault.sol:464–471` (vault hook), `AsyncFundManager.sol:277–285` (FM unit transfer).
 
 ### C.2 — Shares mint at claim, not at settlement
 
@@ -146,7 +146,7 @@ All requests in a given epoch settle at the same `assetsPerShare`, frozen in `_s
 
 ### C.4 — Vault custody of redeeming shares
 
-Between `requestRedeem` (which transfers shares to `address(this)`) and `_claimRedeem` (which burns them), the vault's own share balance accounts for all in-flight redeems. The `transfer` override is bypassed because `requestRedeem` uses the internal `_transfer`.
+Between `requestRedeem` (which transfers shares to `address(this)`) and `_claimRedeem` (which burns them), the vault's own share balance accounts for all in-flight redeems. The `_update` hook skips the `onShareTransfer` call when `to == address(this)`, so the vault-custody leg does not move GDA pool units (FM units are instead decreased by `onRequestRedeem`).
 
 **Where.** `StableYieldAsyncVault.sol:189`.
 

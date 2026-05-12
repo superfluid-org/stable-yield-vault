@@ -15,7 +15,7 @@ Note: `RedeemClaimingRoom` is no longer a separate contract. The vault itself ea
 
 | State | Location | Description |
 |---|---|---|
-| SHARES | Investor wallet | Vault shares held by the investor. **Non-transferable** (can only be burned via redeem) |
+| SHARES | Investor wallet | Vault shares held by the investor. Transferable — a transfer drags the proportional GDA pool units along via `FundManager.onShareTransfer`. Only burned through `requestRedeem` → `redeem`/`withdraw`. |
 | PENDING REDEEM SHARES | StableYieldAsyncVault | Shares transferred to the vault on `requestRedeem`, awaiting settlement |
 | CLAIMABLE REDEEM ASSETS | StableYieldAsyncVault | Underlying earmarked inside vault balance; tracked by `totalClaimableRedeemAssets` |
 | ASSETS | Investor wallet | Underlying tokens returned to the investor on claim |
@@ -37,7 +37,7 @@ sequenceDiagram
     activate AV
     AV->>FM: (1.2) onRequestRedeem(owner, shares, totalSharesOwned)
     FM->>POOL: decrement owner units (proportional), recalibrate flow
-    Note over I, AV: (1.3) internal _transfer - owner share balance to vault balance (locked, non-transferable)
+    Note over I, AV: (1.3) internal _transfer - owner share balance to vault balance (locked until claim; `onShareTransfer` is skipped because `to == vault`)
     AV-->>I: requestId = 0
     deactivate AV
     end
@@ -269,5 +269,9 @@ units were already removed at request time.
 6. **Forward pricing.** All redeem requests in a given epoch receive the
    same `assetsPerShare`, locked at `closeEpoch`.
 
-7. **Shares are non-transferable** (D6). The only way out is `requestRedeem`
+7. **Share transfers move GDA units.** Shares are transferable; the vault's
+   `_update` hook calls `FundManager.onShareTransfer(from, to, value)` on
+   shareholder-to-shareholder transfers, which transfers a proportional slice
+   of the sender's GDA pool units to the receiver so the yield stream tracks
+   share ownership. Exit (redemption) still goes through `requestRedeem`
    → `redeem`/`withdraw`.
