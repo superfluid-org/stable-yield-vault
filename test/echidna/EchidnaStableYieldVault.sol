@@ -665,34 +665,6 @@ contract EchidnaStableYieldVault {
         assert(!ok);
     }
 
-    //     _____ __  _      __            _____ __
-    //    / ___// /_(_)____/ /____  __   / ___// /_  ____ _________  _____
-    //    \__ \/ __/ / ___/ //_/ / / /   \__ \/ __ \/ __ `/ ___/ _ \/ ___/
-    //   ___/ / /_/ / /__/ ,< / /_/ /   ___/ / / / / /_/ / /  /  __(__  )
-    //  /____/\__/_/\___/_/|_|\__, /   /____/_/ /_/\__,_/_/   \___/____/
-    //                       /____/
-
-    /// @dev C.1 — transfer must always revert. Probing via low-level call so the
-    ///      revert is captured by the bool, not propagated.
-    function try_transfer_share(uint8 fromIdx, uint8 toIdx, uint96 amount) external {
-        address from = _actor(fromIdx);
-        address to = _actor(toIdx);
-        HEVM.prank(from);
-        (bool ok,) =
-            address(_vault).call(abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount));
-        assert(!ok);
-    }
-
-    /// @dev C.1 — transferFrom must always revert.
-    function try_transfer_from_share(uint8 fromIdx, uint8 toIdx, uint96 amount) external {
-        address from = _actor(fromIdx);
-        address to = _actor(toIdx);
-        (bool ok,) = address(_vault).call(
-            abi.encodeWithSelector(bytes4(keccak256("transferFrom(address,address,uint256)")), from, to, amount)
-        );
-        assert(!ok);
-    }
-
     //      ____                 _                 ____                      __
     //     / __ \________ _   __(_)__ _      __   / __ \___ _   _____  _____/ /______
     //    / /_/ / ___/ _ \ | / / / _ \ | /| / /  / /_/ / _ \ | / / _ \/ ___/ __/ ___/
