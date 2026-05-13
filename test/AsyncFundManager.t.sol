@@ -58,6 +58,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
         vm.expectRevert(IAsyncFundManager.ASSET_MISMATCH.selector);
         new AsyncFundManager(
+            TREASURY,
             address(_usdc),
             otherUsdcx,
             FUND_OPERATOR,
@@ -72,6 +73,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
         vm.expectRevert(IAsyncFundManager.DURATION_BELOW_FLOOR.selector);
         new AsyncFundManager(
+            TREASURY,
             address(_usdc),
             address(_usdcx),
             FUND_OPERATOR,

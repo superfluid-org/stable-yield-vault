@@ -57,6 +57,9 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     /// @notice GDA pool distributing the yield stream to shareholders
     ISuperfluidPool public immutable POOL;
 
+    /// @notice Treasury address collecting the fees
+    address public immutable TREASURY;
+
     /// @notice Scale factor lifting underlying amounts into super-token (18-dec) amounts.
     ///         = 10 ** (18 - underlyingDecimals). For USDC (6-dec) == 10**12.
     uint256 public immutable SCALING_FACTOR;
@@ -66,6 +69,9 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     ///         so 1 whole token always corresponds to 1e6 pool units.
     ///         For USDC (6-dec) == 1; for DAI (18-dec) == 1e12.
     uint256 public immutable RAW_PER_UNIT;
+
+    /// @notice Fee units percentage (expressed in basis points)
+    uint256 public constant FEE_UNITS_BPS = 100; // 1% fee in units (100 bps)
 
     /// @notice The asset per share exchange rate scale
     uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
@@ -92,6 +98,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
     /**
      * @notice FundManager contract constructor
+     * @param _treasury Treasury address collecting the fees
      * @param _asset Underlying asset (e.g. USDC) address
      * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
      * @param _fundOperator Operator granted with the FUND_OPERATOR_ROLE
@@ -100,6 +107,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
      * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      */
     constructor(
+        address _treasury,
         address _asset,
         address _yieldAsset,
         address _fundOperator,
@@ -109,6 +117,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     ) {
         UNDERLYING_ASSET = IERC20(_asset);
         VAULT = IStableYieldAsyncVault(msg.sender);
+        TREASURY = _treasury;
 
         // Grant underlying asset unlimited approval to the vault
         UNDERLYING_ASSET.approve(msg.sender, type(uint256).max);
@@ -167,12 +176,16 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         (bool canSettle, string memory reason, IStableYieldAsyncVault.Snapshot memory snap) = canSettleEpoch();
         if (!canSettle) revert SETTLEMENT_PRECONDITIONS_NOT_MET(reason);
 
-        // Drives the vault's settlement; may call back into `FundManager.move` if redeem > deposit
+        // Drives the vault's settlement
         VAULT.onSettleEpoch();
 
         // Grant FM units for this epoch's depositors
         if (snap.depositingAssets > 0) {
-            POOL.increaseMemberUnits(address(this), _toUnit(snap.depositingAssets));
+            uint128 depositorUnits = _toUnit(snap.depositingAssets);
+            POOL.increaseMemberUnits(address(this), depositorUnits);
+
+            uint128 feeUnits = uint128(depositorUnits * FEE_UNITS_BPS / _BP_DENOMINATOR);
+            POOL.increaseMemberUnits(TREASURY, feeUnits);
 
             _rebalanceYieldAssets();
             _recalibrateFlow();
@@ -268,7 +281,11 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
             delta = uint128(uint256(userUnits).mulDiv(sharesRedeemed, totalSharesOwned, Math.Rounding.Ceil));
         }
 
-        POOL.updateMemberUnits(shareholder, userUnits - delta);
+        uint128 feeUnitsToDecrease = uint128(delta * FEE_UNITS_BPS / _BP_DENOMINATOR);
+
+        POOL.decreaseMemberUnits(shareholder, delta);
+        POOL.decreaseMemberUnits(TREASURY, feeUnitsToDecrease);
+
         _recalibrateFlow();
         // pool.totalUnits decreases -> flowRate decreases; invariant trivially safe
     }
@@ -356,11 +373,13 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
             reason = "CURRENT_EPOCH_NOT_CLOSED";
         }
 
-        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
-        uint128 newTotalUnits = POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
+        uint128 depositorUnits = _toUnit(snap.depositingAssets);
+        uint128 newTotalUnits =
+            POOL.getTotalUnits() + depositorUnits + uint128(depositorUnits * FEE_UNITS_BPS / _BP_DENOMINATOR);
         int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         uint256 requiredScaledYieldAssetsBalance =
             uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration / SCALING_FACTOR;
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
 
         if (
             scaledYieldAssetsBalance() + unutilizedAssetsBalance() + snap.depositingAssets

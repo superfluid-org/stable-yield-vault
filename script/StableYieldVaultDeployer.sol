@@ -24,6 +24,7 @@ library StableYieldVaultDeployer {
 
     function _deploy(NetworkConfig.DeploymentConfig memory config) internal returns (DeploymentResult memory results) {
         StableYieldAsyncVault asyncVault = new StableYieldAsyncVault(
+            config.treasury,
             config.underlyingAsset,
             config.yieldAsset,
             config.fundOperator,

@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 library NetworkConfig {
 
     struct DeploymentConfig {
+        address treasury;
         address underlyingAsset;
         address yieldAsset;
         address fundOperator;
@@ -27,6 +28,7 @@ library NetworkConfig {
      */
     function getPolygonMainnetConfig() internal pure returns (DeploymentConfig memory) {
         return DeploymentConfig({
+            treasury: address(0),
             underlyingAsset: address(0),
             yieldAsset: address(0),
             fundOperator: address(0),

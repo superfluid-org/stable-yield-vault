@@ -73,6 +73,7 @@ contract EchidnaStableYieldVault {
     StableYieldAsyncVault private _vault;
 
     address[3] private _actors;
+    address private _treasury;
 
     /// @dev Highest epoch number observed across all handler calls; must never decrease.
     uint256 private _ghostMaxEpoch;
@@ -128,6 +129,8 @@ contract EchidnaStableYieldVault {
         _actors[1] = address(uint160(uint256(keccak256("ECHIDNA_BOB"))));
         _actors[2] = address(uint160(uint256(keccak256("ECHIDNA_CAROL"))));
 
+        _treasury = address(uint160(uint256(keccak256("ECHIDNA_TREASURY"))));
+
         HEVM.etch(ERC1820RegistryCompiled.at, ERC1820RegistryCompiled.bin);
         _plantSuperfluidLibraries();
 
@@ -141,6 +144,7 @@ contract EchidnaStableYieldVault {
         _usdcx = usdcx_;
 
         _vault = new StableYieldAsyncVault(
+            _treasury,
             address(_usdc),
             address(_usdcx),
             address(this),
