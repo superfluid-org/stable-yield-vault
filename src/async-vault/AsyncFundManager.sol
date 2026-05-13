@@ -118,6 +118,8 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         uint256 _initialStableYieldRate,
         uint256 _initialGuaranteedFlowDuration
     ) {
+        if (_treasury == address(0)) revert ZERO_ADDRESS();
+
         UNDERLYING_ASSET = IERC20(_asset);
         VAULT = IStableYieldAsyncVault(msg.sender);
         TREASURY = _treasury;
@@ -383,8 +385,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         }
 
         uint128 depositorUnits = _toUnit(snap.depositingAssets);
-        uint128 newTotalUnits =
-            YIELD_POOL.getTotalUnits() + depositorUnits + uint128(depositorUnits * FEE_BPS / _BP_DENOMINATOR);
+        uint128 newTotalUnits = YIELD_POOL.getTotalUnits() + depositorUnits;
         int96 expectedNewYieldFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         int96 expectedNewFeeFlowRate =
             expectedNewYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
