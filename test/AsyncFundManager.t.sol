@@ -141,7 +141,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         uint128 totalUnits = yieldPool.getTotalUnits();
         uint128 expectedUnits = uint128(DEFAULT_DEPOSIT / _fundManager.RAW_PER_UNIT());
         int96 expectedYieldFlowRate = _calculateExpectedFlowRate(totalUnits);
-        int96 expectedFeeFlowRate = expectedYieldFlowRate * int96(int256(_fundManager.FEE_UNITS_BPS())) / 10_000;
+        int96 expectedFeeFlowRate = expectedYieldFlowRate * int96(int256(_fundManager.FEE_BPS())) / 10_000;
 
         vm.assertEq(totalUnits, expectedUnits);
         vm.assertEq(yieldPool.getUnits(address(_fundManager)), expectedUnits);
@@ -502,7 +502,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         vm.warp(block.timestamp + 3 days);
 
         int96 expectedFlowRate = _calculateExpectedFlowRate(_fundManager.YIELD_POOL().getTotalUnits());
-        int96 expectedFeeFlowRate = expectedFlowRate * int96(int256(_fundManager.FEE_UNITS_BPS())) / 10_000;
+        int96 expectedFeeFlowRate = expectedFlowRate * int96(int256(_fundManager.FEE_BPS())) / 10_000;
         uint256 requiredYieldAssetBalance =
             uint256(int256(expectedFlowRate + expectedFeeFlowRate) * int256(_fundManager.guaranteedFlowDuration()));
 
@@ -912,7 +912,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
             _fundManager.YIELD_POOL().getTotalUnits() + uint128(snap.depositingAssets / _fundManager.RAW_PER_UNIT());
         int96 expectedNewFlowRate = _calculateExpectedFlowRate(newTotalUnits);
         int96 expectedNewFeeFlowRate =
-            int96(int256(expectedNewFlowRate) * int256(_fundManager.FEE_UNITS_BPS()) / 10_000);
+            int96(int256(expectedNewFlowRate) * int256(_fundManager.FEE_BPS()) / 10_000);
         uint256 requiredBalance =
             uint256(uint96(expectedNewFlowRate + expectedNewFeeFlowRate)) * _fundManager.guaranteedFlowDuration();
         deficit = int256(requiredBalance) - int256(_fundManager.yieldAssetsBalance());

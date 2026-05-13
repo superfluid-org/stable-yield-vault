@@ -74,7 +74,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     uint256 public immutable RAW_PER_UNIT;
 
     /// @notice Fee units percentage (expressed in basis points)
-    uint256 public constant FEE_UNITS_BPS = 100; // 1% fee in units (100 bps)
+    uint256 public constant FEE_BPS = 100; // 1% fee in units (100 bps)
 
     /// @notice The asset per share exchange rate scale
     uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
@@ -332,7 +332,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         uint128 newTotalUnits = YIELD_POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
         int96 expectedNewYieldFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         int96 expectedNewFeeFlowRate =
-            expectedNewYieldFlowRate * int96(int256(FEE_UNITS_BPS)) / int96(int256(_BP_DENOMINATOR));
+            expectedNewYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
         uint256 requiredYieldAssetsBalance =
             uint256(uint96(expectedNewYieldFlowRate + expectedNewFeeFlowRate)) * guaranteedFlowDuration;
         uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
@@ -358,7 +358,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         /// FIXME : add buffer to the required balance
 
         int96 targetYieldFlowRate = _targetFlowRate();
-        int96 targetFeeFlowRate = targetYieldFlowRate * int96(int256(FEE_UNITS_BPS)) / int96(int256(_BP_DENOMINATOR));
+        int96 targetFeeFlowRate = targetYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
 
         uint256 requiredBalance = uint256(uint96(targetYieldFlowRate + targetFeeFlowRate)) * guaranteedFlowDuration;
         uint256 actualBalance = yieldAssetsBalance();
@@ -385,10 +385,10 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
         uint128 depositorUnits = _toUnit(snap.depositingAssets);
         uint128 newTotalUnits =
-            YIELD_POOL.getTotalUnits() + depositorUnits + uint128(depositorUnits * FEE_UNITS_BPS / _BP_DENOMINATOR);
+            YIELD_POOL.getTotalUnits() + depositorUnits + uint128(depositorUnits * FEE_BPS / _BP_DENOMINATOR);
         int96 expectedNewYieldFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
         int96 expectedNewFeeFlowRate =
-            expectedNewYieldFlowRate * int96(int256(FEE_UNITS_BPS)) / int96(int256(_BP_DENOMINATOR));
+            expectedNewYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
         uint256 requiredScaledYieldAssetsBalance =
             uint256(uint96(expectedNewYieldFlowRate + expectedNewFeeFlowRate)) * guaranteedFlowDuration / SCALING_FACTOR;
         uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
@@ -421,7 +421,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         int96 targetYieldFlowRate = _targetFlowRate();
         YIELD_ASSET.distributeFlow(YIELD_POOL, targetYieldFlowRate);
 
-        int96 feeFlowRate = targetYieldFlowRate * int96(int256(FEE_UNITS_BPS)) / int96(int256(_BP_DENOMINATOR));
+        int96 feeFlowRate = targetYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
         YIELD_ASSET.distributeFlow(FEE_POOL, feeFlowRate);
     }
 
