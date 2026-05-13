@@ -79,10 +79,7 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
 
         if (snap.depositingAssets > 0) {
             uint256 units = snap.depositingAssets / _fundManager.RAW_PER_UNIT();
-            _fundManager.POOL().increaseMemberUnits(address(_fundManager), uint128(units));
-
-            uint128 feeUnits = uint128(units * _fundManager.FEE_UNITS_BPS() / 10_000);
-            _fundManager.POOL().increaseMemberUnits(TREASURY, feeUnits);
+            _fundManager.YIELD_POOL().increaseMemberUnits(address(_fundManager), uint128(units));
         }
 
         vm.stopPrank();
@@ -739,18 +736,20 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
 
         _completeDepositFlow(ALICE, depositAmount);
         uint256 aliceSharesBefore = _vault.balanceOf(ALICE);
-        uint128 aliceUnitsBefore = _fundManager.POOL().getUnits(ALICE);
+        uint128 aliceUnitsBefore = _fundManager.YIELD_POOL().getUnits(ALICE);
         uint256 receiverSharesBefore = _vault.balanceOf(receiver);
-        uint128 receiverUnitsBefore = _fundManager.POOL().getUnits(receiver);
+        uint128 receiverUnitsBefore = _fundManager.YIELD_POOL().getUnits(receiver);
 
         vm.prank(ALICE);
         _vault.transfer(receiver, aliceSharesBefore);
 
         vm.assertEq(_vault.balanceOf(ALICE), 0, "shares not transferred");
         vm.assertEq(_vault.balanceOf(receiver), aliceSharesBefore + receiverSharesBefore, "shares not received");
-        vm.assertEq(_fundManager.POOL().getUnits(ALICE), 0, "units not transferred");
+        vm.assertEq(_fundManager.YIELD_POOL().getUnits(ALICE), 0, "units not transferred");
         vm.assertEq(
-            _fundManager.POOL().getUnits(receiver), aliceUnitsBefore + receiverUnitsBefore, "units not transferred"
+            _fundManager.YIELD_POOL().getUnits(receiver),
+            aliceUnitsBefore + receiverUnitsBefore,
+            "units not transferred"
         );
     }
 
@@ -762,9 +761,9 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         _completeDepositFlow(ALICE, depositAmount);
 
         uint256 aliceSharesBefore = _vault.balanceOf(ALICE);
-        uint128 aliceUnitsBefore = _fundManager.POOL().getUnits(ALICE);
+        uint128 aliceUnitsBefore = _fundManager.YIELD_POOL().getUnits(ALICE);
         uint256 receiverSharesBefore = _vault.balanceOf(receiver);
-        uint128 receiverUnitsBefore = _fundManager.POOL().getUnits(receiver);
+        uint128 receiverUnitsBefore = _fundManager.YIELD_POOL().getUnits(receiver);
 
         uint256 sharesToTransfer = aliceSharesBefore.mulDiv(proportion, 10_000);
         uint128 expectedUnitsToTransfer = aliceUnitsBefore * uint128(proportion) / 10_000;
@@ -775,10 +774,12 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         vm.assertEq(_vault.balanceOf(ALICE), aliceSharesBefore - sharesToTransfer, "shares not transferred");
         vm.assertEq(_vault.balanceOf(receiver), receiverSharesBefore + sharesToTransfer, "shares not received");
         vm.assertEq(
-            _fundManager.POOL().getUnits(ALICE), aliceUnitsBefore - expectedUnitsToTransfer, "units not transferred"
+            _fundManager.YIELD_POOL().getUnits(ALICE),
+            aliceUnitsBefore - expectedUnitsToTransfer,
+            "units not transferred"
         );
         vm.assertEq(
-            _fundManager.POOL().getUnits(receiver),
+            _fundManager.YIELD_POOL().getUnits(receiver),
             receiverUnitsBefore + expectedUnitsToTransfer,
             "units not transferred"
         );

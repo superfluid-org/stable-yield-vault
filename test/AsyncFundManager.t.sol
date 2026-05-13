@@ -50,7 +50,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         vm.assertTrue(_fundManager.hasRole(_fundManager.DEFAULT_ADMIN_ROLE(), FUND_ADMIN), "Fund Admin role mismatch");
         vm.assertTrue(_fundManager.hasRole(_fundManager.VAULT_ROLE(), address(_vault)), "Vault role mismatch");
         vm.assertEq(address(_fundManager.VAULT()), address(_vault), "incorrect vault address");
-        vm.assertNotEq(address(_fundManager.POOL()), address(0), "GDA pool not created");
+        vm.assertNotEq(address(_fundManager.YIELD_POOL()), address(0), "GDA pool not created");
     }
 
     function test_constructor_revertsOnMismatchedSuperToken() public {
@@ -132,21 +132,22 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         vm.prank(FUND_OPERATOR);
         _fundManager.closeEpoch(0);
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool yieldPool = _fundManager.YIELD_POOL();
+        ISuperfluidPool feePool = _fundManager.FEE_POOL();
 
         vm.prank(FUND_OPERATOR);
         _fundManager.settleEpoch();
 
-        uint128 totalUnits = pool.getTotalUnits();
+        uint128 totalUnits = yieldPool.getTotalUnits();
         uint128 expectedUnits = uint128(DEFAULT_DEPOSIT / _fundManager.RAW_PER_UNIT());
-        uint128 expectedFeeUnits = uint128(expectedUnits * _fundManager.FEE_UNITS_BPS() / 10_000);
-        vm.assertEq(totalUnits, expectedUnits + expectedFeeUnits);
-        vm.assertEq(pool.getUnits(address(_fundManager)), expectedUnits);
-        vm.assertEq(pool.getUnits(address(TREASURY)), expectedFeeUnits);
+        int96 expectedYieldFlowRate = _calculateExpectedFlowRate(totalUnits);
+        int96 expectedFeeFlowRate = expectedYieldFlowRate * int96(int256(_fundManager.FEE_UNITS_BPS())) / 10_000;
 
-        vm.assertEq(pool.getTotalFlowRate(), _calculateExpectedFlowRate(totalUnits));
-        vm.assertEq(pool.getMemberFlowRate(address(_fundManager)), _calculateExpectedFlowRate(expectedUnits));
-        vm.assertEq(pool.getMemberFlowRate(address(TREASURY)), _calculateExpectedFlowRate(expectedFeeUnits));
+        vm.assertEq(totalUnits, expectedUnits);
+        vm.assertEq(yieldPool.getUnits(address(_fundManager)), expectedUnits);
+        vm.assertEq(yieldPool.getTotalFlowRate(), _calculateExpectedFlowRate(totalUnits));
+        vm.assertEq(feePool.getTotalFlowRate(), expectedFeeFlowRate);
+        vm.assertEq(yieldPool.getMemberFlowRate(address(_fundManager)), _calculateExpectedFlowRate(expectedUnits));
     }
 
     //     ______               _____      __  __  __        ______                 __
@@ -268,14 +269,14 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         _fundManager.closeEpoch(0);
         _fundManager.settleEpoch();
 
-        uint128 totalUnits = _fundManager.POOL().getTotalUnits();
+        uint128 totalUnits = _fundManager.YIELD_POOL().getTotalUnits();
 
         int96 previousFlowRatePerUnits = int96(
             int256(_fundManager.SCALING_FACTOR() * INITIAL_ERA_STABLE_YIELD_RATE / (_fundManager.YEAR() * 10_000))
         );
 
         vm.assertEq(
-            int256(_fundManager.POOL().getTotalFlowRate()), int256(int128(totalUnits) * previousFlowRatePerUnits)
+            int256(_fundManager.YIELD_POOL().getTotalFlowRate()), int256(int128(totalUnits) * previousFlowRatePerUnits)
         );
 
         vm.expectEmit(false, false, false, true, address(_fundManager));
@@ -287,7 +288,9 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         int96 newFlowRatePerUnits =
             int96(int256(_fundManager.SCALING_FACTOR() * newRate / (_fundManager.YEAR() * 10_000)));
 
-        vm.assertEq(int256(_fundManager.POOL().getTotalFlowRate()), int256(int128(totalUnits) * newFlowRatePerUnits));
+        vm.assertEq(
+            int256(_fundManager.YIELD_POOL().getTotalFlowRate()), int256(int128(totalUnits) * newFlowRatePerUnits)
+        );
         vm.assertEq(_fundManager.stableYieldRate(), newRate);
     }
 
@@ -374,7 +377,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         sharesRedeemed = bound(sharesRedeemed, 1, sharesOwned);
 
         // ALICE has zero pool units — the hook shall revert
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         vm.assertEq(pool.getUnits(ALICE), 0);
 
         vm.expectRevert(IAsyncFundManager.BAD_REDEEM_ARGS.selector);
@@ -395,7 +398,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         _vault.deposit(DEFAULT_DEPOSIT, ALICE);
         uint256 aliceShares = _vault.balanceOf(ALICE);
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 aliceUnitsBefore = pool.getUnits(ALICE);
         vm.assertGt(aliceUnitsBefore, 0);
 
@@ -418,7 +421,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         _fundManager.settleEpoch();
         vm.stopPrank();
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 fmUnitsBefore = pool.getUnits(address(_fundManager));
         uint128 aliceUnitsBefore = pool.getUnits(ALICE);
         uint128 totalUnitsBefore = pool.getTotalUnits();
@@ -498,9 +501,10 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         // So, we move forward 3 days (to stream-out the yield balance)
         vm.warp(block.timestamp + 3 days);
 
-        int96 expectedFlowRate = _calculateExpectedFlowRate(_fundManager.POOL().getTotalUnits());
+        int96 expectedFlowRate = _calculateExpectedFlowRate(_fundManager.YIELD_POOL().getTotalUnits());
+        int96 expectedFeeFlowRate = expectedFlowRate * int96(int256(_fundManager.FEE_UNITS_BPS())) / 10_000;
         uint256 requiredYieldAssetBalance =
-            uint256(int256(expectedFlowRate) * int256(_fundManager.guaranteedFlowDuration()));
+            uint256(int256(expectedFlowRate + expectedFeeFlowRate) * int256(_fundManager.guaranteedFlowDuration()));
 
         int256 expectedDeficit = int256(requiredYieldAssetBalance) - int256(_fundManager.yieldAssetsBalance());
 
@@ -572,7 +576,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         _fundManager.settleEpoch();
         vm.stopPrank();
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
 
         int96 flowRateBefore = pool.getTotalFlowRate();
 
@@ -867,7 +871,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
     ///      Does not call distributeFlow, so the real stream keeps running at the old rate; only the
     ///      required-balance calculation in `evaluateYieldAssetsDeficit` tips over into a deficit.
     function _inflateUnitsToBreakInvariant() internal {
-        ISuperfluidPool pool = _fundManager.POOL(); // resolve before the prank is consumed
+        ISuperfluidPool pool = _fundManager.YIELD_POOL(); // resolve before the prank is consumed
         vm.prank(address(_fundManager));
         pool.updateMemberUnits(address(0xbeef), uint128(1e12));
     }
@@ -905,9 +909,12 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         returns (int256 deficit)
     {
         uint128 newTotalUnits =
-            _fundManager.POOL().getTotalUnits() + uint128(snap.depositingAssets / _fundManager.RAW_PER_UNIT());
+            _fundManager.YIELD_POOL().getTotalUnits() + uint128(snap.depositingAssets / _fundManager.RAW_PER_UNIT());
         int96 expectedNewFlowRate = _calculateExpectedFlowRate(newTotalUnits);
-        uint256 requiredBalance = uint256(uint96(expectedNewFlowRate)) * _fundManager.guaranteedFlowDuration();
+        int96 expectedNewFeeFlowRate =
+            int96(int256(expectedNewFlowRate) * int256(_fundManager.FEE_UNITS_BPS()) / 10_000);
+        uint256 requiredBalance =
+            uint256(uint96(expectedNewFlowRate + expectedNewFeeFlowRate)) * _fundManager.guaranteedFlowDuration();
         deficit = int256(requiredBalance) - int256(_fundManager.yieldAssetsBalance());
     }
 

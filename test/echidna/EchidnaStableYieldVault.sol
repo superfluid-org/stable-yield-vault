@@ -185,7 +185,7 @@ contract EchidnaStableYieldVault {
         // D.7 — pool config: units non-transferable, distribution-from-any-address disabled,
         //       admin is the FundManager. These are set in FundManager's constructor and not
         //       mutable, so a one-time check is sufficient.
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         require(pool.admin() == address(_fundManager), "D.7 admin");
         require(!pool.transferabilityForUnitsOwner(), "D.7 transferability");
         require(!pool.distributionFromAnyAddress(), "D.7 distribution");
@@ -204,7 +204,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(amount, bal);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 actorUnitsBefore = pool.getUnits(actor);
         uint256 vaultBalanceBefore = _usdc.balanceOf(address(_vault));
 
@@ -264,7 +264,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(portion, maxA);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 unitsBefore = pool.getTotalUnits();
         uint128 actorUnitsBefore = pool.getUnits(actor);
 
@@ -308,7 +308,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(portion, maxA);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 receiverUnitsBefore = pool.getUnits(receiver);
         uint128 totalUnitsBefore = pool.getTotalUnits();
 
@@ -336,7 +336,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(portion, maxS);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 actorUnitsBefore = pool.getUnits(actor);
         uint256 supplyBefore = _vault.totalSupply();
 
@@ -369,7 +369,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(shares, bal);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 actorUnitsBefore = pool.getUnits(actor);
         int96 actorFlowRateBefore = pool.getMemberFlowRate(actor);
 

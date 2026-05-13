@@ -242,7 +242,7 @@ interface IAsyncFundManager {
     /**
      * @notice The GDA pool whose flow distributes yield to shareholders.
      */
-    function POOL() external view returns (ISuperfluidPool);
+    function YIELD_POOL() external view returns (ISuperfluidPool);
 
     /**
      * @notice The super-token wrapping the underlying asset.
