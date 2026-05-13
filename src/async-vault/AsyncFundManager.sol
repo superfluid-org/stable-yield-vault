@@ -190,8 +190,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
         // Grant FM units for this epoch's depositors
         if (snap.depositingAssets > 0) {
-            uint128 depositorUnits = _toUnit(snap.depositingAssets);
-            YIELD_POOL.increaseMemberUnits(address(this), depositorUnits);
+            YIELD_POOL.increaseMemberUnits(address(this), _toUnit(snap.depositingAssets));
 
             _rebalanceYieldAssets();
             _recalibrateFlow();
