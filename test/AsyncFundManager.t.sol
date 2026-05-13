@@ -139,10 +139,14 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
         uint128 totalUnits = pool.getTotalUnits();
         uint128 expectedUnits = uint128(DEFAULT_DEPOSIT / _fundManager.RAW_PER_UNIT());
-        vm.assertEq(totalUnits, expectedUnits);
+        uint128 expectedFeeUnits = uint128(expectedUnits * _fundManager.FEE_UNITS_BPS() / 10_000);
+        vm.assertEq(totalUnits, expectedUnits + expectedFeeUnits);
         vm.assertEq(pool.getUnits(address(_fundManager)), expectedUnits);
+        vm.assertEq(pool.getUnits(address(TREASURY)), expectedFeeUnits);
+
         vm.assertEq(pool.getTotalFlowRate(), _calculateExpectedFlowRate(totalUnits));
-        vm.assertEq(pool.getMemberFlowRate(address(_fundManager)), _calculateExpectedFlowRate(totalUnits));
+        vm.assertEq(pool.getMemberFlowRate(address(_fundManager)), _calculateExpectedFlowRate(expectedUnits));
+        vm.assertEq(pool.getMemberFlowRate(address(TREASURY)), _calculateExpectedFlowRate(expectedFeeUnits));
     }
 
     //     ______               _____      __  __  __        ______                 __

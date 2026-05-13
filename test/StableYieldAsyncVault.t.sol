@@ -80,6 +80,9 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         if (snap.depositingAssets > 0) {
             uint256 units = snap.depositingAssets / _fundManager.RAW_PER_UNIT();
             _fundManager.POOL().increaseMemberUnits(address(_fundManager), uint128(units));
+
+            uint128 feeUnits = uint128(units * _fundManager.FEE_UNITS_BPS() / 10_000);
+            _fundManager.POOL().increaseMemberUnits(TREASURY, feeUnits);
         }
 
         vm.stopPrank();
