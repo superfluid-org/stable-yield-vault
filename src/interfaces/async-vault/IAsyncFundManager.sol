@@ -84,6 +84,11 @@ interface IAsyncFundManager {
      */
     error UNSUPPORTED_DECIMALS();
 
+    /**
+     * @notice Thrown when a zero address is provided for a required parameter.
+     */
+    error ZERO_ADDRESS();
+
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //    / __/ | |/_/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
@@ -242,7 +247,22 @@ interface IAsyncFundManager {
     /**
      * @notice The GDA pool whose flow distributes yield to shareholders.
      */
-    function POOL() external view returns (ISuperfluidPool);
+    function YIELD_POOL() external view returns (ISuperfluidPool);
+
+    /**
+     * @notice The GDA pool whose flow distributes fees to the treasury.
+     */
+    function FEE_POOL() external view returns (ISuperfluidPool);
+
+    /**
+     * @notice The fee rate applied to yield flow rate to calculate the fee flow rate.
+     */
+    function FEE_BPS() external view returns (uint256);
+
+    /**
+     * @notice The treasury address receiving the fee flow.
+     */
+    function TREASURY() external view returns (address);
 
     /**
      * @notice The super-token wrapping the underlying asset.

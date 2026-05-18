@@ -83,6 +83,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
      *         deploys the paired FundManager.
      * @dev    The FundManager is created in the constructor with `address(this)` as its vault,
      *         pinning the vault/FM pair at deployment.
+     * @param _treasury The address of the treasury collecting fees
      * @param _underlyingAsset The address of the underlying ERC-20 asset
      * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
      * @param _fundOperator Fund Manager operator address
@@ -93,6 +94,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
      * @param symbol The symbol of the share token.
      */
     constructor(
+        address _treasury,
         address _underlyingAsset,
         address _yieldAsset,
         address _fundOperator,
@@ -105,6 +107,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         underlyingAsset = IERC20(_underlyingAsset);
 
         FUND_MANAGER = new AsyncFundManager(
+            _treasury,
             _underlyingAsset,
             _yieldAsset,
             _fundOperator,

@@ -55,7 +55,13 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     IStableYieldAsyncVault public immutable VAULT;
 
     /// @notice GDA pool distributing the yield stream to shareholders
-    ISuperfluidPool public immutable POOL;
+    ISuperfluidPool public immutable YIELD_POOL;
+
+    /// @notice GDA pool distributing the fee stream to the treasury
+    ISuperfluidPool public immutable FEE_POOL;
+
+    /// @notice Treasury address collecting the fees
+    address public immutable TREASURY;
 
     /// @notice Scale factor lifting underlying amounts into super-token (18-dec) amounts.
     ///         = 10 ** (18 - underlyingDecimals). For USDC (6-dec) == 10**12.
@@ -66,6 +72,9 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     ///         so 1 whole token always corresponds to 1e6 pool units.
     ///         For USDC (6-dec) == 1; for DAI (18-dec) == 1e12.
     uint256 public immutable RAW_PER_UNIT;
+
+    /// @notice Fee units percentage (expressed in basis points)
+    uint256 public constant FEE_BPS = 100; // 1% fee in units (100 bps)
 
     /// @notice The asset per share exchange rate scale
     uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
@@ -92,6 +101,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
     /**
      * @notice FundManager contract constructor
+     * @param _treasury Treasury address collecting the fees
      * @param _asset Underlying asset (e.g. USDC) address
      * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
      * @param _fundOperator Operator granted with the FUND_OPERATOR_ROLE
@@ -100,6 +110,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
      * @param _initialGuaranteedFlowDuration Initial forward-solvency horizon in seconds
      */
     constructor(
+        address _treasury,
         address _asset,
         address _yieldAsset,
         address _fundOperator,
@@ -107,8 +118,11 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         uint256 _initialStableYieldRate,
         uint256 _initialGuaranteedFlowDuration
     ) {
+        if (_treasury == address(0)) revert ZERO_ADDRESS();
+
         UNDERLYING_ASSET = IERC20(_asset);
         VAULT = IStableYieldAsyncVault(msg.sender);
+        TREASURY = _treasury;
 
         // Grant underlying asset unlimited approval to the vault
         UNDERLYING_ASSET.approve(msg.sender, type(uint256).max);
@@ -134,11 +148,17 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         PoolConfig memory poolConfig =
             PoolConfig({ transferabilityForUnitsOwner: false, distributionFromAnyAddress: false });
 
-        // Create the pool with FM as pool admin
-        POOL = YIELD_ASSET.createPool(address(this), poolConfig);
+        // Create the yield pool with FM as pool admin
+        YIELD_POOL = YIELD_ASSET.createPool(address(this), poolConfig);
+
+        // Create the fee pool with FM as pool admin
+        FEE_POOL = YIELD_ASSET.createPool(address(this), poolConfig);
+
+        // Grant 1 unit to the treasury
+        FEE_POOL.increaseMemberUnits(TREASURY, 1);
 
         // Connect FM to the pool
-        YIELD_ASSET.connectPool(POOL);
+        YIELD_ASSET.connectPool(YIELD_POOL);
 
         stableYieldRate = _initialStableYieldRate;
 
@@ -167,12 +187,12 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         (bool canSettle, string memory reason, IStableYieldAsyncVault.Snapshot memory snap) = canSettleEpoch();
         if (!canSettle) revert SETTLEMENT_PRECONDITIONS_NOT_MET(reason);
 
-        // Drives the vault's settlement; may call back into `FundManager.move` if redeem > deposit
+        // Drives the vault's settlement
         VAULT.onSettleEpoch();
 
         // Grant FM units for this epoch's depositors
         if (snap.depositingAssets > 0) {
-            POOL.increaseMemberUnits(address(this), _toUnit(snap.depositingAssets));
+            YIELD_POOL.increaseMemberUnits(address(this), _toUnit(snap.depositingAssets));
 
             _rebalanceYieldAssets();
             _recalibrateFlow();
@@ -184,8 +204,8 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         // Rebalance underlying vs. yield assets
         _rebalanceYieldAssets();
 
-        // Check if the flow needs to be restarted
-        if (POOL.getTotalFlowRate() == 0 && POOL.getTotalUnits() > 0) {
+        // Check if the yield flow needs to be restarted
+        if (YIELD_POOL.getTotalFlowRate() == 0 && YIELD_POOL.getTotalUnits() > 0) {
             // Restart the distribution flow if necessary
             _recalibrateFlow();
         }
@@ -247,8 +267,8 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
         uint128 units = _toUnit(depositAssets);
 
         // Transfer the units associated to the claimed deposit from FM to the shareholder
-        POOL.increaseMemberUnits(shareholder, units);
-        POOL.decreaseMemberUnits(address(this), units);
+        YIELD_POOL.increaseMemberUnits(shareholder, units);
+        YIELD_POOL.decreaseMemberUnits(address(this), units);
     }
 
     /// @inheritdoc IAsyncFundManager
@@ -258,7 +278,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     {
         if (totalSharesOwned == 0 || sharesRedeemed > totalSharesOwned) revert BAD_REDEEM_ARGS();
 
-        uint128 userUnits = POOL.getUnits(shareholder);
+        uint128 userUnits = YIELD_POOL.getUnits(shareholder);
         if (userUnits == 0) revert BAD_REDEEM_ARGS();
 
         uint128 delta;
@@ -268,20 +288,21 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
             delta = uint128(uint256(userUnits).mulDiv(sharesRedeemed, totalSharesOwned, Math.Rounding.Ceil));
         }
 
-        POOL.updateMemberUnits(shareholder, userUnits - delta);
+        YIELD_POOL.decreaseMemberUnits(shareholder, delta);
+
         _recalibrateFlow();
         // pool.totalUnits decreases -> flowRate decreases; invariant trivially safe
     }
 
     /// @inheritdoc IAsyncFundManager
     function onShareTransfer(address sender, address receiver, uint256 shares) external onlyRole(VAULT_ROLE) {
-        uint128 senderUnits = POOL.getUnits(sender);
+        uint128 senderUnits = YIELD_POOL.getUnits(sender);
         if (senderUnits == 0) revert BAD_SHARE_TRANSFER();
 
         uint128 delta = uint128(uint256(senderUnits).mulDiv(shares, VAULT.balanceOf(sender), Math.Rounding.Ceil));
 
-        POOL.increaseMemberUnits(receiver, delta);
-        POOL.decreaseMemberUnits(sender, delta);
+        YIELD_POOL.increaseMemberUnits(receiver, delta);
+        YIELD_POOL.decreaseMemberUnits(sender, delta);
     }
 
     //   _    ___                 ______                 __  _
@@ -309,9 +330,12 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     function evaluateFunding() external view returns (int256 funding) {
         IStableYieldAsyncVault.Snapshot memory snap = VAULT.getSnapshot();
 
-        uint128 newTotalUnits = POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
-        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
-        uint256 requiredYieldAssetsBalance = uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration;
+        uint128 newTotalUnits = YIELD_POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
+        int96 expectedNewYieldFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
+        int96 expectedNewFeeFlowRate =
+            expectedNewYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
+        uint256 requiredYieldAssetsBalance =
+            uint256(uint96(expectedNewYieldFlowRate + expectedNewFeeFlowRate)) * guaranteedFlowDuration;
         uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
 
         // Evaluate pre-settlement yield asset deficit
@@ -333,7 +357,11 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     /// @inheritdoc IAsyncFundManager
     function evaluateYieldAssetsDeficit() public view returns (int256 deficit) {
         /// FIXME : add buffer to the required balance
-        uint256 requiredBalance = uint256(uint96(_targetFlowRate())) * guaranteedFlowDuration;
+
+        int96 targetYieldFlowRate = _targetFlowRate();
+        int96 targetFeeFlowRate = targetYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
+
+        uint256 requiredBalance = uint256(uint96(targetYieldFlowRate + targetFeeFlowRate)) * guaranteedFlowDuration;
         uint256 actualBalance = yieldAssetsBalance();
 
         deficit = int256(requiredBalance) - int256(actualBalance);
@@ -356,11 +384,14 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
             reason = "CURRENT_EPOCH_NOT_CLOSED";
         }
 
-        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
-        uint128 newTotalUnits = POOL.getTotalUnits() + _toUnit(snap.depositingAssets);
-        int96 expectedNewFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
+        uint128 depositorUnits = _toUnit(snap.depositingAssets);
+        uint128 newTotalUnits = YIELD_POOL.getTotalUnits() + depositorUnits;
+        int96 expectedNewYieldFlowRate = _flowRatePerUnit * int96(int128(newTotalUnits));
+        int96 expectedNewFeeFlowRate =
+            expectedNewYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
         uint256 requiredScaledYieldAssetsBalance =
-            uint256(uint96(expectedNewFlowRate)) * guaranteedFlowDuration / SCALING_FACTOR;
+            uint256(uint96(expectedNewYieldFlowRate + expectedNewFeeFlowRate)) * guaranteedFlowDuration / SCALING_FACTOR;
+        uint256 redeemingAssets = snap.redeemingShares.mulDiv(snap.rate, ASSETS_PER_SHARE_SCALE);
 
         if (
             scaledYieldAssetsBalance() + unutilizedAssetsBalance() + snap.depositingAssets
@@ -387,7 +418,11 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     }
 
     function _recalibrateFlow() internal {
-        YIELD_ASSET.distributeFlow(POOL, _targetFlowRate());
+        int96 targetYieldFlowRate = _targetFlowRate();
+        YIELD_ASSET.distributeFlow(YIELD_POOL, targetYieldFlowRate);
+
+        int96 feeFlowRate = targetYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
+        YIELD_ASSET.distributeFlow(FEE_POOL, feeFlowRate);
     }
 
     function _rebalanceYieldAssets() internal {
@@ -410,7 +445,7 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
     }
 
     function _targetFlowRate() internal view returns (int96 flowRate) {
-        flowRate = _flowRatePerUnit * int96(int128(POOL.getTotalUnits()));
+        flowRate = _flowRatePerUnit * int96(int128(YIELD_POOL.getTotalUnits()));
     }
 
     function _toUnit(uint256 underlyingAmount) internal view returns (uint128 units) {

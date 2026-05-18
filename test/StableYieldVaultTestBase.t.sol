@@ -32,6 +32,7 @@ contract StableYieldVaultTestBase is Test {
     StableYieldAsyncVault internal _vault;
 
     address internal immutable DEPLOYER = makeAddr("DEPLOYER");
+    address internal immutable TREASURY = makeAddr("TREASURY");
     address internal immutable FUND_OPERATOR = makeAddr("FUND_OPERATOR");
     address internal immutable FUND_ADMIN = makeAddr("FUND_ADMIN");
     address internal immutable ALICE = makeAddr("ALICE");
@@ -54,6 +55,7 @@ contract StableYieldVaultTestBase is Test {
         vm.startPrank(DEPLOYER);
         StableYieldVaultDeployer.DeploymentResult memory deploymentResult = StableYieldVaultDeployer.deployAll(
             NetworkConfig.DeploymentConfig({
+                treasury: TREASURY,
                 underlyingAsset: address(_usdc),
                 yieldAsset: address(_usdcx),
                 fundOperator: FUND_OPERATOR,

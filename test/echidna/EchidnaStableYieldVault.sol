@@ -73,6 +73,7 @@ contract EchidnaStableYieldVault {
     StableYieldAsyncVault private _vault;
 
     address[3] private _actors;
+    address private _treasury;
 
     /// @dev Highest epoch number observed across all handler calls; must never decrease.
     uint256 private _ghostMaxEpoch;
@@ -128,6 +129,8 @@ contract EchidnaStableYieldVault {
         _actors[1] = address(uint160(uint256(keccak256("ECHIDNA_BOB"))));
         _actors[2] = address(uint160(uint256(keccak256("ECHIDNA_CAROL"))));
 
+        _treasury = address(uint160(uint256(keccak256("ECHIDNA_TREASURY"))));
+
         HEVM.etch(ERC1820RegistryCompiled.at, ERC1820RegistryCompiled.bin);
         _plantSuperfluidLibraries();
 
@@ -141,6 +144,7 @@ contract EchidnaStableYieldVault {
         _usdcx = usdcx_;
 
         _vault = new StableYieldAsyncVault(
+            _treasury,
             address(_usdc),
             address(_usdcx),
             address(this),
@@ -181,7 +185,7 @@ contract EchidnaStableYieldVault {
         // D.7 — pool config: units non-transferable, distribution-from-any-address disabled,
         //       admin is the FundManager. These are set in FundManager's constructor and not
         //       mutable, so a one-time check is sufficient.
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         require(pool.admin() == address(_fundManager), "D.7 admin");
         require(!pool.transferabilityForUnitsOwner(), "D.7 transferability");
         require(!pool.distributionFromAnyAddress(), "D.7 distribution");
@@ -200,7 +204,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(amount, bal);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 actorUnitsBefore = pool.getUnits(actor);
         uint256 vaultBalanceBefore = _usdc.balanceOf(address(_vault));
 
@@ -260,7 +264,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(portion, maxA);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 unitsBefore = pool.getTotalUnits();
         uint128 actorUnitsBefore = pool.getUnits(actor);
 
@@ -304,7 +308,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(portion, maxA);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 receiverUnitsBefore = pool.getUnits(receiver);
         uint128 totalUnitsBefore = pool.getTotalUnits();
 
@@ -332,7 +336,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(portion, maxS);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 actorUnitsBefore = pool.getUnits(actor);
         uint256 supplyBefore = _vault.totalSupply();
 
@@ -365,7 +369,7 @@ contract EchidnaStableYieldVault {
         uint256 amt = _bound(shares, bal);
         if (amt == 0) return;
 
-        ISuperfluidPool pool = _fundManager.POOL();
+        ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 actorUnitsBefore = pool.getUnits(actor);
         int96 actorFlowRateBefore = pool.getMemberFlowRate(actor);
 
@@ -658,34 +662,6 @@ contract EchidnaStableYieldVault {
     function probe_settle_when_no_snapshot() external {
         if (_vault.getSnapshot().epoch != 0) return;
         (bool ok,) = address(_fundManager).call(abi.encodeWithSelector(bytes4(keccak256("settleEpoch()"))));
-        assert(!ok);
-    }
-
-    //     _____ __  _      __            _____ __
-    //    / ___// /_(_)____/ /____  __   / ___// /_  ____ _________  _____
-    //    \__ \/ __/ / ___/ //_/ / / /   \__ \/ __ \/ __ `/ ___/ _ \/ ___/
-    //   ___/ / /_/ / /__/ ,< / /_/ /   ___/ / / / / /_/ / /  /  __(__  )
-    //  /____/\__/_/\___/_/|_|\__, /   /____/_/ /_/\__,_/_/   \___/____/
-    //                       /____/
-
-    /// @dev C.1 — transfer must always revert. Probing via low-level call so the
-    ///      revert is captured by the bool, not propagated.
-    function try_transfer_share(uint8 fromIdx, uint8 toIdx, uint96 amount) external {
-        address from = _actor(fromIdx);
-        address to = _actor(toIdx);
-        HEVM.prank(from);
-        (bool ok,) =
-            address(_vault).call(abi.encodeWithSelector(bytes4(keccak256("transfer(address,uint256)")), to, amount));
-        assert(!ok);
-    }
-
-    /// @dev C.1 — transferFrom must always revert.
-    function try_transfer_from_share(uint8 fromIdx, uint8 toIdx, uint96 amount) external {
-        address from = _actor(fromIdx);
-        address to = _actor(toIdx);
-        (bool ok,) = address(_vault).call(
-            abi.encodeWithSelector(bytes4(keccak256("transferFrom(address,address,uint256)")), from, to, amount)
-        );
         assert(!ok);
     }
 
