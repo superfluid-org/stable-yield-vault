@@ -83,6 +83,19 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         );
     }
 
+    function test_constructor_revertsOnZeroTreasury() public {
+        vm.expectRevert(IAsyncFundManager.ZERO_ADDRESS.selector);
+        new AsyncFundManager(
+            address(0),
+            address(_usdc),
+            address(_usdcx),
+            FUND_OPERATOR,
+            FUND_ADMIN,
+            INITIAL_ERA_STABLE_YIELD_RATE,
+            GUARANTEED_FLOW_DURATION
+        );
+    }
+
     //    ________                   ______                 __
     //   / ____/ /___  ________     / ____/___  ____  _____/ /_
     //  / /   / / __ \/ ___/ _ \   / __/ / __ \/ __ \/ ___/ __ \
@@ -911,8 +924,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         uint128 newTotalUnits =
             _fundManager.YIELD_POOL().getTotalUnits() + uint128(snap.depositingAssets / _fundManager.RAW_PER_UNIT());
         int96 expectedNewFlowRate = _calculateExpectedFlowRate(newTotalUnits);
-        int96 expectedNewFeeFlowRate =
-            int96(int256(expectedNewFlowRate) * int256(_fundManager.FEE_BPS()) / 10_000);
+        int96 expectedNewFeeFlowRate = int96(int256(expectedNewFlowRate) * int256(_fundManager.FEE_BPS()) / 10_000);
         uint256 requiredBalance =
             uint256(uint96(expectedNewFlowRate + expectedNewFeeFlowRate)) * _fundManager.guaranteedFlowDuration();
         deficit = int256(requiredBalance) - int256(_fundManager.yieldAssetsBalance());
