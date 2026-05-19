@@ -13,6 +13,7 @@ import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/util
 import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
 import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
 import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
+import { IFundManagerBase } from "src/interfaces/common/IFundManagerBase.sol";
 
 contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
@@ -56,7 +57,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
     function test_constructor_revertsOnMismatchedSuperToken() public {
         (, address otherUsdcx) = _deployFreshWrapper("XYZ", 6);
 
-        vm.expectRevert(IAsyncFundManager.ASSET_MISMATCH.selector);
+        vm.expectRevert(IFundManagerBase.ASSET_MISMATCH.selector);
         new AsyncFundManager(
             TREASURY,
             address(_usdc),
@@ -71,7 +72,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
     function test_constructor_revertsOnDurationBelowFloor(uint256 belowFloorDuration) public {
         belowFloorDuration = bound(belowFloorDuration, 0, _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1);
 
-        vm.expectRevert(IAsyncFundManager.DURATION_BELOW_FLOOR.selector);
+        vm.expectRevert(IFundManagerBase.DURATION_BELOW_FLOOR.selector);
         new AsyncFundManager(
             TREASURY,
             address(_usdc),
@@ -84,7 +85,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
     }
 
     function test_constructor_revertsOnZeroTreasury() public {
-        vm.expectRevert(IAsyncFundManager.ZERO_ADDRESS.selector);
+        vm.expectRevert(IFundManagerBase.ZERO_ADDRESS.selector);
         new AsyncFundManager(
             address(0),
             address(_usdc),
@@ -322,7 +323,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
         // Choose a rate where the new flow still fits the GDA security deposit (~hours of flow)
         // but the 7-day invariant horizon exceeds the yield buffer.
-        vm.expectRevert(IAsyncFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
+        vm.expectRevert(IFundManagerBase.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setStableYieldRate(increasedAnnualRate);
 
         vm.stopPrank();
@@ -344,7 +345,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
         belowFloorDuration = bound(belowFloorDuration, 0, _fundManager.MIN_GUARANTEED_FLOW_DURATION() - 1);
 
         vm.prank(FUND_ADMIN);
-        vm.expectRevert(IAsyncFundManager.DURATION_BELOW_FLOOR.selector);
+        vm.expectRevert(IFundManagerBase.DURATION_BELOW_FLOOR.selector);
         _fundManager.setGuaranteedFlowDuration(belowFloorDuration);
     }
 
@@ -358,7 +359,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
         // Raising the horizon to 1000 years would require far more yield buffer than we hold
         vm.prank(FUND_ADMIN);
-        vm.expectRevert(IAsyncFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
+        vm.expectRevert(IFundManagerBase.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setGuaranteedFlowDuration(365 days * 1000);
     }
 
