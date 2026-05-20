@@ -32,11 +32,11 @@ interface IAsyncFundManager is IFundManagerBase {
      */
     event Took(address indexed to, uint256 amount);
 
-    //    ______
-    //   / ____/_____________  __________
-    //  / __/ / ___/ ___/ __ \/ ___/ ___/
-    // / /___/ /  / /  / /_/ / /  (__  )
-    // /_____/_/  /_/   \____/_/  /____/
+    //      ______
+    //     / ____/_____________  __________
+    //    / __/ / ___/ ___/ __ \/ ___/ ___/
+    //   / /___/ /  / /  / /_/ / /  (__  )
+    //  /_____/_/  /_/   \____/_/  /____/
 
     /**
      * @notice Thrown when the vault's redeem hook is called with incoherent share arguments.
