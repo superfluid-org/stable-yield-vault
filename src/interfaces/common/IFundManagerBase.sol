@@ -57,11 +57,6 @@ interface IFundManagerBase {
     error ASSET_MISMATCH();
 
     /**
-     * @notice Thrown when there aren't enough unutilized assets to rebalance into yield assets
-     */
-    error INSUFFICIENT_UNUTILIZED_ASSETS();
-
-    /**
      * @notice Thrown at construction when the underlying asset's decimals are outside the supported range [6, 18].
      */
     error UNSUPPORTED_DECIMALS();

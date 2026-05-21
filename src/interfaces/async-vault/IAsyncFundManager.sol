@@ -48,6 +48,11 @@ interface IAsyncFundManager is IFundManagerBase {
      */
     error SETTLEMENT_PRECONDITIONS_NOT_MET(string reason);
 
+    /**
+     * @notice Thrown when there aren't enough unutilized assets to rebalance into yield assets
+     */
+    error INSUFFICIENT_UNUTILIZED_ASSETS();
+
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //    / __/ | |/_/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/

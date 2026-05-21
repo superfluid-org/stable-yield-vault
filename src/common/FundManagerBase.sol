@@ -300,24 +300,7 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
         YIELD_ASSET.distributeFlow(FEE_POOL, feeFlowRate);
     }
 
-    function _rebalanceYieldAssets() internal {
-        int256 deficit = evaluateYieldAssetsDeficit();
-
-        if (deficit > 0) {
-            // Add 1 unit to cover for decimals clipping in case of non-18 decimals underlying
-            uint256 underlyingAmountToUpgrade = (uint256(deficit) / SCALING_FACTOR) + 1;
-
-            if (unutilizedAssetsBalance() < underlyingAmountToUpgrade) revert INSUFFICIENT_UNUTILIZED_ASSETS();
-
-            // Upgrade underlying deficit amount
-            _upgrade(underlyingAmountToUpgrade);
-        } else if (deficit < 0) {
-            // downgrade excess amount of yield assets
-            _downgrade(uint256(-deficit));
-        } else {
-            return;
-        }
-    }
+    function _rebalanceYieldAssets() internal virtual;
 
     function _targetFlowRate() internal view returns (int96 flowRate) {
         flowRate = _flowRatePerUnit * int96(int128(YIELD_POOL.getTotalUnits()));

@@ -207,4 +207,29 @@ contract AsyncFundManager is FundManagerBase, IAsyncFundManager {
         }
     }
 
+    //      ____      __                        __   ______                 __  _
+    //     /  _/___  / /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
+    //     / // __ \/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
+    //   _/ // / / / /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
+    //  /___/_/ /_/\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
+
+    function _rebalanceYieldAssets() internal override {
+        int256 deficit = evaluateYieldAssetsDeficit();
+
+        if (deficit > 0) {
+            // Add 1 unit to cover for decimals clipping in case of non-18 decimals underlying
+            uint256 underlyingAmountToUpgrade = (uint256(deficit) / SCALING_FACTOR) + 1;
+
+            if (unutilizedAssetsBalance() < underlyingAmountToUpgrade) revert INSUFFICIENT_UNUTILIZED_ASSETS();
+
+            // Upgrade underlying deficit amount
+            _upgrade(underlyingAmountToUpgrade);
+        } else if (deficit < 0) {
+            // downgrade excess amount of yield assets
+            _downgrade(uint256(-deficit));
+        } else {
+            return;
+        }
+    }
+
 }
