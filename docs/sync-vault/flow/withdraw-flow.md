@@ -101,12 +101,13 @@ sequenceDiagram
     (onlyRole VAULT_ROLE) — the async settleEpoch-netting analog:
     - reverts BAD_WITHDRAW_ARGS if totalSharesOwned == 0 or
       shares > totalSharesOwned
-    - REPLENISH (best-effort, deficit-gated):
-        _replenishReserveFromBuffer()
-        — no external calls when evaluateYieldAssetsDeficit() <= 0 (the common
+    - PRE-REBALANCE (best-effort, deficit-gated):
+        _rebalanceYieldAssets()
+        — no external calls when evaluateYieldAssetsDeficit() == 0 (the common
           pre-withdraw case). Opportunistically cures a *pre-existing* deficit
-          (external underperformed since the last harvest) from the buffer;
-          capped at EXTERNAL_VAULT.maxWithdraw(FM) so it can never brick the exit.
+          (external underperformed since the last rebalance) from the buffer
+          (then principal-backing slice under impairment); capped at
+          EXTERNAL_VAULT.maxWithdraw(FM) so it can never brick the exit.
     - UNIT DECREASE:
         holderUnits = POOL.getUnits(holder)
         if holderUnits > 0:
@@ -121,8 +122,9 @@ sequenceDiagram
         — `distributeFlow(newFlowRate)` REFUNDS the GDA "deposit buffer" slice
           attributable to the removed units back into yieldAssetsBalance(), so
           it becomes part of the redeemer's freed excess. A stalled +
-          still-under-funded vault is left stalled (the next funded harvest
-          restarts it); the withdrawal still completes.
+          still-under-funded vault is left stalled (the next operator-called
+          `ensureYieldFlowDuration()` restarts it); the withdrawal still
+          completes.
     - RESERVE LEG (the recalibration-freed excess):
         d = evaluateYieldAssetsDeficit()   (post-recalibrate)
         excessUnderlying = d < 0 ? uint256(-d) / SCALING_FACTOR : 0
@@ -139,6 +141,13 @@ sequenceDiagram
         if fromReserve > 0:
           UNDERLYING_ASSET.safeTransfer(receiver, fromReserve)
         → receiver has exactly redeemingAssets; the FM holds 0 underlying.
+    - POST-PAYOUT REBALANCE (trim residual freed excess back to external):
+        _rebalanceYieldAssets()
+        — if freedExcess > redeemingAssets, the residual freed excess remains
+          as `deficit < 0` after the payout. The rebalance trim branch
+          downgrades it and redeposits the underlying into the external vault,
+          so the reserve returns to target. Inv. 7 holds (no raw underlying at
+          rest in the FM).
     - PRINCIPAL ACCOUNTING (Inv. 1, rounded DOWN — favours remaining holders):
         trackedPrincipal -= trackedPrincipal.mulDiv(shares, supplyBeforeBurn,
                                                     Floor)

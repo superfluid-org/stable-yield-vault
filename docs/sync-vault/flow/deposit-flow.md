@@ -14,7 +14,7 @@
 | **SyncFundManager** | Sole capital custodian. Owns `trackedPrincipal`, the external-vault shares and the super-token reserve. Bumps principal, pre-funds the reserve, deploys the remainder into the external vault, starts the stream |
 | **External ERC-4626** | Third-party vault (Morpho/Beefy/…) that custodies the principal remainder and earns the real, compounding yield |
 | **GDA Pool** | Superfluid pool owned by the FM. Streams the stable yield (super-token) to unit holders |
-| **Fund Operator** | EOA/bot holding `FUND_OPERATOR_ROLE`. Manages the rate and may inject reserve (`fundReserve`) |
+| **Fund Operator** | EOA/bot holding `FUND_OPERATOR_ROLE`. Sets `stableYieldRate` and `guaranteedFlowDuration` (the only sustainability levers — no on-chain reserve injection path) |
 
 There is no waiting room, epoch, snapshot, or settlement. Deposit is a single
 synchronous transaction.
@@ -49,17 +49,13 @@ sequenceDiagram
     Note right of V: shares ~ assets (NAV-neutral entry)
     V->>FM: onDeposit(receiver, assets)
     FM->>POOL: increaseMemberUnits(receiver, toUnit(assets))
-    FM->>FM: replenishReserveFromBuffer [uses OLD trackedPrincipal]
+    FM->>FM: replenishReserveFromBuffer [uncapped at maxWithdraw(FM); buffer first, then principal-backing slice under impairment]
     FM->>FM: trackedPrincipal += assets
     FM->>FM: toUpgrade = min(ceil(deficit / SCALING_FACTOR) + 1, assets)
     FM->>FM: upgrade(toUpgrade) [pre-fund residual from deposit]
     FM->>E: deposit(assets - toUpgrade, FM) [remainder = principal]
-    alt evaluateYieldAssetsDeficit() <= 0
-        FM->>POOL: recalibrateFlow
-        Note right of POOL: stream starts/raises at deposit time
-    else pre-existing global deficit (degraded fallback)
-        Note right of FM: units granted — stream (re)starts at next funded harvest
-    end
+    FM->>POOL: recalibrateFlow
+    Note right of POOL: stream starts/raises at deposit time (only stalls at terminal impairment maxWithdraw(FM)==0)
     end
 ```
 
@@ -94,13 +90,17 @@ sequenceDiagram
        POOL.increaseMemberUnits(receiver, units)    — units land directly on
        the receiver (no FM-interim holding, unlike async claim-time transfer).
        evaluateYieldAssetsDeficit() now reflects the new (higher) target.
-    b. REPLENISH FROM BUFFER (best-effort, deficit-gated):
-       _replenishReserveFromBuffer()
-       — runs against the OLD trackedPrincipal (buffer surplus = ext.maxWithdraw
-         − trackedPrincipal_pre); the compounding external buffer covers the
-         deficit first; principal is skimmed only as a fallback. No external
-         calls when already solvent. Capped at EXTERNAL_VAULT.maxWithdraw(FM)
-         so it can never brick the deposit.
+    b. REBALANCE RESERVE FROM EXTERNAL POSITION (best-effort, deficit-gated):
+       _rebalanceYieldAssets()
+       — runs against the OLD trackedPrincipal; pulls
+         min(deficit, EXTERNAL_VAULT.maxWithdraw(FM)) — UNCAPPED at the
+         surplus. While solvent the buffer (ext.maxWithdraw(FM) − trackedPrincipal)
+         absorbs the pull and principal is untouched. Once the buffer is
+         exhausted the same pull continues into the principal-backing slice
+         — the loss is deferred to the NAV clamp (min(trackedPrincipal, ext +
+         reserve)) inverting, not to a stalled stream. No external calls when
+         already solvent. Capped at EXTERNAL_VAULT.maxWithdraw(FM) so it can
+         never brick the deposit.
     c. trackedPrincipal += assets                   (Invariant 1)
        — booked AFTER the replenish so the buffer calc is correct.
     d. PRE-FUND RESIDUAL from the deposit:
@@ -114,17 +114,17 @@ sequenceDiagram
     e. EXTERNAL_VAULT.deposit(assets − toUpgrade, FM)
        — the remainder is deployed as principal. NOTHING is left at rest in the
          FM as raw underlying (custody hazard invariant, Inv. 7).
-    f. if evaluateYieldAssetsDeficit() <= 0:
-         _recalibrateFlow()
-           flowRate = _flowRatePerUnit * POOL.totalUnits   (yield + 1% fee pool)
-         → the stream starts/raises at deposit time, including the first deposit
-       else:
-         skip — the deposit + buffer together could not clear a pre-existing
-         global deficit (pathological rate×guaranteedFlowDuration, or a vault
-         already broken by external underperformance). Units are still granted;
-         the stream (re)starts at the next funded `harvest()`. This is the
-         DEGRADED FALLBACK only (design decision 8 / Invariant 5), not the
-         normal path.
+    f. _recalibrateFlow()  (guarded — does not revert in the terminal-impairment
+       limit where evaluateYieldAssetsDeficit() > 0 even after steps b–e)
+         flowRate = _flowRatePerUnit * POOL.totalUnits   (yield + 1% fee pool)
+       → the stream starts/raises at deposit time, including the first deposit.
+       The uncapped replenisher in step b together with the residual pre-fund
+       in step d clears any pre-existing global deficit in every non-terminal
+       regime. The only state where the post-step-e deficit can still be > 0
+       is terminal impairment (EXTERNAL_VAULT.maxWithdraw(FM) == 0 AND the
+       incoming `assets` cannot cover the residual); the guard keeps the
+       deposit non-reverting in that limit and the next operator-called
+       `ensureYieldFlowDuration()` restarts the stream.
 ```
 
 ## Why the stream starts now (and is NAV-neutral)
@@ -132,15 +132,22 @@ sequenceDiagram
 - `_toUnit(assets)` units are granted to the receiver, then the reserve is
   upgraded to cover the **global** GDA buffer requirement (a Superfluid stream
   cannot be partially started — `distributeFlow` needs the whole reserve to
-  back the whole flow). For any sane `rate × guaranteedFlowDuration` and a
-  not-already-broken vault, a single deposit clears that requirement, so
-  `_recalibrateFlow()` succeeds and the stream is live from this block.
+  back the whole flow). The uncapped replenisher pulls any pre-existing
+  global deficit from the external position first (buffer, then
+  principal-backing slice under impairment); the residual incoming-deposit
+  pre-fund covers what the external position cannot. In every non-terminal
+  regime the post-step deficit is ≤ 0 and `_recalibrateFlow()` brings the
+  stream live in this block.
 - The deposit only changes the *form* of the FM's assets: `assets` of
   underlying becomes `(assets − toUpgrade)` external principal + `toUpgrade`
   super-token reserve, **both counted in NAV**. So `totalAssets` rises by
   exactly `assets`, the share price is unchanged, and the depositor is not
   diluted by funding their own stream — the pre-fund is returned to them
-  out-of-band as the stream while the buffer replenishes the reserve.
+  out-of-band as the stream while the external position replenishes the
+  reserve. Under impairment the NAV clamp inverts (`ext + reserve <
+  trackedPrincipal`), and a new depositor enters at the impaired price —
+  no value transfer between leavers/stayers beyond what the share price
+  already reflects.
 
 ## ERC-4626 compliance
 
@@ -163,8 +170,11 @@ sequenceDiagram
 3. **No idle underlying.** Every deposited asset is either upgraded into the
    reserve or routed into the external vault in the same call; the FM holds 0
    underlying at rest (custody hazard invariant).
-4. **Stream starts at deposit time** (pre-funded) on the normal path; the
-   stall/recover model is the degraded fallback only (a single deposit cannot
-   clear a pre-existing global reserve deficit).
+4. **Stream starts at deposit time** (pre-funded). The uncapped
+   `_rebalanceYieldAssets()` always clears the global deficit from the
+   external position (eating into the principal-backing slice if the buffer
+   is exhausted, deferring the loss to the NAV clamp). The only stall state
+   is terminal impairment (`maxWithdraw(FM) == 0`); the `_recalibrateFlow()`
+   guard prevents the deposit from reverting in that limit.
 5. **Units track shareholding.** A holder's GDA units are proportional to their
    share balance.
