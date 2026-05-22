@@ -7,6 +7,7 @@ library NetworkConfig {
         address treasury;
         address underlyingAsset;
         address yieldAsset;
+        address externalVault;
         address fundOperator;
         address fundAdmin;
         uint256 initialEraStableYieldRate;
@@ -31,6 +32,7 @@ library NetworkConfig {
             treasury: address(0),
             underlyingAsset: address(0),
             yieldAsset: address(0),
+            externalVault: address(0),
             fundOperator: address(0),
             fundAdmin: address(0),
             initialEraStableYieldRate: 0,

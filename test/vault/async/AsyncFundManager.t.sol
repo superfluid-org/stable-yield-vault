@@ -10,9 +10,9 @@ import { ISuperfluidPool } from
 import { ISuperToken, SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
 import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
 
-import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
-import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
+import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/vault/async/IAsyncFundManager.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/vault/async/IStableYieldAsyncVault.sol";
 import { IFundManagerBase } from "src/interfaces/common/IFundManagerBase.sol";
 
 contract AsyncFundManagerTest is StableYieldVaultTestBase {

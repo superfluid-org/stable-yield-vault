@@ -48,14 +48,14 @@ contract Deploy is Script {
         console.log("");
 
         // Deploy Strategy Protocol
-        StableYieldVaultDeployer.DeploymentResult memory result = StableYieldVaultDeployer.deployAll(config);
+        StableYieldVaultDeployer.DeploymentResult memory result = StableYieldVaultDeployer.deployAsyncVault(config);
 
         _stopBroadcast();
 
         console.log("");
         console.log("===> DEPLOYMENT RESULTS");
         console.log(" --- Async Fund Manager    :", result.fundManager);
-        console.log(" --- Async Vault           :", result.asyncVault);
+        console.log(" --- Async Vault           :", result.vault);
         console.log("");
     }
 

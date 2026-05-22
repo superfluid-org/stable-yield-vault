@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
-import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/vault/async/IAsyncFundManager.sol";
+import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
 
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -13,7 +13,7 @@ import {
     IERC7540Redeem,
     IERC7575,
     IStableYieldAsyncVault
-} from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
+} from "src/interfaces/vault/async/IStableYieldAsyncVault.sol";
 
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";

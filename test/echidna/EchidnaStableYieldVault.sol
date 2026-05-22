@@ -30,9 +30,9 @@ import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
 import { SlotsBitmapLibrary } from "@superfluid-finance/ethereum-contracts/contracts/libs/SlotsBitmapLibrary.sol";
 
-import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
-import { StableYieldAsyncVault } from "src/async-vault/StableYieldAsyncVault.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/vault/async/IStableYieldAsyncVault.sol";
+import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
+import { StableYieldAsyncVault } from "src/vault/async/StableYieldAsyncVault.sol";
 
 interface IHevm {
 

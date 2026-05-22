@@ -15,8 +15,8 @@ import { Test } from "forge-std/Test.sol";
 import { StableYieldVaultDeployer } from "script/StableYieldVaultDeployer.sol";
 import { NetworkConfig } from "script/config/NetworkConfig.sol";
 
-import { AsyncFundManager } from "src/async-vault/AsyncFundManager.sol";
-import { StableYieldAsyncVault } from "src/async-vault/StableYieldAsyncVault.sol";
+import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
+import { StableYieldAsyncVault } from "src/vault/async/StableYieldAsyncVault.sol";
 
 contract StableYieldVaultTestBase is Test {
 
@@ -53,11 +53,12 @@ contract StableYieldVaultTestBase is Test {
         _initWhale();
 
         vm.startPrank(DEPLOYER);
-        StableYieldVaultDeployer.DeploymentResult memory deploymentResult = StableYieldVaultDeployer.deployAll(
+        StableYieldVaultDeployer.DeploymentResult memory deploymentResult = StableYieldVaultDeployer.deployAsyncVault(
             NetworkConfig.DeploymentConfig({
                 treasury: TREASURY,
                 underlyingAsset: address(_usdc),
                 yieldAsset: address(_usdcx),
+                externalVault: address(0),
                 fundOperator: FUND_OPERATOR,
                 fundAdmin: FUND_ADMIN,
                 initialEraStableYieldRate: INITIAL_ERA_STABLE_YIELD_RATE,
@@ -69,7 +70,7 @@ contract StableYieldVaultTestBase is Test {
         vm.stopPrank();
 
         _fundManager = AsyncFundManager(deploymentResult.fundManager);
-        _vault = StableYieldAsyncVault(deploymentResult.asyncVault);
+        _vault = StableYieldAsyncVault(deploymentResult.vault);
     }
 
     function _initWhale() internal {

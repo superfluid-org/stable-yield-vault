@@ -2,13 +2,13 @@
 pragma solidity ^0.8.34;
 
 import { FundManagerBase } from "src/common/FundManagerBase.sol";
-import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/vault/async/IAsyncFundManager.sol";
 
 import { IERC20 } from "@openzeppelin-v5/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin-v5/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
-import { IStableYieldAsyncVault } from "src/interfaces/async-vault/IStableYieldAsyncVault.sol";
+import { IStableYieldAsyncVault } from "src/interfaces/vault/async/IStableYieldAsyncVault.sol";
 
 /**
  * @title AsyncFundManager

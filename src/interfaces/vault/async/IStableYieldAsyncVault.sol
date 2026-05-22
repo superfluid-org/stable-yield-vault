@@ -8,7 +8,7 @@ import { IERC7540Redeem } from "./IERC7540Redeem.sol";
 import { IERC7575 } from "./IERC7575.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
-import { IAsyncFundManager } from "src/interfaces/async-vault/IAsyncFundManager.sol";
+import { IAsyncFundManager } from "src/interfaces/vault/async/IAsyncFundManager.sol";
 
 /**
  * @title IStableYieldAsyncVault
