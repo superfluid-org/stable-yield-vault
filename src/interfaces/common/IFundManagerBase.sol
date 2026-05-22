@@ -118,12 +118,6 @@ interface IFundManagerBase {
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /**
-     * @notice Unutilized underlying assets held by the FundManager (available to cover redeem deficits).
-     * @return balance The amount of unutilized assets, in underlying decimals.
-     */
-    function unutilizedAssetsBalance() external view returns (uint256 balance);
-
-    /**
      * @notice Super-token balance funding the yield stream to the pool.
      * @return balance The amount of yield assets, in super-token decimals (18).
      */

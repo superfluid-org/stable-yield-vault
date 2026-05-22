@@ -145,6 +145,11 @@ contract AsyncFundManager is FundManagerBase, IAsyncFundManager {
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /// @inheritdoc IAsyncFundManager
+    function unutilizedAssetsBalance() public view returns (uint256 balance) {
+        balance = UNDERLYING_ASSET.balanceOf(address(this));
+    }
+
+    /// @inheritdoc IAsyncFundManager
     function evaluateFunding() external view returns (int256 funding) {
         IStableYieldAsyncVault.Snapshot memory snap = IStableYieldAsyncVault(address(VAULT)).getSnapshot();
 

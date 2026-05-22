@@ -134,6 +134,12 @@ interface IAsyncFundManager is IFundManagerBase {
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /**
+     * @notice Unutilized underlying assets held by the FundManager (available to cover redeem deficits).
+     * @return balance The amount of unutilized assets, in underlying decimals.
+     */
+    function unutilizedAssetsBalance() external view returns (uint256 balance);
+
+    /**
      * @notice Evaluate the current FundManager current funding situation
      * @return funding amount that can be taken if negative, or that must be given if positive
      */

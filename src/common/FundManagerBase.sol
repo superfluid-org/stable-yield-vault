@@ -250,11 +250,6 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     //  |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /// @inheritdoc IFundManagerBase
-    function unutilizedAssetsBalance() public view returns (uint256 balance) {
-        balance = UNDERLYING_ASSET.balanceOf(address(this));
-    }
-
-    /// @inheritdoc IFundManagerBase
     function yieldAssetsBalance() public view returns (uint256 balance) {
         balance = YIELD_ASSET.balanceOf(address(this));
     }
