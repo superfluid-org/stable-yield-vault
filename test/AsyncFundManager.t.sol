@@ -323,7 +323,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
         // Choose a rate where the new flow still fits the GDA security deposit (~hours of flow)
         // but the 7-day invariant horizon exceeds the yield buffer.
-        vm.expectRevert(IFundManagerBase.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
+        vm.expectRevert(IAsyncFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setStableYieldRate(increasedAnnualRate);
 
         vm.stopPrank();
@@ -359,7 +359,7 @@ contract AsyncFundManagerTest is StableYieldVaultTestBase {
 
         // Raising the horizon to 1000 years would require far more yield buffer than we hold
         vm.prank(FUND_ADMIN);
-        vm.expectRevert(IFundManagerBase.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
+        vm.expectRevert(IAsyncFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
         _fundManager.setGuaranteedFlowDuration(365 days * 1000);
     }
 
