@@ -12,12 +12,6 @@ import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/util
 
 import { Test } from "forge-std/Test.sol";
 
-import { StableYieldVaultDeployer } from "script/StableYieldVaultDeployer.sol";
-import { NetworkConfig } from "script/config/NetworkConfig.sol";
-
-import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
-import { StableYieldAsyncVault } from "src/vault/async/StableYieldAsyncVault.sol";
-
 contract StableYieldVaultTestBase is Test {
 
     using SuperTokenV1Library for ISuperToken;
@@ -27,9 +21,6 @@ contract StableYieldVaultTestBase is Test {
     TestToken internal _usdc;
     ISuperToken internal _usdcx;
     SuperToken internal _usdcSuperToken;
-
-    AsyncFundManager internal _fundManager;
-    StableYieldAsyncVault internal _vault;
 
     address internal immutable DEPLOYER = makeAddr("DEPLOYER");
     address internal immutable TREASURY = makeAddr("TREASURY");
@@ -51,26 +42,6 @@ contract StableYieldVaultTestBase is Test {
         (_usdc, _usdcSuperToken) = _deployer.deployWrapperSuperToken("USDC", "USDC", 6, type(uint256).max, address(0));
         _usdcx = ISuperToken(address(_usdcSuperToken));
         _initWhale();
-
-        vm.startPrank(DEPLOYER);
-        StableYieldVaultDeployer.DeploymentResult memory deploymentResult = StableYieldVaultDeployer.deployAsyncVault(
-            NetworkConfig.DeploymentConfig({
-                treasury: TREASURY,
-                underlyingAsset: address(_usdc),
-                yieldAsset: address(_usdcx),
-                externalVault: address(0),
-                fundOperator: FUND_OPERATOR,
-                fundAdmin: FUND_ADMIN,
-                initialEraStableYieldRate: INITIAL_ERA_STABLE_YIELD_RATE,
-                guaranteedFlowDuration: GUARANTEED_FLOW_DURATION,
-                shareName: "Stable Yield Vault Share",
-                shareSymbol: "SYVS"
-            })
-        );
-        vm.stopPrank();
-
-        _fundManager = AsyncFundManager(deploymentResult.fundManager);
-        _vault = StableYieldAsyncVault(deploymentResult.vault);
     }
 
     function _initWhale() internal {

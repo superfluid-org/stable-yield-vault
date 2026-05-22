@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { StableYieldVaultTestBase } from "./StableYieldVaultTestBase.t.sol";
+import { AsyncVaultTestBase } from "./AsyncVaultTestBase.t.sol";
 
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -13,7 +13,7 @@ import { IERC7540Redeem } from "src/interfaces/vault/async/IERC7540Redeem.sol";
 import { IERC7575 } from "src/interfaces/vault/async/IERC7575.sol";
 import { IStableYieldAsyncVault } from "src/interfaces/vault/async/IStableYieldAsyncVault.sol";
 
-contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
+contract StableYieldAsyncVaultTest is AsyncVaultTestBase {
 
     using Math for uint256;
 
@@ -110,8 +110,8 @@ contract StableYieldAsyncVaultTest is StableYieldVaultTestBase {
         vm.assertEq(_vault.totalClaimableRedeemAssets(), 0);
         vm.assertEq(_vault.totalAssets(), 0);
         vm.assertEq(_vault.totalSupply(), 0);
-        vm.assertEq(_vault.name(), "Stable Yield Vault Share");
-        vm.assertEq(_vault.symbol(), "SYVS");
+        vm.assertEq(_vault.name(), SHARE_NAME);
+        vm.assertEq(_vault.symbol(), SHARE_SYMBOL);
         vm.assertEq(_vault.decimals(), 18);
     }
 

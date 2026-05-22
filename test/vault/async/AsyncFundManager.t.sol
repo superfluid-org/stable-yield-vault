@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { StableYieldVaultTestBase } from "./StableYieldVaultTestBase.t.sol";
+import { AsyncVaultTestBase } from "./AsyncVaultTestBase.t.sol";
 
 import { SuperTokenV1Library } from "@superfluid-finance/ethereum-contracts/contracts/apps/SuperTokenV1Library.sol";
 import { ISuperfluidPool } from
@@ -10,12 +10,12 @@ import { ISuperfluidPool } from
 import { ISuperToken, SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
 import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
 
-import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
+import { IFundManagerBase } from "src/interfaces/common/IFundManagerBase.sol";
 import { IAsyncFundManager } from "src/interfaces/vault/async/IAsyncFundManager.sol";
 import { IStableYieldAsyncVault } from "src/interfaces/vault/async/IStableYieldAsyncVault.sol";
-import { IFundManagerBase } from "src/interfaces/common/IFundManagerBase.sol";
+import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
 
-contract AsyncFundManagerTest is StableYieldVaultTestBase {
+contract AsyncFundManagerTest is AsyncVaultTestBase {
 
     using SuperTokenV1Library for ISuperToken;
 

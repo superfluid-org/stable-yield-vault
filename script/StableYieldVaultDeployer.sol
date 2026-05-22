@@ -22,6 +22,14 @@ library StableYieldVaultDeployer {
         results = _deployAsyncVault(config);
     }
 
+    function deploySyncVault(NetworkConfig.DeploymentConfig memory config)
+        internal
+        returns (DeploymentResult memory results)
+    {
+        // Deploy the SyncVault and SyncFundManager Contract
+        results = _deploySyncVault(config);
+    }
+
     function _deployAsyncVault(NetworkConfig.DeploymentConfig memory config)
         internal
         returns (DeploymentResult memory results)
