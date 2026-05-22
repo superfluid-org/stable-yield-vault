@@ -259,12 +259,11 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
      favours remaining holders — Invariant 1).
 
 - View helpers the vault proxies (pure reads, no per-call counters):
-  `totalManagedAssets()` (the reserve-inclusive NAV — Invariant 2),
-  `serviceableUnderlying()` (returns `totalManagedAssets()` — per-call freed
-  reserve excess scales with the redeemer's unit share, so NAV itself is the
-  global upper bound on what a redeem can source; under impairment the clamp
-  shrinks it appropriately), `maxExternalDeposit()`, plus
-  `EXTERNAL_VAULT`/`trackedPrincipal` getters.
+  `totalManagedAssets()` (the reserve-inclusive NAV — Invariant 2; also caps
+  `maxWithdraw`/`maxRedeem`: the per-call freed reserve excess scales with the
+  redeemer's unit share, so NAV itself is the global upper bound on what a
+  redeem can source, and under impairment the clamp shrinks it appropriately),
+  `maxExternalDeposit()`, plus `EXTERNAL_VAULT`/`trackedPrincipal` getters.
 
 ### `StableYieldVault` (extends OZ `ERC4626`, `ReentrancyGuard`) — thin face
 
@@ -294,7 +293,7 @@ getters delegate to the FM (ABI/back-compat).
   user activity is operator-only via the inherited `ensureYieldFlowDuration()`.
 - `maxDeposit/maxMint` capped by `FUND_MANAGER.maxExternalDeposit()` (the
   external vault's deposit limit, FM as holder). `maxWithdraw/maxRedeem` capped
-  by `FUND_MANAGER.serviceableUnderlying()` (= `totalManagedAssets()` — the
+  by `FUND_MANAGER.totalManagedAssets()` (the
   reserve-inclusive NAV is the global upper bound on what a redeem can source,
   since the recalibration-freed reserve excess scales with the redeemer's unit
   share). Under external impairment the NAV clamp shrinks this appropriately,
@@ -511,7 +510,7 @@ the principal-backing slice; the loss is reflected by the NAV clamp inverting
   is funded from the recalibration-freed reserve excess (always serviceable via
   `_downgrade`); only the *external remainder* reverts if the external vault
   cannot service it. `maxWithdraw`/`maxRedeem` reflect it via
-  `serviceableUnderlying() = totalManagedAssets()` — under external impairment
+  `totalManagedAssets()` — under external impairment
   the NAV clamp shrinks the bound, so a request ≤ `max*` never bricks.
 - **Rate > sustainable yield** (accepted; **diverges from async**): the buffer
   depletes, the per-op replenisher continues uncapped into the

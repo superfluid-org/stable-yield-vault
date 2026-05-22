@@ -38,7 +38,7 @@ sequenceDiagram
     participant POOL as GDA Pool
 
     U->>V: withdraw(assets, receiver, owner)
-    Note right of V: nonReentrant — max* from FUND_MANAGER.serviceableUnderlying()
+    Note right of V: nonReentrant — max* from FUND_MANAGER.totalManagedAssets()
     opt caller != owner
         V->>V: spendAllowance(owner, caller, shares)
     end
@@ -65,14 +65,13 @@ sequenceDiagram
     - OZ ERC-4626 checks:
         withdraw: assets <= maxWithdraw(owner)
                   = min(convertToAssets(balanceOf(owner)),
-                        FUND_MANAGER.serviceableUnderlying())
+                        FUND_MANAGER.totalManagedAssets())
         redeem:   shares <= maxRedeem(owner)
                   = min(balanceOf(owner),
-                        convertToShares(FUND_MANAGER.serviceableUnderlying()))
-      serviceableUnderlying() = totalManagedAssets()
-                              = min(trackedPrincipal, ext.maxWithdraw(FM)
-                                                      + scaledReserve)
-                                + unutilizedAssetsBalance()
+                        convertToShares(FUND_MANAGER.totalManagedAssets()))
+      totalManagedAssets() = min(trackedPrincipal, ext.maxWithdraw(FM)
+                                                   + scaledReserve)
+                             + unutilizedAssetsBalance()
       — the reserve-inclusive NAV is the global upper bound on what a redeem
       can source: the recalibration-freed reserve excess scales with the
       redeemer's unit share, and the external remainder is covered by the
@@ -191,7 +190,7 @@ When the external position is impaired
 - `withdraw` / `redeem` are synchronous; `previewWithdraw` / `previewRedeem`
   do not revert (OZ defaults).
 - `maxWithdraw` / `maxRedeem` reflect serviceability via
-  `serviceableUnderlying()` (returns the reserve-inclusive NAV — 4626-honest
+  `totalManagedAssets()` (the reserve-inclusive NAV — 4626-honest
   under external impairment via the NAV clamp; never bricks a request ≤ max*).
 - Allowance is spent on the owner when `caller != owner` (standard ERC-4626).
 
