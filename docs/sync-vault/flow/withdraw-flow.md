@@ -1,20 +1,23 @@
 # Investor Withdraw / Redeem Flow (Synchronous)
 
-> **Revised 2026-05-19 (async-symmetric pivot; netting locked 2026-05-19).** The
-> FundManager is the sole custodian and does the payout. Redemption returns the
-> **reserve-inclusive NAV pro-rata**. The reserve slice is NOT an NAV-pro-rata
-> downgrade — it is the **recalibration-freed reserve excess**: decreasing the
-> redeemer's units lowers the required reserve, and only that freed excess
-> (capped at the payout) is downgraded, so remaining holders' stream horizon is
-> preserved by construction. The external vault funds the remainder. See
-> `docs/sync-vault/design.md` (decisions 5/11, Revision rows C/D).
+> **Revised 2026-05-19 (async-symmetric pivot; netting locked 2026-05-19);
+> revised 2026-05-26 (NAV clamp dropped — floating share).** The FundManager is
+> the sole custodian and does the payout. Redemption returns the
+> **reserve-inclusive NAV pro-rata** (`shares · NAV / supply`, NAV the unclamped
+> plain sum). The reserve slice is NOT an NAV-pro-rata downgrade — it is the
+> **recalibration-freed reserve excess**: decreasing the redeemer's units lowers
+> the required reserve, and only that freed excess (capped at the payout) is
+> downgraded, so remaining holders' stream horizon is preserved by construction.
+> The external vault funds the remainder. There is **no `trackedPrincipal`
+> decrement** — OZ proportional accounting keeps stayers whole. See
+> `docs/sync-vault/design.md` (decisions 5/11, Revision 2026-05-26).
 
 ## Contracts involved
 
 | Contract | Role |
 |---|---|
-| **StableYieldVault** | ERC-4626 face. Spends allowance, burns shares, delegates the payout + accounting to the FM. Holds **no** assets |
-| **SyncFundManager** | Sole custodian. Best-effort buffer replenish, proportional unit decrease, proportional `trackedPrincipal` decrement, funds the payout (freed-reserve-excess leg + external remainder), recalibrates the (lower) flow |
+| **StableYieldVault** | ERC-4626 face. Spends allowance, burns shares, delegates the payout to the FM. Holds **no** assets |
+| **SyncFundManager** | Sole custodian. Best-effort pre-rebalance, proportional unit decrease, funds the payout (freed-reserve-excess leg + external remainder), recalibrates the (lower) flow, post-payout trim. No principal counter |
 | **External ERC-4626** | Services the external remainder in underlying. Reverts only if illiquid (accepted, decision 5) |
 | **GDA Pool** | Superfluid pool; the holder's stream stops/shrinks proportionally |
 
@@ -22,9 +25,9 @@
 
 | State | Location | Description |
 |---|---|---|
-| PRINCIPAL | External ERC-4626 (held by **FM**) | `trackedPrincipal`; decremented proportionally to shares burned |
+| PRINCIPAL | External ERC-4626 (held by **FM**) | Recoverable via `EXTERNAL_VAULT.maxWithdraw(FM)`; the redeemer's pro-rata slice exits with them (no principal counter) |
 | YIELD-ASSET RESERVE | FundManager (super-token) | The recalibration-*freed* excess (after the unit decrease) is downgraded to fund the redeemer's reserve slice |
-| BUFFER | External ERC-4626 (held by **FM**) | Compounding surplus; replenishes the reserve (best-effort, start of the call); absorbs external losses before any user-facing dip |
+| EXTERNAL SURPLUS | External ERC-4626 (held by **FM**) | Compounding surplus, counted in NAV (accrues to holders); the pre-rebalance replenishes the reserve deficit from it (best-effort, start of the call) |
 | ASSETS | Receiver wallet | Underlying delivered: freed-reserve-excess leg (from downgrade) + external remainder |
 
 ## Sequence diagram
@@ -45,7 +48,7 @@ sequenceDiagram
     V->>V: read totalSharesOwned and supplyBeforeBurn (before burn)
     V->>V: burn(owner, shares)
     V->>FM: onWithdraw(owner, shares, totalSharesOwned, supplyBeforeBurn, receiver, assets)
-    FM->>FM: replenishReserveFromBuffer [no-op when solvent]
+    FM->>FM: rebalanceYieldAssets [no-op when solvent]
     FM->>POOL: decreaseMemberUnits (proportional)
     FM->>POOL: guarded recalibrateFlow
     Note right of POOL: distributeFlow refunds GDA deposit-buffer slice into reserve (becomes freed excess)
@@ -53,7 +56,7 @@ sequenceDiagram
     FM->>FM: downgrade(fromReserve * SCALING_FACTOR)
     FM->>E: withdraw(assets - fromReserve, receiver, FM)
     FM->>U: safeTransfer(receiver, fromReserve) [reserve leg]
-    FM->>FM: trackedPrincipal -= trackedPrincipal * shares / supplyBeforeBurn (floor)
+    FM->>FM: rebalanceYieldAssets [post-payout trim: residual freed excess back to external]
     Note over E: external remainder reverts only if the external vault is illiquid (accepted)
 ```
 
@@ -69,19 +72,19 @@ sequenceDiagram
         redeem:   shares <= maxRedeem(owner)
                   = min(balanceOf(owner),
                         convertToShares(FUND_MANAGER.totalManagedAssets()))
-      totalManagedAssets() = min(trackedPrincipal, ext.maxWithdraw(FM)
-                                                   + scaledReserve)
-                             + unutilizedAssetsBalance()
-      — the reserve-inclusive NAV is the global upper bound on what a redeem
-      can source: the recalibration-freed reserve excess scales with the
-      redeemer's unit share, and the external remainder is covered by the
-      external position; under impairment the NAV clamp shrinks this
-      appropriately. A larger request reverts up-front with
+      totalManagedAssets() = EXTERNAL_VAULT.maxWithdraw(FM) + scaledReserve
+                                                            + rawUnderlying
+      — the reserve-inclusive plain sum (no clamp) is the global upper bound on
+      what a redeem can source: the recalibration-freed reserve excess scales
+      with the redeemer's unit share, and the external remainder is covered by
+      the external position; under impairment the lower recoverable NAV shrinks
+      this. A larger request reverts up-front with
       ERC4626ExceededMaxWithdraw / ERC4626ExceededMaxRedeem.
     - withdraw: shares = previewWithdraw(assets) = _convertToShares(assets, Ceil)
       redeem:   assets = previewRedeem(shares)   = _convertToAssets(shares, Floor)
       `assets` is the redeemer's pro-rata slice of the RESERVE-INCLUSIVE NAV
-      (= min(trackedPrincipal, ext.maxWithdraw(FM)) + unutilized + scaledReserve).
+      (= EXTERNAL_VAULT.maxWithdraw(FM) + scaledReserve + rawUnderlying), priced
+      at the current (floating) share value.
 
 (2) Vault._withdraw(caller, receiver, owner, assets, shares)   — CEI ordering:
     a. if caller != owner: _spendAllowance(owner, caller, shares)
@@ -104,9 +107,9 @@ sequenceDiagram
         _rebalanceYieldAssets()
         — no external calls when evaluateYieldAssetsDeficit() == 0 (the common
           pre-withdraw case). Opportunistically cures a *pre-existing* deficit
-          (external underperformed since the last rebalance) from the buffer
-          (then principal-backing slice under impairment); capped at
-          EXTERNAL_VAULT.maxWithdraw(FM) so it can never brick the exit.
+          (external underperformed since the last rebalance) from the external
+          surplus (then deeper into the external position under impairment);
+          capped at EXTERNAL_VAULT.maxWithdraw(FM) so it can never brick the exit.
     - UNIT DECREASE:
         holderUnits = POOL.getUnits(holder)
         if holderUnits > 0:
@@ -147,9 +150,11 @@ sequenceDiagram
           downgrades it and redeposits the underlying into the external vault,
           so the reserve returns to target. Inv. 7 holds (no raw underlying at
           rest in the FM).
-    - PRINCIPAL ACCOUNTING (Inv. 1, rounded DOWN — favours remaining holders):
-        trackedPrincipal -= trackedPrincipal.mulDiv(shares, supplyBeforeBurn,
-                                                    Floor)
+    - NO PRINCIPAL-COUNTER STEP. `redeemingAssets = shares · NAV / supply`
+      (OZ previewRedeem, floor), so the burn removed exactly the redeemer's
+      pro-rata slice of NAV; the share price is unchanged for stayers (floor
+      rounding favours them). The old proportional `trackedPrincipal` decrement
+      is no longer needed.
 ```
 
 ## Why the freed-excess leg (not an NAV-pro-rata downgrade)
@@ -166,20 +171,20 @@ sourcing from reserve vs. external is value-neutral for stayers (total payout is
 
 ## Impairment (loss pass-through)
 
-When the external position is impaired
-(`EXTERNAL_VAULT.maxWithdraw(FM) < trackedPrincipal`):
+When the external position is impaired (its recoverable value
+`EXTERNAL_VAULT.maxWithdraw(FM)` falls below the deposited principal):
 
-- The NAV floor `min(trackedPrincipal, EXTERNAL_VAULT.maxWithdraw(FM))` falls,
-  so `previewRedeem` prices the share **below par** and the exiting holder takes
-  the pro-rata impaired payout — honest pass-through.
-- The proportional `trackedPrincipal` decrement
-  (`P −= P · shares / supplyBeforeBurn`, floor) keeps `V/P` constant across the
-  exit, so **no value transfers between leavers and remaining holders**. The
-  floor rounding favours the vault / remaining holders.
-- A small loss is absorbed first by the **buffer**: while
-  `EXTERNAL_VAULT.maxWithdraw(FM) ≥ trackedPrincipal`, the NAV floor stays
-  pinned at `trackedPrincipal` and the external remainder is whole — losses only
-  reach users once they exceed the entire accumulated buffer.
+- NAV (`totalManagedAssets()`, the unclamped sum) falls, so `previewRedeem`
+  prices the share **below the entry price** and the exiting holder takes the
+  pro-rata impaired payout — honest, immediate pass-through. There is no
+  accumulated buffer to delay it (the external surplus that would have cushioned
+  it was already booked into the share price as appreciation while external was
+  out-earning the rate).
+- The burn removes exactly `redeemingAssets = shares · NAV / supply` (floor),
+  so the share price is unchanged for remaining holders — **no value transfers
+  between leavers and stayers**, guaranteed by OZ proportional accounting rather
+  than a principal-counter decrement. Floor rounding favours the vault /
+  remaining holders.
 - The **reserve leg is unaffected by external impairment** (it is freed/downgraded
   super-token, not external-vault shares); only the external remainder carries
   the external loss. This matches async, where the FM downgrades reserve to
@@ -190,17 +195,21 @@ When the external position is impaired
 - `withdraw` / `redeem` are synchronous; `previewWithdraw` / `previewRedeem`
   do not revert (OZ defaults).
 - `maxWithdraw` / `maxRedeem` reflect serviceability via
-  `totalManagedAssets()` (the reserve-inclusive NAV — 4626-honest
-  under external impairment via the NAV clamp; never bricks a request ≤ max*).
+  `totalManagedAssets()` (the reserve-inclusive unclamped NAV — 4626-honest
+  under external impairment via the lower recoverable NAV; never bricks a
+  request ≤ max*).
 - Allowance is spent on the owner when `caller != owner` (standard ERC-4626).
 
 ## Key invariants
 
-1. **Principal accounting (FM-owned).** `trackedPrincipal −= trackedPrincipal ·
-   sharesBurned / totalSupplyBeforeBurn` (floor; favours remaining holders).
-2. **V/P invariant across impaired exits.** The proportional decrement keeps
-   `EXTERNAL_VAULT.maxWithdraw(FM) / trackedPrincipal` constant through an
-   exit — no inter-holder value transfer.
+1. **Share accounting (OZ-standard, no principal counter).** The redeemer is
+   paid `redeemingAssets = shares · NAV / supply` (floor); there is no
+   `trackedPrincipal` decrement.
+2. **No inter-holder value transfer on exit.** Because the payout is exactly the
+   burned shares' pro-rata of NAV, the share price (`NAV / supply`) is unchanged
+   for stayers — floor rounding favours them. (This is the property the old
+   proportional `trackedPrincipal` decrement enforced manually; OZ accounting
+   now gives it for free.)
 3. **Stayers' horizon preserved by construction.** Only the recalibration-freed
    reserve excess is downgraded (`fromReserve ≤ freedExcess`), so whenever
    `evaluateYieldAssetsDeficit() ≤ 0` held before the withdraw it still holds

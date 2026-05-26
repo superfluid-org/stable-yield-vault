@@ -1,12 +1,42 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
 **stable** yield is streamed to depositors via the same Superfluid GDA engine the
 async vault uses. The external vault replaces the async vault's manual off-chain
 "working assets" leg.
+
+---
+
+## ⚠️ Revision 2026-05-26 — NAV clamp dropped (floating share)
+
+The `min(trackedPrincipal, …)` NAV clamp and the `trackedPrincipal` counter are
+**removed entirely**. The earlier model pinned the share to ≈1:1 and held the
+external surplus aside as a protocol-owned, never-distributed solvency **buffer**
+(excluded from share price) — a deliberate "users get *exactly* the promised
+rate; the protocol retains the excess as a loss cushion" product. We are instead
+going for a **floating share that tracks the external vault's real performance**:
+a holder's total return is the external yield, delivered as the streamed promised
+rate **plus** share-price appreciation for the excess (`external − promised`).
+The two are **not** double-counted — the stream is funded by pulling from the
+external position, so it lowers `maxWithdraw(FM)` by exactly the streamed amount
+and the appreciation is the residual.
+
+| # | Pre-2026-05-26 (clamp) | Revised 2026-05-26 (floating) |
+|---|---|---|
+| I | `totalAssets = min(trackedPrincipal, ext.maxWithdraw(FM) + scaledReserve + rawUnderlying)`. Surplus above `trackedPrincipal` excluded from share price (protocol-owned buffer); share ≈1:1. | **`totalAssets = ext.maxWithdraw(FM) + scaledReserve + rawUnderlying`** — plain sum of recoverable balances, no clamp. The external surplus is **included** and accrues to holders as share appreciation. Share floats. |
+| II | `trackedPrincipal` counter: `+= assets` on deposit, `−= trackedPrincipal·sharesBurned/supplyBeforeBurn` (floor) on withdraw. Underpinned the clamp + the V/P-invariant on impaired exits. | **Removed.** OZ ERC-4626 proportional accounting handles both legs: deposit is NAV-neutral (`shares = assets·supply/NAV`), withdraw is NAV-pro-rata (`shares·NAV/supply`), so the no-inter-holder-value-transfer property the decrement enforced now holds automatically. |
+| III | Loss-absorption: the accumulated buffer absorbs external underperformance first; the share is impaired only once the buffer is exhausted. "Stable" = total return capped at the promised rate. | **No accumulated cushion.** NAV is real recoverable value, so external underperformance reflects **immediately** in the share price; the holder's total return converges to the real external yield. "Stable" now describes only the **streamed component** (a smooth floor), not the total return. |
+| IV | Donation resistance came from the clamp: super-token / raw-underlying donations above `trackedPrincipal` were absorbed, leaving share price unchanged. | **Clamp no longer resists donations.** Under a floating share a donation just raises NAV → raises price for existing holders → an irrational gift, not an attack. The only genuine residual is the classic **first-deposit inflation attack**, mitigated by OZ virtual shares (`_decimalsOffset()`, proposed positive offset) ± a dead-shares seed / min-shares-minted guard. See §Security. |
+
+Decisions **1, 2, 5, 10** are revised again; **the protocol-owned "buffer"
+concept (decision 2 / Invariant 3) is retired** — there is no excluded slice.
+Invariants **1, 2** are rewritten (principal accounting removed; exits are
+OZ-pro-rata) and **3** is retired. The historical revision sections below
+(2026-05-19/21/22) are kept as the design journey but are **superseded on every
+point that touches the clamp, `trackedPrincipal`, or the buffer**.
 
 ---
 
@@ -78,65 +108,67 @@ refined; a new custody decision **11** is added; **3, 7, 9** are unchanged.
 
 ## Core principle
 
-> **Principal is tracked by shares and custodied by the FundManager (deployed
-> into the external ERC-4626). A stable yield is delivered out-of-band as a
-> Superfluid stream, pre-funded from each deposit into the FM's super-token
-> reserve and continuously replenished from the external position — surplus
-> first, then principal-backing slice under impairment.**
+> **Principal is custodied by the FundManager (deployed into an external
+> ERC-4626) and tracked by ERC-4626 shares. A stable yield is delivered
+> out-of-band as a Superfluid stream at an operator-committed rate, pre-funded
+> from each deposit into the FM's super-token reserve and continuously
+> replenished from the external position. The share floats with the external
+> vault's real performance: a holder's total return is the external yield,
+> split into the streamed promised rate plus share-price appreciation for the
+> excess (`external − promised`).**
 
-NAV is the FM's recoverable external principal **plus** the super-token reserve,
-so a deposit only changes the *form* of the FM's assets (external-vault shares ↔
-super-token), never their total — the share is NAV-neutral at entry and stays
-≈1:1 with the underlying while the external vault earns at least the promised
-rate. This is structurally identical to the async vault (FM custodies capital +
-a super-token reserve; NAV = working + unutilized + scaled reserve; the stream
-distributes the reserve and is replenished by yield) **minus the epoch
-lifecycle**. The streamed APY is operator-committed and decoupled from the
-external vault's real performance; the surplus above it compounds inside the
-external vault as a protocol-owned solvency **buffer**.
+NAV is the FM's recoverable value from all sources — external position +
+super-token reserve + (transient) raw underlying — with **no clamp**. A deposit
+only changes the *form* of the FM's assets (external-vault shares ↔
+super-token), so it is NAV-neutral at entry. Thereafter the share price moves
+with the external vault: while it earns above the promised rate the share
+appreciates by the difference; while it earns below, the share declines (honest,
+immediate pass-through). This is the async vault's FM-custody + super-token
+reserve shape **minus the epoch lifecycle and minus the NAV clamp** — the sync
+share is a standard floating ERC-4626 share, not a forward-priced ≈1:1 receipt.
 
 Consequences:
 
-- The share is a principal receipt, **≈**1:1 with the underlying — *not* a hard
-  peg. Between rebalances the stream continuously drains the reserve, so NAV
-  (and the share price) ticks slightly below par and recovers at the next
-  funded rebalance (per-op or operator `ensureYieldFlowDuration()`), exactly
-  like the async forward-priced share but continuously observable instead of
-  epoch-snapshotted.
-- External yield above the promised rate is **not** booked into the share price
-  — it stays inside the external vault as compounding external-vault shares, the
-  protocol-owned **buffer**.
-- That buffer is the loss-absorption layer: external losses (and rate
-  over-promises) shrink the buffer first; once the buffer is exhausted the
-  replenisher continues uncapped into the principal-backing slice and the
-  residual loss passes through honestly via the `min(trackedPrincipal, ext +
-  reserve)` clamp in NAV.
-- The buffer is **never extracted as treasury revenue** (treasury earns only the
-  pre-existing 1% fee stream) but it **is** fully drawable to fund the stream
-  under impairment — there is no protocol-owned slice kept idle.
-- Principal *transiently* funds the stream (the pre-fund slice) and continues
-  to fund it under impairment (the uncapped replenisher); principal is
-  preserved long-run **iff** external yield ≥ the promised rate, otherwise the
-  loss passes through honestly. This is the async risk profile minus the
-  operator-injection recovery channel — there is no `fundReserve`; the operator
-  must keep the rate sustainable (`setStableYieldRate` lever). The stream
-  itself never stalls until `EXTERNAL_VAULT.maxWithdraw(FM) == 0` (terminal
-  impairment).
+- The share is a **floating** ERC-4626 share, priced
+  `totalManagedAssets() / totalSupply` (OZ standard, with a virtual-shares
+  offset). It is *not* pegged. It ticks slightly as the stream drains the
+  reserve between rebalances and tracks the external vault's real NAV otherwise.
+- A holder's **total return decomposes** as: the streamed component (the
+  promised `stableYieldRate`, smooth, in super-token) **plus** share
+  appreciation (`external yield − promised rate`, booked into the share price).
+  The sum is the external vault's real yield — **single-counted**, because the
+  stream is funded by pulling from the external position (every streamed unit
+  lowers `maxWithdraw(FM)` by that unit; the appreciation is the residual).
+- There is **no protocol-owned buffer** held aside from the share price. The
+  external surplus between rebalances physically compounds in the external vault
+  and is fully counted in NAV — it belongs to shareholders. The treasury earns
+  only the pre-existing 1% fee stream.
+- **Loss pass-through is immediate.** NAV is real recoverable value, so external
+  losses (or a rate over-promise that drains the external position faster than
+  it earns) reflect directly in the share price. There is no accumulated cushion
+  to delay it — that is the trade for giving holders the upside. Principal is
+  preserved long-run **iff** external yield ≥ the promised rate; otherwise the
+  loss passes through honestly via NAV.
+- Principal *transiently* funds the stream (the pre-fund slice) and continues to
+  fund it under impairment (the uncapped replenisher); the stream stays at the
+  promised rate while `EXTERNAL_VAULT.maxWithdraw(FM) > 0` and only stalls at
+  terminal impairment (`== 0`). There is no `fundReserve`; the operator's only
+  sustainability lever is `setStableYieldRate`.
 
 ## Locked decisions
 
 | # | Decision | Choice | Status |
 |---|---|---|---|
-| 1 | Share / loss model | Principal receipt **≈1:1** (reserve-inclusive NAV, ticks below par between rebalances); honest loss pass-through via the `min(trackedPrincipal, external)` floor | **revised** |
-| 2 | Surplus handling | External surplus (buffer) compounds inside the external vault; the per-op rebalance and `ensureYieldFlowDuration()` pull only the reserve *deficit* — surplus first, **then into the principal-backing slice when surplus is exhausted** (uncapped at `EXTERNAL_VAULT.maxWithdraw(FM)`). Trim of excess super-token back to the external vault runs on every rebalance — `onWithdraw` trims its post-payout residual freed excess (no above-target slack at rest) | **revised** |
+| 1 | Share / loss model | **Floating** ERC-4626 share priced `totalManagedAssets()/totalSupply` (no clamp, no peg); total return = streamed promised rate + appreciation for `external − promised`; immediate honest loss pass-through via real-recoverable NAV | **revised 2026-05-26** |
+| 2 | Surplus handling | External surplus compounds inside the external vault and is **counted in NAV** (accrues to shareholders as appreciation) — **no protocol-owned excluded buffer**. The per-op rebalance and `ensureYieldFlowDuration()` pull only the reserve *deficit* (surplus stays deployed/compounding); under impairment the same deficit-only pull continues uncapped into the external position. Excess super-token is trimmed back to external on every rebalance — `onWithdraw` trims its post-payout residual freed excess (no above-target slack at rest) | **revised 2026-05-26** |
 | 3 | Rate model | Operator-set promised `stableYieldRate` (reuse async model) | unchanged |
-| 4 | Stream funding | **Pre-funded from each deposit** into the super-token reserve (async-style), then continuously replenished from the external position — surplus first, principal-backing slice under impairment (uncapped). Stream only stalls at terminal impairment (`maxWithdraw(FM) == 0`); no on-chain operator subsidy | **revised** |
+| 4 | Stream funding | **Pre-funded from each deposit** into the super-token reserve (async-style), then continuously replenished from the external position — surplus first, then deeper into the external position under impairment (uncapped). Stream only stalls at terminal impairment (`maxWithdraw(FM) == 0`); no on-chain operator subsidy | **revised** |
 | 5 | Withdraw liquidity | Async-faithful: decreasing the redeemer's units lowers the required reserve; the **recalibration-freed excess** (capped at `min(freedExcess, redeemingAssets)`) funds the reserve slice (preserves stayers' horizon by construction), the remainder is drawn from the external vault (reverts only if the external vault is illiquid). Reserve is redeemable | **revised** |
 | 6 | Reserve-poking entrypoint | **Operator-only via inherited `ensureYieldFlowDuration()`** (`FUND_OPERATOR_ROLE`). No permissionless `harvest()`. Per-op hooks keep the stream forward-solvent on any user activity; the operator must call between periods of inactivity. Tradeoff: loses permissionless liveness backstop in exchange for a smaller surface | **revised** |
 | 7 | Code reuse | Extract shared `FundManagerBase` | unchanged |
 | 8 | Solvency trust model | Operator + views (no rate cap / settle gate). Stream starts at deposit via pre-funding and is continuously self-funded from the external position thereafter. **No operator injection / no `fundReserve`** — sync diverges from async here because programmatic `EXTERNAL_VAULT` access removes the off-chain top-up gap. The operator's only sustainability lever is `setStableYieldRate`; impairment is signalled by share-price-below-par (canonical 4626) | **revised** |
 | 9 | Async re-audit | Accepted as part of the base extraction | unchanged |
-| 10 | First-deposit inflation | OZ ERC-4626 default mitigation; **re-examine** — reserve-inclusive NAV adds a super-token donation surface (see §Security) | refined |
+| 10 | First-deposit inflation / donations | With the clamp dropped, donation-resistance no longer comes from NAV; under a floating share a donation is an irrational gift to existing holders, not an attack. Residual first-deposit inflation mitigated by OZ virtual shares (`_decimalsOffset()`, **proposed** positive offset) ± dead-shares seed / min-shares-minted guard (see §Security) | **revised 2026-05-26** |
 | 11 | Capital custody | The FundManager is the sole custodian (external-vault shares + super-token reserve + transient unutilized underlying) and the sole NAV authority; the vault holds no assets | **new** |
 
 ## Contracts
@@ -170,9 +202,10 @@ terminal external impairment in the sync family. Async healthy path unchanged
 
 ### `SyncFundManager` (extends `FundManagerBase`) — the capital custodian
 
-Holds the immutable `EXTERNAL_VAULT` reference, the `trackedPrincipal` counter,
-the external-vault shares, and the super-token reserve. `_externalVault` is
-passed in by the vault constructor, which already validated
+Holds the immutable `EXTERNAL_VAULT` reference, the external-vault shares, and
+the super-token reserve. There is **no `trackedPrincipal` counter** — NAV is
+read directly off recoverable balances. `_externalVault` is passed in by the
+vault constructor, which already validated
 `EXTERNAL_VAULT.asset() == UNDERLYING_ASSET` (no re-validation in the FM). No
 `harvest()` entrypoint — solvency between user activity is maintained via the
 inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
@@ -182,7 +215,7 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
   - `onDeposit` (pre-bump): clears any pre-existing deficit before the new
     units' target widens the gap. Trim branch structurally unreachable here.
   - `onWithdraw` (top): clears any pre-existing deficit before the unit
-    decrease frees buffer. Trim branch effectively unreachable here.
+    decrease frees reserve excess. Trim branch effectively unreachable here.
   - `onWithdraw` (post-payout): trims any residual freed excess back into the
     external vault (Q1=B, 2026-05-22). Inv. 7 holds.
   - `ensureYieldFlowDuration()` (operator): runs both halves; the inherited
@@ -196,16 +229,17 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
   Behaviour:
   - `deficit > 0`: pull `pulled = min(ceil(deficit / SCALING_FACTOR) + 1,
     EXTERNAL_VAULT.maxWithdraw(this))` from the external vault and `_upgrade`
-    it. **Uncapped at the surplus** — while solvent (`maxWithdraw(this) >
-    trackedPrincipal`) only the buffer is consumed; once the buffer is
-    exhausted the pull continues into the principal-backing slice (the loss is
-    then borne by holders via the `min(trackedPrincipal, ext + reserve +
-    rawUnderlying)` NAV clamp). The pull is capped at `maxWithdraw(this)`, so
-    a compliant (trusted) external vault never reverts it → it can **never
-    brick** the calling user op.
+    it. **Pulls only the deficit, not the whole position** — the external
+    surplus stays deployed and compounding (it is counted in NAV and accrues to
+    holders as appreciation). While external yield ≥ the promised rate the pull
+    is funded by that surplus; under impairment the same deficit-only pull
+    continues uncapped into the external position and the loss is borne by
+    holders directly via the (unclamped) NAV. The pull is capped at
+    `maxWithdraw(this)`, so a compliant (trusted) external vault never reverts
+    it → it can **never brick** the calling user op.
   - `deficit < 0`: `_downgrade(uint256(-deficit))` then `forceApprove` +
     `EXTERNAL_VAULT.deposit` the resulting underlying back into the external
-    vault so the buffer keeps compounding externally. Inv. 7 is preserved
+    vault so the surplus keeps compounding externally. Inv. 7 is preserved
     (no raw underlying at rest in the FM).
   - Residual `deficit > 0` after the upgrade is **tolerated** — callers (per-op
     hooks and the base setters) guard their `_recalibrateFlow()` accordingly.
@@ -215,17 +249,16 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
   1. `YIELD_POOL.increaseMemberUnits(receiver, _toUnit(assets))` — units land
      directly on the receiver; `evaluateYieldAssetsDeficit()` now reflects the
      new (higher) target;
-  2. `_rebalanceYieldAssets()` — buffer-first, against the OLD
-     `trackedPrincipal`: the compounding buffer covers the deficit first and
-     principal is skimmed only as a fallback;
-  3. `trackedPrincipal += assets`;
-  4. **pre-fund residual**: `deficit = evaluateYieldAssetsDeficit()`;
+  2. `_rebalanceYieldAssets()` — clears any pre-existing deficit from the
+     external position (surplus first, then deeper into the position under
+     impairment) before the new units' target widens the gap;
+  3. **pre-fund residual**: `deficit = evaluateYieldAssetsDeficit()`;
      `toUpgrade = min(ceil(deficit / SCALING_FACTOR) + 1, assets)` (0 if the
      rebalance already cleared it); `_upgrade(toUpgrade)`;
-  5. `EXTERNAL_VAULT.deposit(assets − toUpgrade, address(this))` — the remainder
+  4. `EXTERNAL_VAULT.deposit(assets − toUpgrade, address(this))` — the remainder
      is deployed as principal; **no underlying is left at rest in the FM**
      (Invariant 7);
-  6. **guarded** `_recalibrateFlow()` (`if evaluateYieldAssetsDeficit() <= 0`)
+  5. **guarded** `_recalibrateFlow()` (`if evaluateYieldAssetsDeficit() <= 0`)
      — the stream starts/raises at deposit time. Terminal impairment
      (`EXTERNAL_VAULT.maxWithdraw(FM) == 0` AND `assets` cannot cover the
      residual) silently skips; units are granted; the next
@@ -254,32 +287,38 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
   6. `_rebalanceYieldAssets()` — **post-payout trim** (2026-05-22, Q1=B). Any
      residual freed excess `freedExcess − redeemingAssets` (when positive) is
      downgraded and redeposited into the external vault. The reserve returns
-     to target; Inv. 7 holds (no raw underlying at rest);
-  7. `trackedPrincipal -= trackedPrincipal · shares / supplyBeforeBurn` (floor,
-     favours remaining holders — Invariant 1).
+     to target; Inv. 7 holds (no raw underlying at rest).
+
+  There is **no principal-counter decrement** — `redeemingAssets` is OZ's
+  `previewRedeem(shares) = shares · NAV / supply` (floating, floor), so the burn
+  removes exactly the redeemer's pro-rata slice of NAV and the share price is
+  unchanged for stayers (floor rounding favours them). The proportional
+  `trackedPrincipal` decrement of the old model is no longer needed.
 
 - View helpers the vault proxies (pure reads, no per-call counters):
   `totalManagedAssets()` (the reserve-inclusive NAV — Invariant 2; also caps
   `maxWithdraw`/`maxRedeem`: the per-call freed reserve excess scales with the
   redeemer's unit share, so NAV itself is the global upper bound on what a
-  redeem can source, and under impairment the clamp shrinks it appropriately),
-  `maxExternalDeposit()`, plus `EXTERNAL_VAULT`/`trackedPrincipal` getters.
+  redeem can source, and under impairment the lower recoverable NAV shrinks it
+  appropriately), `maxExternalDeposit()`, plus the `EXTERNAL_VAULT` getter (no
+  `trackedPrincipal` getter — the counter is gone).
 
 ### `StableYieldVault` (extends OZ `ERC4626`, `ReentrancyGuard`) — thin face
 
 Holds **no assets**. Immutable `FUND_MANAGER`; the constructor validates
 `IERC4626(_externalVault).asset() == asset()` (keeps `EXTERNAL_ASSET_MISMATCH`
 on `IStableYieldVault`) then deploys & pins `SyncFundManager` (`msg.sender ==
-vault`), passing `_externalVault` through. `EXTERNAL_VAULT()` / `trackedPrincipal()`
-getters delegate to the FM (ABI/back-compat).
+vault`), passing `_externalVault` through. The `EXTERNAL_VAULT()` getter
+delegates to the FM. Overrides `_decimalsOffset()` to a positive value
+(**proposed**) for first-deposit inflation resistance (see §Security).
 
 - `totalAssets()` → `FUND_MANAGER.totalManagedAssets()`
-  `= min(trackedPrincipal, EXTERNAL_VAULT.maxWithdraw(FM) +
-  scaledYieldAssetsBalance() + UNDERLYING_ASSET.balanceOf(FM))`. The `min(…)`
-  clamp on recoverable-from-all-sources (external + reserve + raw underlying)
-  is the on-chain honest analog of async's NAV — it gives honest loss
-  pass-through *and* absorbs every donation path (compounding external buffer,
-  super-token donations, raw-underlying donations) symmetrically.
+  `= EXTERNAL_VAULT.maxWithdraw(FM) + scaledYieldAssetsBalance() +
+  UNDERLYING_ASSET.balanceOf(FM)` — the plain sum of recoverable-from-all-sources
+  (external position + super-token reserve + transient raw underlying), **no
+  clamp**. This is real recoverable value, so it gives honest, immediate loss
+  pass-through; the external surplus is included and accrues to holders as share
+  appreciation.
 - `_deposit(caller, receiver, assets, shares)`: pull underlying from `caller`,
   forward it to the FM, `_mint(receiver, shares)`, `FUND_MANAGER.onDeposit(...)`.
   `nonReentrant`.
@@ -296,8 +335,8 @@ getters delegate to the FM (ABI/back-compat).
   by `FUND_MANAGER.totalManagedAssets()` (the
   reserve-inclusive NAV is the global upper bound on what a redeem can source,
   since the recalibration-freed reserve excess scales with the redeemer's unit
-  share). Under external impairment the NAV clamp shrinks this appropriately,
-  making `max*` 4626-honest about external illiquidity.
+  share). Under external impairment the lower recoverable NAV shrinks this
+  appropriately, making `max*` 4626-honest about external illiquidity.
 - `_update` → `FUND_MANAGER.onShareTransfer(from, to, value)` on
   shareholder↔shareholder transfers (unchanged rule).
 - `previewDeposit/Mint/Redeem/Withdraw` work synchronously (OZ default — no
@@ -318,13 +357,12 @@ sequenceDiagram
     V->>U: safeTransferFrom underlying (caller → vault)
     V->>FM: forward underlying + onDeposit(receiver, assets)
     V->>V: _mint(receiver, shares ≈ assets)
-    FM->>FM: trackedPrincipal += assets
     FM->>P: increaseMemberUnits(receiver, _toUnit(assets))
-    FM->>FM: _rebalanceYieldAssets()  %% uncapped at maxWithdraw(FM): buffer first, then principal-backing slice under impairment
+    FM->>FM: _rebalanceYieldAssets()  %% deficit-only pull from external (surplus stays compounding; deeper into the position under impairment)
     FM->>FM: _upgrade(min(ceil(deficit/SF)+1, assets))  %% pre-fund residual
     FM->>E: deposit(assets − upgraded, FM)               %% remainder = principal
     FM->>P: _recalibrateFlow()  %% stream starts/raises NOW (only stalls at terminal impairment)
-    Note over P: NAV-neutral at entry while solvent (principal split into external shares + reserve, both in NAV); honest tick-down under impairment via the min(P, ext+reserve) clamp
+    Note over P: NAV-neutral at entry (principal split into external shares + reserve, both in NAV); thereafter the share floats with the external vault — honest tick-down under impairment
 ```
 
 ### Withdraw / Redeem (reserve-inclusive NAV; reserve slice from recalibration-freed excess)
@@ -345,15 +383,15 @@ sequenceDiagram
     FM->>E: withdraw(assets − fromReserve, receiver, FM)  %% external remainder
     FM->>FM: safeTransfer(receiver, fromReserve)
     FM->>FM: _rebalanceYieldAssets()  %% post-payout trim: residual freed excess back to external
-    FM->>FM: trackedPrincipal -= principal slice
     Note over E: external remainder reverts only if the external vault is illiquid (accepted)
 ```
 
-Under impairment (`EXTERNAL_VAULT.maxWithdraw(FM) < trackedPrincipal`): the NAV
-floor falls, `previewRedeem` prices the share below par, the redeemer takes the
-pro-rata impaired payout. The proportional `trackedPrincipal` decrement
-(Invariant 1) keeps `V/P` constant across the exit, so no value transfers
-between leavers and stayers.
+Under impairment (external position recoverable < deposited principal): NAV
+falls, `previewRedeem` prices the share below par, the redeemer takes the
+pro-rata impaired payout. The burn removes exactly `redeemingAssets =
+shares · NAV / supply`, so the share price is unchanged for stayers (floor
+rounding favours them) — no value transfers between leavers and stayers, handled
+by OZ proportional accounting rather than a principal-counter decrement.
 
 ### Operator solvency restore (`ensureYieldFlowDuration`)
 
@@ -365,13 +403,13 @@ sequenceDiagram
     O->>FM: ensureYieldFlowDuration()   %% FUND_OPERATOR_ROLE
     FM->>FM: _rebalanceYieldAssets()
     alt deficit > 0
-        FM->>E: withdraw(min(ceil(deficit/SF)+1, maxWithdraw(FM)), FM, FM)  %% uncapped at the surplus
+        FM->>E: withdraw(min(ceil(deficit/SF)+1, maxWithdraw(FM)), FM, FM)  %% deficit-only pull
         FM->>FM: _upgrade(pulled) — reserve refilled
     else deficit < 0
-        FM->>FM: _downgrade(excess) ; redeposit underlying into external vault (buffer compounds)
+        FM->>FM: _downgrade(excess) ; redeposit underlying into external vault (surplus keeps compounding)
     end
     FM->>FM: guarded _recalibrateFlow()  %% restart stalled flow iff deficit <= 0
-    Note over E: surplus beyond the deficit stays compounding as the buffer; under impairment the pull eats into the principal-backing slice (loss reflected via NAV clamp)
+    Note over E: surplus beyond the deficit stays compounding in the external vault (counted in NAV, accrues to holders); under impairment the pull eats deeper into the position (loss reflected directly in NAV)
 ```
 
 The operator runs `ensureYieldFlowDuration()` between user activity to keep the
@@ -384,43 +422,43 @@ permissionless wrapper around `_rebalanceYieldAssets()` is the natural
 extension point.
 
 `_rebalanceYieldAssets()` only ever pulls the reserve **deficit** (never the
-full surplus when solvent — that is what makes the buffer compound and absorb
-losses). Under impairment the same deficit-only pull continues uncapped into
-the principal-backing slice; the loss is reflected by the NAV clamp inverting
-(`recoverable < trackedPrincipal`) rather than by the stream stalling.
+full surplus when solvent — that is what keeps the external surplus compounding
+and accruing to holders as share appreciation). Under impairment the same
+deficit-only pull continues uncapped deeper into the external position; the loss
+is reflected directly by the (unclamped) NAV falling rather than by the stream
+stalling.
 
 ## Invariants
 
-1. **Principal accounting (FM-owned).** `trackedPrincipal += assets` on deposit;
-   `trackedPrincipal −= trackedPrincipal · sharesBurned / totalSupplyBeforeBurn`
-   (floor) on withdraw. Proportional, not by payout — keeps `V/P` invariant
-   through impaired exits.
-2. **Total assets (reserve-inclusive, clamped to principal).** `totalAssets ==
-   min(trackedPrincipal, EXTERNAL_VAULT.maxWithdraw(FM) +
-   scaledYieldAssetsBalance() + UNDERLYING_ASSET.balanceOf(FM))`. *Recoverable
-   from all sources* = external position + super-token reserve + raw
-   underlying, clamped at `trackedPrincipal` so the compounding external
-   buffer **and every donation path** (super-token OR raw underlying) are
-   excluded from share price. Under impairment the clamp goes the other way
-   (clamped at the lower recoverable) and the share takes the loss honestly.
-3. **Buffer is non-extracted as treasury, but fully drawable as reserve.**
-   Rebalance pulls (per-op + operator `ensureYieldFlowDuration()`) only ever
-   target the reserve *deficit* — never extracted as treasury revenue (treasury
-   earns only the 1% fee stream). While external yield ≥ rate,
-   `EXTERNAL_VAULT.maxWithdraw(FM) ≥ trackedPrincipal` is preserved (only the
-   surplus moves). Under impairment the same deficit-only pull continues
-   uncapped (`min(deficit, maxWithdraw(FM))`) and the buffer +
-   principal-backing slice are both drawable; the loss flows to shares via the
-   NAV clamp, never to the treasury.
+1. **Share accounting (OZ-standard, no principal counter).** Shares mint/burn
+   against the floating NAV — deposit mints `assets · supply / NAV`, withdraw
+   pays `shares · NAV / supply` (floor, favouring stayers). There is **no
+   `trackedPrincipal` counter**; the no-inter-holder-value-transfer property
+   the old proportional decrement enforced now holds automatically via OZ
+   proportional accounting.
+2. **Total assets (reserve-inclusive, unclamped).** `totalAssets ==
+   EXTERNAL_VAULT.maxWithdraw(FM) + scaledYieldAssetsBalance() +
+   UNDERLYING_ASSET.balanceOf(FM)`. *Recoverable from all sources* = external
+   position + super-token reserve + raw underlying — a plain sum, **no clamp**.
+   The external surplus is included and accrues to holders as share
+   appreciation; under impairment the sum falls and the share takes the loss
+   immediately and honestly.
+3. *(Retired 2026-05-26.)* The old "buffer is non-extracted as treasury but
+   fully drawable as reserve" invariant no longer applies — there is no
+   protocol-owned excluded buffer. The external surplus is part of NAV and
+   belongs to shareholders; the treasury still earns only the 1% fee stream
+   (the rebalance pulls only the reserve *deficit*, never extracted as
+   treasury revenue).
 4. **Stream funded from the external position end-to-end.** Every deposit
    pre-rebalances the reserve (`_rebalanceYieldAssets()` uncapped), then
    upgrades enough of the *incoming* underlying to clear any residual deficit
    (capped by `assets`). Inter-deposit drain is replenished from the external
    position by the per-op rebalance and the operator's
-   `ensureYieldFlowDuration()` — surplus first, then principal-backing slice
-   once the buffer is exhausted. Principal preserved long-run iff external
-   yield ≥ rate (else honest pass-through via the NAV clamp). The stream only
-   halts at terminal impairment (`EXTERNAL_VAULT.maxWithdraw(FM) == 0`).
+   `ensureYieldFlowDuration()` — surplus first, then deeper into the external
+   position once the surplus is exhausted. Principal preserved long-run iff
+   external yield ≥ rate (else honest, immediate pass-through via the unclamped
+   NAV). The stream only halts at terminal impairment
+   (`EXTERNAL_VAULT.maxWithdraw(FM) == 0`).
 5. **Reserve horizon.** Maintained on every deposit/withdraw (best-effort,
    deficit-gated rebalance) and by the operator's `ensureYieldFlowDuration()`:
    `yieldAssetsBalance() ≥ totalFlowRate · guaranteedFlowDuration`
@@ -445,19 +483,19 @@ the principal-backing slice; the loss is reflected by the NAV clamp inverting
 
 ## Security considerations
 
-- **Reserve-inclusive NAV is donation-resistant by the min-clamp (locked
-  2026-05-19; refined).** The decision was to use the raw super-token balance
-  (matching async). The corrected NAV formula `min(trackedPrincipal, ext +
-  reserve) + unutilized` (Invariant 2) additionally **clamps the recoverable at
-  `trackedPrincipal`**, so a super-token donation pushing `ext + reserve` above
-  `trackedPrincipal` leaves NAV unchanged in the healthy/solvent state — the
-  donation is absorbed by the clamp, not the share price. The residual surface
-  is **also folded into the clamp** (`UNDERLYING_ASSET.balanceOf(FM)` is a
-  third term inside `min(trackedPrincipal, …)`), so raw-underlying donations
-  are absorbed symmetrically with super-token donations. There is no
-  outside-the-clamp slack term left; the residual surface is bounded by OZ
-  virtual shares as defense-in-depth and characterised by tests on both
-  donation paths.
+- **Donations under a floating share (clamp dropped 2026-05-26).** NAV is the
+  raw sum of external `maxWithdraw` + super-token reserve + raw underlying, with
+  no clamp. A super-token or raw-underlying transfer to the FM therefore *does*
+  raise NAV and the share price — but it raises it for **existing holders**, so
+  it is an irrational gift, not a profitable attack (the donor strictly loses).
+  The one genuinely exploitable surface is the classic ERC-4626 **first-deposit
+  inflation attack** (front-run the first depositor, donate to inflate price per
+  share, the victim's deposit rounds to 0 shares). Mitigations replacing the
+  clamp: OZ **virtual shares** via a positive `_decimalsOffset()` override on the
+  vault (**proposed** — the offset value is still to be confirmed; a value at or
+  above the underlying decimals makes the attack economically infeasible),
+  optionally a small dead-shares seed at deployment and/or rejecting deposits
+  that would mint 0 shares. To be characterised by tests on both donation paths.
 - **Share price ticks between rebalances.** The stream continuously drains the
   reserve, so NAV (and thus `convertToShares/Assets`, deposit/withdraw/transfer
   pricing) decays between rebalances and recovers at each funded rebalance
@@ -469,30 +507,28 @@ the principal-backing slice; the loss is reflected by the NAV clamp inverting
   user activity to keep the share-price drift bounded.
 - **Impairment is signalled by share price, not by liveness.** With the
   uncapped self-funded replenisher, external under-earn does *not* stall the
-  stream — it shows up as a downward tick of the NAV clamp once
-  `ext + reserve` falls below `trackedPrincipal`. Off-chain monitoring should
-  track `convertToAssets(1 share)` (or `totalManagedAssets() < trackedPrincipal`)
-  rather than `getTotalFlowRate() == 0`; the only "stream stopped" state is
+  stream — it shows up as a downward move of the (unclamped) NAV / share price as
+  the rebalance drains the external position faster than it earns. Off-chain
+  monitoring should track `convertToAssets(1 share)` trending below the entry
+  price rather than `getTotalFlowRate() == 0`; the only "stream stopped" state is
   terminal external failure (`maxWithdraw(FM) == 0`).
 - **Pre-funding can exceed the deposit (pathological config).** If
   `rate × guaranteedFlowDuration / YEAR` approaches 1, a deposit's own
   incremental reserve requirement can approach/exceed `assets`. The pre-fund
   is capped by `assets`; the residual is sourced by the uncapped
-  `_rebalanceYieldAssets()` (from the buffer first, then from the
-  principal-backing slice if the buffer is exhausted — the loss reflects in
-  the NAV clamp). The operator must keep
-  `stableYieldRate × guaranteedFlowDuration` sane (no on-chain cap — same trust
-  model as async).
+  `_rebalanceYieldAssets()` (from the external surplus first, then deeper into
+  the external position if the surplus is exhausted — the loss reflects directly
+  in NAV). The operator must keep `stableYieldRate × guaranteedFlowDuration`
+  sane (no on-chain cap — same trust model as async).
 - **A new deposit can subsidise a pre-existing reserve backlog.** The pre-fund
   + uncapped `_rebalanceYieldAssets()` clears the *global*
   `evaluateYieldAssetsDeficit()` (the GDA buffer requirement is global — a
-  stream cannot be partially started). In a vault whose buffer is exhausted
-  (external persistently underperformed) the rebalance is now eating into the
-  principal-backing slice — the NAV clamp has already inverted and share price
-  is below par; the new depositor enters at the impaired price and immediately
-  owns a pro-rata slice of the impaired NAV (no value transfer to existing
-  holders beyond what the price already reflects). Flagged for audit and
-  disclosure.
+  stream cannot be partially started). In a vault whose external position has
+  persistently underperformed, the rebalance is now eating deeper into the
+  external position — NAV / share price is already below the entry price; the
+  new depositor enters at that impaired price and immediately owns a pro-rata
+  slice of the impaired NAV (no value transfer to existing holders beyond what
+  the price already reflects). Flagged for audit and disclosure.
 - **External vault is trusted but third-party.** `maxWithdraw(FM)` feeds NAV,
   the rebalance source, and the withdraw principal leg — a manipulable external
   share price propagates in. Integrate only standard, audited, non-rebasing
@@ -510,16 +546,16 @@ the principal-backing slice; the loss is reflected by the NAV clamp inverting
   is funded from the recalibration-freed reserve excess (always serviceable via
   `_downgrade`); only the *external remainder* reverts if the external vault
   cannot service it. `maxWithdraw`/`maxRedeem` reflect it via
-  `totalManagedAssets()` — under external impairment
-  the NAV clamp shrinks the bound, so a request ≤ `max*` never bricks.
-- **Rate > sustainable yield** (accepted; **diverges from async**): the buffer
-  depletes, the per-op replenisher continues uncapped into the
-  principal-backing slice, and the NAV clamp passes the loss to shares
-  honestly. The stream itself only stalls at terminal impairment
+  `totalManagedAssets()` — under external impairment the lower recoverable NAV
+  shrinks the bound, so a request ≤ `max*` never bricks.
+- **Rate > sustainable yield** (accepted; **diverges from async**): the external
+  surplus depletes, the per-op replenisher continues uncapped deeper into the
+  external position, and the (unclamped) NAV passes the loss to shares honestly
+  and immediately. The stream itself only stalls at terminal impairment
   (`maxWithdraw(FM) == 0`). The operator's only sustainability lever is
   `setStableYieldRate` — **there is no `fundReserve` injection path** (sync's
   programmatic `EXTERNAL_VAULT` access removes the off-chain top-up gap async
-  had). The impairment signal is share-price-below-par (canonical 4626), not
+  had). The impairment signal is share-price-below-entry (canonical 4626), not
   a stalled flow.
 - **Decimals.** Inherited `SCALING_FACTOR`/`RAW_PER_UNIT` constraints (underlying
   decimals ∈ [6, 18]; the existing 18-dec `FIXME` carries over). External-vault
