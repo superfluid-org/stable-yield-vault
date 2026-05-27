@@ -9,8 +9,8 @@ import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
  * @title IStableYieldSyncVault
  * @notice Synchronous ERC-4626 stable-yield vault — a thin share/accounting face. It holds no
  *         assets: the paired {SyncFundManager} (deployed and pinned here at construction) is
- *         the sole capital custodian (external-vault shares, `trackedPrincipal`, yield assets
- *         reserve) and NAV authority. The vault pulls underlying from the caller,
+ *         the sole capital custodian (external-vault shares + yield asset reserve) and NAV
+ *         authority. The share floats with the external vault's NAV. The vault pulls underlying from the caller,
  *         forwards it to the FundManager, mints/burns shares. The stable yield is streamed via
  *         Superfluid Distribution pool, pre-funded from each deposit.
  */

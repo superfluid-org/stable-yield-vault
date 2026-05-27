@@ -35,14 +35,6 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
     /// @inheritdoc ISyncFundManager
     IERC4626 public immutable EXTERNAL_VAULT;
 
-    //     _____ __        __
-    //    / ___// /_____ _/ /____  _____
-    //    \__ \/ __/ __ `/ __/ _ \/ ___/
-    //   ___/ / /_/ /_/ / /_/  __(__  )
-    //  /____/\__/\__,_/\__/\___/____/
-
-
-
     //     ______                 __                  __
     //    / ____/___  ____  _____/ /________  _______/ /_____  _____
     //   / /   / __ \/ __ \/ ___/ __/ ___/ / / / ___/ __/ __ \/ ___/
