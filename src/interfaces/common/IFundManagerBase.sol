@@ -42,6 +42,42 @@ interface IFundManagerBase {
      */
     event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
 
+    /**
+     * @notice Emitted by {onShareTransfer} after the FM moves GDA pool units from sender to receiver.
+     * @dev Lets indexers reconstruct yield-stream ownership without binding to the Superfluid pool
+     *      contract. Fires only on user-to-user share transfers (vault custody legs of the redeem
+     *      cycle don't reach {onShareTransfer}).
+     * @param from Share sender
+     * @param to Share receiver
+     * @param shares Number of vault shares moved
+     * @param unitsMoved GDA pool units transferred (proportional to the sender's pre-transfer balance)
+     */
+    event ShareTransferProcessed(address indexed from, address indexed to, uint256 shares, uint128 unitsMoved);
+
+    /**
+     * @notice Emitted by {_rebalanceYieldAssets} when the FM upgrades underlying into super-token or
+     *         downgrades super-token back to underlying to keep the forward-solvency reserve sized.
+     * @dev Fires from any call path that rebalances: {setStableYieldRate}, {setGuaranteedFlowDuration},
+     *      {ensureYieldFlowDuration}, and (indirectly) every {settleEpoch}. No event fires when the
+     *      yield-asset deficit is exactly zero (no-op path).
+     * @param newYieldAssetsBalance Yield-asset balance after the rebalance, in super-token decimals (18).
+     * @param amount Absolute super-token amount moved by the rebalance.
+     * @param wasUpgrade True if underlying was upgraded into yield assets (reserve grew); false if
+     *                   excess yield assets were downgraded back to underlying (reserve shrunk).
+     */
+    event YieldAssetsRebalanced(uint256 newYieldAssetsBalance, uint256 amount, bool wasUpgrade);
+
+    /**
+     * @notice Emitted by {_recalibrateFlow} whenever the GDA pool's distribution rate is restated.
+     * @dev Triggered by any path that calls {_recalibrateFlow}: rate change, epoch settle, redeem
+     *      hook, and {ensureYieldFlowDuration}. Indexers can use this as the canonical source of
+     *      truth for per-second flow rates without binding to the Superfluid pool contract.
+     * @param newYieldFlowRate Per-second yield flow rate (super-token decimals), post-recalibration.
+     * @param newFeeFlowRate Per-second fee flow rate (super-token decimals), post-recalibration.
+     * @param totalUnits Total pool units after the recalibration.
+     */
+    event PoolFlowUpdated(int96 newYieldFlowRate, int96 newFeeFlowRate, uint128 totalUnits);
+
     //    ______
     //   / ____/_____________  __________
     //  / __/ / ___/ ___/ __ \/ ___/ ___/

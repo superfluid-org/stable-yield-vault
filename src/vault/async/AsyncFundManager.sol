@@ -229,10 +229,18 @@ contract AsyncFundManager is FundManagerBase, IAsyncFundManager {
 
             // Upgrade underlying deficit amount
             _upgrade(underlyingAmountToUpgrade);
+
+            // Super-token amount that landed in the reserve. Matches the upgrade() call in _upgrade().
+            uint256 superTokenAmount = underlyingAmountToUpgrade * SCALING_FACTOR;
+            emit YieldAssetsRebalanced(yieldAssetsBalance(), superTokenAmount, true);
         } else if (deficit < 0) {
+            uint256 downgradeAmount = uint256(-deficit);
             // downgrade excess amount of yield assets
-            _downgrade(uint256(-deficit));
+            _downgrade(downgradeAmount);
+
+            emit YieldAssetsRebalanced(yieldAssetsBalance(), downgradeAmount, false);
         } else {
+            // No-op path: deficit == 0, balance unchanged, no event.
             return;
         }
     }

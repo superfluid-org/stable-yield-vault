@@ -267,6 +267,8 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
 
         YIELD_POOL.increaseMemberUnits(receiver, delta);
         YIELD_POOL.decreaseMemberUnits(sender, delta);
+
+        emit ShareTransferProcessed(sender, receiver, shares, delta);
     }
 
     //   _    ___                 ______                 __  _
@@ -317,6 +319,8 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
 
         int96 feeFlowRate = targetYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
         YIELD_ASSET.distributeFlow(FEE_POOL, feeFlowRate);
+
+        emit PoolFlowUpdated(targetYieldFlowRate, feeFlowRate, YIELD_POOL.getTotalUnits());
     }
 
     function _rebalanceYieldAssets() internal virtual;
