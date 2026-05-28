@@ -202,9 +202,16 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
      *      - `deficit > 0` (reserve below target): pull `min(need, EXTERNAL_VAULT.maxWithdraw(this))`
      *        out of the external position and upgrade.
      *
-     *      - `deficit < 0` (reserve above target): downgrade the excess super-token back to
-     *        underlying and redeposit it into the external vault so the buffer keeps compounding
-     *        externally.
+     *      - `deficit < 0` (reserve above target): if the external vault will accept the
+     *        redeposit (`EXTERNAL_VAULT.maxDeposit(this) >= underlyingNeeded`), downgrade the
+     *        excess super-token back to underlying and redeposit it so the buffer keeps
+     *        compounding externally. Otherwise **skip the trim entirely** — the excess stays in
+     *        the reserve as above-target super-token slack and the next rebalance retries. This
+     *        preserves Inv. 7 / A.2 (no raw underlying at rest in the FM) hard, at the cost of
+     *        relaxing D.4 (reserve may sit above target while external deposits are unavailable).
+     *        Trusts ERC-4626 compliance: a non-compliant external whose `deposit` reverts despite
+     *        `maxDeposit > 0` would still brick the calling op — accepted limitation, pinned by
+     *        `test_withdraw_brickedByNonCompliantExternal` (see design.md §Security).
      */
     function _rebalanceYieldAssets() internal override {
         int256 deficit = evaluateYieldAssetsDeficit();
@@ -221,13 +228,20 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
                 _upgrade(pulled);
             }
         } else if (deficit < 0) {
-            // Trim excess super-token and redeposit underlying into the external vault.
-            _downgrade(uint256(-deficit));
+            uint256 excessYield = uint256(-deficit);
+            uint256 underlyingNeeded = excessYield / SCALING_FACTOR;
 
-            uint256 underlyingToDeposit = UNDERLYING_ASSET.balanceOf(address(this));
-            if (underlyingToDeposit > 0) {
-                UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), underlyingToDeposit);
-                EXTERNAL_VAULT.deposit(underlyingToDeposit, address(this));
+            // Best-effort: only trim if the external will accept the redeposit. Otherwise leave
+            // the excess as above-target super-token slack in the reserve; the next rebalance
+            // retries (idempotent — deficit < 0 reappears identically next call).
+            if (EXTERNAL_VAULT.maxDeposit(address(this)) >= underlyingNeeded) {
+                _downgrade(excessYield);
+
+                uint256 underlyingToDeposit = UNDERLYING_ASSET.balanceOf(address(this));
+                if (underlyingToDeposit > 0) {
+                    UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), underlyingToDeposit);
+                    EXTERNAL_VAULT.deposit(underlyingToDeposit, address(this));
+                }
             }
         }
     }

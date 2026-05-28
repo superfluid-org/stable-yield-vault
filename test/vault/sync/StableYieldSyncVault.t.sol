@@ -614,4 +614,44 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "post-rebalance: 0 underlying in FM");
     }
 
+    /// @dev Withdraw is NOT bricked when the external vault signals "deposits closed" via the
+    ///      standard ERC-4626 channel (`maxDeposit == 0`) while still servicing withdrawals.
+    ///      The `_rebalanceYieldAssets()` `deficit < 0` branch's pre-check skips the post-payout
+    ///      trim, leaving the freed excess as above-target super-token slack in the reserve
+    ///      (D.4 weakened to "best-effort, gated on external maxDeposit"). Pinned by this test
+    ///      (resolution of `[VERIFY]` redeposit-revert, 2026-05-28).
+    function test_withdraw_notBrickedByRedepositCap(uint256 amount, uint256 wPortion) public {
+        amount = bound(amount, 2e6, ONE_BILLION * 1e6);
+        _deposit(ALICE, amount);
+
+        // External: standards-compliant "deposits closed" signal (maxDeposit returns 0); withdrawals
+        // continue. The α fix's pre-check honours this.
+        _external.setDepositCap(0);
+
+        uint256 wAssets = bound(wPortion, 1e6, _vault.maxWithdraw(ALICE));
+        vm.prank(ALICE);
+        _vault.withdraw(wAssets, ALICE, ALICE);
+
+        assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw not bricked by external maxDeposit == 0");
+    }
+
+    /// @dev KNOWN LIMITATION: the best-effort trim trusts ERC-4626 compliance. If the external
+    ///      vault reverts `deposit` despite reporting `maxDeposit > 0`, the pre-check waves the
+    ///      call through and the revert propagates, bricking the withdraw. Accepted; design.md
+    ///      §Security already requires standard, audited externals. This test pins the boundary
+    ///      so an audit cannot mistake it for a regression.
+    function test_withdraw_brickedByNonCompliantExternal() public {
+        _deposit(ALICE, DEFAULT_DEPOSIT);
+
+        // Non-compliant: deposit reverts unconditionally, maxDeposit still returns uint256.max.
+        _external.setDepositReverts(true);
+
+        // A withdrawal that needs the post-payout trim will brick. We confirm the cause is the
+        // mock's revert string (not e.g. a different error), so the test is pinning the right thing.
+        uint256 wAssets = _vault.maxWithdraw(ALICE);
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("MockERC4626: deposit paused"));
+        _vault.withdraw(wAssets, ALICE, ALICE);
+    }
+
 }

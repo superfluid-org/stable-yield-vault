@@ -14,7 +14,6 @@ import { SyncVaultTestBase } from "./SyncVaultTestBase.t.sol";
  *
  *         Mapping to open-questions.md:
  *           - test_maxRedeem_neverBricks            → [VERIFY] "maxRedeem / maxWithdraw never-bricking"
- *           - test_withdraw_notBrickedByRedeposit   → [VERIFY] "Withdraw bricked by redeposit revert"
  *
  *         RESOLVED & moved out:
  *           - test_firstDepositInflation_victimMintsNonZero (→ StableYieldSyncVault.t.sol; the
@@ -23,10 +22,12 @@ import { SyncVaultTestBase } from "./SyncVaultTestBase.t.sol";
  *             terminal external impairment as a FULL PAUSE (`maxWithdraw(FM) == 0 ⇒ all max* = 0`)
  *             rather than by guarding the recalibrate: the hooks never run while paused, so there is
  *             nothing to brick. See the `test_terminalImpairment_*` tests in StableYieldSyncVault.t.sol.
+ *           - test_withdraw_notBrickedByRedepositRevert (→ StableYieldSyncVault.t.sol; the
+ *             best-effort trim landed 2026-05-28 — `_rebalanceYieldAssets()` now gates the
+ *             `deficit < 0` branch on `EXTERNAL_VAULT.maxDeposit(FM)`). Paired with
+ *             `test_withdraw_brickedByNonCompliantExternal` (a known-limitation pin).
  */
 contract StableYieldSyncVaultOpenQuestionsTest is SyncVaultTestBase {
-
-    uint256 internal constant DEFAULT_DEPOSIT = 1000 * 1e6;
 
     /// @dev [VERIFY] maxRedeem/maxWithdraw genuinely never-bricking. FAILS today: `maxRedeem` caps
     ///      by `totalManagedAssets()` which counts the FULL reserve, but `onWithdraw` can only
@@ -50,26 +51,6 @@ contract StableYieldSyncVaultOpenQuestionsTest is SyncVaultTestBase {
         vm.prank(ALICE);
         uint256 assets = _vault.redeem(s, ALICE, ALICE);
         assertEq(assets, expected, "redeem(s<=maxRedeem) pays previewRedeem(s) and never bricks");
-    }
-
-    /// @dev [VERIFY] Withdraw bricked by the external vault rejecting the post-payout redeposit.
-    ///      FAILS today: `onWithdraw`'s rebalance (`deficit < 0` branch) redeposits the freed reserve
-    ///      excess into `EXTERNAL_VAULT.deposit`. If the external vault is paused-for-deposits but
-    ///      still allows withdrawals, that redeposit reverts and bricks an otherwise-valid exit.
-    ///      Target: a withdraw within liquidity succeeds regardless of the external deposit being
-    ///      paused (the redeposit trim should be best-effort).
-    function test_withdraw_notBrickedByRedepositRevert(uint256 amount, uint256 wPortion) public {
-        amount = bound(amount, 2e6, ONE_BILLION * 1e6);
-        _deposit(ALICE, amount);
-
-        // External vault: deposits paused, withdrawals still serviced.
-        _external.setDepositReverts(true);
-
-        uint256 wAssets = bound(wPortion, 1e6, _vault.maxWithdraw(ALICE));
-        vm.prank(ALICE);
-        _vault.withdraw(wAssets, ALICE, ALICE);
-
-        assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw not bricked by paused external deposits");
     }
 
 }

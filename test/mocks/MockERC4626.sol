@@ -106,11 +106,15 @@ contract MockERC4626 is ERC4626 {
         return byShares < liquidityCap ? byShares : liquidityCap;
     }
 
-    /// @dev Liquidity-capped redemption limit (in share terms).
+    /// @dev Liquidity-capped redemption limit (in share terms). Mirrors `maxMint`'s early-exit on
+    ///      an uncapped sentinel: a `_convertToShares(type(uint256).max, …)` would overflow the
+    ///      512-bit mulDiv guard whenever `totalSupply >= totalAssets` (i.e. after any external
+    ///      loss).
     function maxRedeem(address owner) public view override returns (uint256) {
-        uint256 byShares = super.maxRedeem(owner);
+        uint256 standard = super.maxRedeem(owner);
+        if (liquidityCap == type(uint256).max) return standard;
         uint256 capInShares = _convertToShares(liquidityCap, Math.Rounding.Floor);
-        return byShares < capInShares ? byShares : capInShares;
+        return standard < capInShares ? standard : capInShares;
     }
 
 }

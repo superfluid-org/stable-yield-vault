@@ -211,7 +211,7 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
      *      `ERC4626ExceededMax*`). The vault simply waits for the external position to unfreeze;
      *      meanwhile the Superfluid stream keeps paying existing holders out of the reserve until
      *      it is naturally liquidated. `maxWithdraw(FM) == 0` does not distinguish a permanent loss
-     *      from a temporary liquidity freeze — both are treated as a pause; 
+     *      from a temporary liquidity freeze — both are treated as a pause;
      *
      *      The pause is gated on the FM actually *holding* an external position: an empty external
      *      balance also reads `maxWithdraw(FM) == 0` but is the healthy bootstrap state (no principal
