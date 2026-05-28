@@ -303,6 +303,8 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
         YIELD_POOL.increaseMemberUnits(receiver, delta);
         YIELD_POOL.decreaseMemberUnits(sender, delta);
+
+        emit ShareTransferProcessed(sender, receiver, shares, delta);
     }
 
     //   _    ___                 ______                 __  _
@@ -423,6 +425,8 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
         int96 feeFlowRate = targetYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
         YIELD_ASSET.distributeFlow(FEE_POOL, feeFlowRate);
+
+        emit PoolFlowUpdated(targetYieldFlowRate, feeFlowRate, YIELD_POOL.getTotalUnits());
     }
 
     function _rebalanceYieldAssets() internal {
@@ -436,10 +440,18 @@ contract AsyncFundManager is IAsyncFundManager, AccessControl, ReentrancyGuard {
 
             // Upgrade underlying deficit amount
             _upgrade(underlyingAmountToUpgrade);
+
+            // Super-token amount that landed in the reserve. Matches the upgrade() call in _upgrade().
+            uint256 superTokenAmount = underlyingAmountToUpgrade * SCALING_FACTOR;
+            emit YieldAssetsRebalanced(yieldAssetsBalance(), superTokenAmount, true);
         } else if (deficit < 0) {
+            uint256 downgradeAmount = uint256(-deficit);
             // downgrade excess amount of yield assets
-            _downgrade(uint256(-deficit));
+            _downgrade(downgradeAmount);
+
+            emit YieldAssetsRebalanced(yieldAssetsBalance(), downgradeAmount, false);
         } else {
+            // No-op path: deficit == 0, balance unchanged, no event.
             return;
         }
     }
