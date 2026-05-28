@@ -1,12 +1,45 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
 **stable** yield is streamed to depositors via the same Superfluid GDA engine the
 async vault uses. The external vault replaces the async vault's manual off-chain
 "working assets" leg.
+
+---
+
+## ⚠️ Revision 2026-05-27 — terminal external impairment ⇒ full pause (guarded recalibrate dropped)
+
+The earlier sketch (Revision 2026-05-22, row θ) said the per-op/setter
+`_recalibrateFlow()` calls would gain an `evaluateYieldAssetsDeficit() <= 0`
+guard so they short-circuit at terminal external impairment. That guard was
+**never implemented** and is now **dropped**. Terminal external impairment is
+instead handled one level up, at the vault's `max*` layer.
+
+**Policy.** Terminal external impairment is defined as
+`EXTERNAL_VAULT.maxWithdraw(FM) == 0` *while the FM holds an external position*.
+In that state the vault is **fully paused**: `maxDeposit = maxMint = maxWithdraw
+= maxRedeem = 0` (`StableYieldSyncVault._isExternallyPaused()`), so OZ reverts
+every entrypoint with `ERC4626ExceededMax*`. The empty-position bootstrap
+(`maxWithdraw(FM) == 0` only because nothing is deployed yet) is excluded so the
+first deposit still works.
+
+| Aspect | Decision (2026-05-27) | Rationale |
+|---|---|---|
+| Deposits under terminal impairment | **Blocked** (`maxDeposit/maxMint = 0`). | Never route a user into a vault they cannot withdraw from; depositing into a dead external position only traps fresh principal. The external's own `maxDeposit` can be `>0` on a one-way ("withdraws frozen, deposits open") vault, so the gate is explicit, not inherited. |
+| Withdrawals under terminal impairment | **Blocked** (`maxWithdraw/maxRedeem = 0`). | The surviving super-token reserve is reserved for the **yield stream** (holders receive it as shareholders), not a first-come reserve grab; and `maxWithdraw(FM) == 0` may be a temporary freeze, so we don't let holders burn shares to drain the reserve. |
+| Stream during the pause | **Keeps paying** from the reserve; winds down by natural Superfluid liquidation when the reserve is exhausted. | No special handling; the reserve cannot be topped up while the external is frozen, so the flow stops on its own. |
+| `_recalibrateFlow()` guards | **None.** The user hooks (`onDeposit`/`onWithdraw`) can't run while paused, so the drained-reserve recalibrate-revert is unreachable. Operator setters (`setStableYieldRate(>0)`, `ensureYieldFlowDuration`) are **allowed to revert** under terminal impairment — accepted, the operator is knowledgeable. `setStableYieldRate(0)` always works (recalibrating to a zero flow is a *close*, no GDA buffer needed) — the operator's bleed-stopping lever. |
+| Permanent loss | **No exit hatch.** `maxWithdraw(FM) == 0` does not distinguish a permanent loss from a temporary freeze; both pause. If permanent, the remaining reserve simply streams out to holders (accepted, unlikely tail). |
+
+Scope note: this analysis explicitly **excludes** the no-Superfluid-liquidator,
+prolonged-insolvency scenario (assumed a sentinel keeps the account from sitting
+deeply insolvent, and the operator keeps the reserve funded via
+`ensureYieldFlowDuration()` in normal operation, so the reserve only drains
+under genuine terminal impairment). Row θ of Revision 2026-05-22 is **superseded
+on every point that touches the guarded recalibrate**.
 
 ---
 
@@ -29,7 +62,7 @@ and the appreciation is the residual.
 | I | `totalAssets = min(trackedPrincipal, ext.maxWithdraw(FM) + scaledReserve + rawUnderlying)`. Surplus above `trackedPrincipal` excluded from share price (protocol-owned buffer); share ≈1:1. | **`totalAssets = ext.maxWithdraw(FM) + scaledReserve + rawUnderlying`** — plain sum of recoverable balances, no clamp. The external surplus is **included** and accrues to holders as share appreciation. Share floats. |
 | II | `trackedPrincipal` counter: `+= assets` on deposit, `−= trackedPrincipal·sharesBurned/supplyBeforeBurn` (floor) on withdraw. Underpinned the clamp + the V/P-invariant on impaired exits. | **Removed.** OZ ERC-4626 proportional accounting handles both legs: deposit is NAV-neutral (`shares = assets·supply/NAV`), withdraw is NAV-pro-rata (`shares·NAV/supply`), so the no-inter-holder-value-transfer property the decrement enforced now holds automatically. |
 | III | Loss-absorption: the accumulated buffer absorbs external underperformance first; the share is impaired only once the buffer is exhausted. "Stable" = total return capped at the promised rate. | **No accumulated cushion.** NAV is real recoverable value, so external underperformance reflects **immediately** in the share price; the holder's total return converges to the real external yield. "Stable" now describes only the **streamed component** (a smooth floor), not the total return. |
-| IV | Donation resistance came from the clamp: super-token / raw-underlying donations above `trackedPrincipal` were absorbed, leaving share price unchanged. | **Clamp no longer resists donations.** Under a floating share a donation just raises NAV → raises price for existing holders → an irrational gift, not an attack. The only genuine residual is the classic **first-deposit inflation attack**, mitigated by OZ virtual shares (`_decimalsOffset()`, proposed positive offset) ± a dead-shares seed / min-shares-minted guard. See §Security. |
+| IV | Donation resistance came from the clamp: super-token / raw-underlying donations above `trackedPrincipal` were absorbed, leaving share price unchanged. | **Clamp no longer resists donations.** Under a floating share a donation just raises NAV → raises price for existing holders → an irrational gift, not an attack. The only genuine residual is the classic **first-deposit inflation attack**, mitigated by OZ virtual shares (`_decimalsOffset()` hardcoded to `12`, implemented 2026-05-27). See §Security. |
 
 Decisions **1, 2, 5, 10** are revised again; **the protocol-owned "buffer"
 concept (decision 2 / Invariant 3) is retired** — there is no excluded slice.
@@ -53,7 +86,7 @@ family-specific override, all three converge into a single primitive:
 | ε | `_rebalanceYieldAssets()` lived on `FundManagerBase` (async-flavoured: upgrade from `unutilizedAssetsBalance()` or revert with `INSUFFICIENT_UNUTILIZED_ASSETS`). Sync inherited the async semantics, which broke `setStableYieldRate` / `ensureYieldFlowDuration` under impairment (sync FM holds 0 unutilized at rest — Inv. 7). | **`_rebalanceYieldAssets()` is now `abstract` on `FundManagerBase`** (declaration only). `AsyncFundManager` keeps the original body verbatim. **`SyncFundManager` overrides** with a self-sourcing impl: pull `min(deficit, EXTERNAL_VAULT.maxWithdraw(this))` from external when `deficit > 0`; downgrade + redeposit excess into external when `deficit < 0`. The `INSUFFICIENT_UNUTILIZED_ASSETS` error symbol moved from `IFundManagerBase` to `IAsyncFundManager` (it is now async-only). |
 | ζ | `harvest()` (permissionless, `nonReentrant`) and `ensureYieldFlowDuration()` (FUND_OPERATOR_ROLE) both wrap the same internal logic. `_replenishReserveFromExternal()` is the deficit-only half called from `onDeposit`, `onWithdraw`, and `harvest()`. The `Harvested(deficit, pulledFromExternal)` event is the harvest-specific observability. | **`harvest()` is removed.** `ensureYieldFlowDuration()` (inherited from base, `FUND_OPERATOR_ROLE`) is the sole reserve-poking entrypoint between user activity. `_replenishReserveFromExternal()` is removed; per-op hooks and the operator setter all call `_rebalanceYieldAssets()` directly. The `Harvested` event is dropped. Tradeoff: the sync vault loses the permissionless liveness backstop — keepers cannot poke without holding the operator role. Per-op hooks still keep the stream solvent on any user activity; the operator must call `ensureYieldFlowDuration()` to cover periods of inactivity. |
 | η | `onWithdraw`: freed reserve excess pays the redeemer's reserve slice via `min(freedExcess, redeemingAssets)`. Residual `freedExcess − redeemingAssets` (when positive) stays in the reserve as above-target slack — per-op trim was deliberately avoided. | **Residual freed excess is trimmed back to external.** A second `_rebalanceYieldAssets()` call at the end of `onWithdraw` (before the `trackedPrincipal` decrement) downgrades any residual super-token and redeposits the underlying into the external vault. The reserve returns to target after every op; Inv. 7 holds (no raw underlying at rest). |
-| θ | Base `setStableYieldRate` and `ensureYieldFlowDuration` invoked `_recalibrateFlow()` after the rebalance — `setStableYieldRate` unconditionally, `ensureYieldFlowDuration` only on a stalled-flow + units-out check. Both would revert at terminal external impairment in the sync family (residual positive deficit after best-effort rebalance + Superfluid GDA buffer requirement on `distributeFlow`). | **Both base callers gain a `evaluateYieldAssetsDeficit() <= 0` guard before `_recalibrateFlow()`.** Async healthy path is unchanged (the override enforces deficit ≤ 0 or reverts, so the guard is trivially true). Sync terminal-impairment path silently skips the recalibrate — the next funded `ensureYieldFlowDuration()` restarts the stream. |
+| θ | Base `setStableYieldRate` and `ensureYieldFlowDuration` invoked `_recalibrateFlow()` after the rebalance — `setStableYieldRate` unconditionally, `ensureYieldFlowDuration` only on a stalled-flow + units-out check. Both would revert at terminal external impairment in the sync family (residual positive deficit after best-effort rebalance + Superfluid GDA buffer requirement on `distributeFlow`). | ~~Both base callers gain a `evaluateYieldAssetsDeficit() <= 0` guard.~~ **SUPERSEDED 2026-05-27 — never implemented.** The guarded-recalibrate approach was dropped in favour of a **vault-level full pause** under terminal external impairment (see Revision 2026-05-27). No `_recalibrateFlow()` callsite is guarded; the user hooks can't run while paused, and the operator setters are allowed to revert under terminal impairment. |
 
 Decisions **2, 6, 8** are refined again; decision **4** clarified (per-op trim is
 now the rule, not the exception). Invariants **3** and **5** rewritten;
@@ -168,7 +201,7 @@ Consequences:
 | 7 | Code reuse | Extract shared `FundManagerBase` | unchanged |
 | 8 | Solvency trust model | Operator + views (no rate cap / settle gate). Stream starts at deposit via pre-funding and is continuously self-funded from the external position thereafter. **No operator injection / no `fundReserve`** — sync diverges from async here because programmatic `EXTERNAL_VAULT` access removes the off-chain top-up gap. The operator's only sustainability lever is `setStableYieldRate`; impairment is signalled by share-price-below-par (canonical 4626) | **revised** |
 | 9 | Async re-audit | Accepted as part of the base extraction | unchanged |
-| 10 | First-deposit inflation / donations | With the clamp dropped, donation-resistance no longer comes from NAV; under a floating share a donation is an irrational gift to existing holders, not an attack. Residual first-deposit inflation mitigated by OZ virtual shares (`_decimalsOffset()`, **proposed** positive offset) ± dead-shares seed / min-shares-minted guard (see §Security) | **revised 2026-05-26** |
+| 10 | First-deposit inflation / donations | With the clamp dropped, donation-resistance no longer comes from NAV; under a floating share a donation is an irrational gift to existing holders, not an attack. Residual first-deposit inflation mitigated by OZ virtual shares — `_decimalsOffset()` hardcoded to `12` (no dead-shares seed; min-shares guard deferred) (see §Security) | **implemented 2026-05-27** |
 | 11 | Capital custody | The FundManager is the sole custodian (external-vault shares + super-token reserve + transient unutilized underlying) and the sole NAV authority; the vault holds no assets | **new** |
 
 ## Contracts
@@ -194,11 +227,17 @@ per-family contracts below.
 the sync FM holds 0 raw underlying at rest by Invariant 7, so the name no
 longer fits the sync semantic).
 
-**`_recalibrateFlow()` guards** in `setStableYieldRate` and
-`ensureYieldFlowDuration`: both wrap the recalibrate in
-`if (evaluateYieldAssetsDeficit() <= 0)` so the call short-circuits silently at
-terminal external impairment in the sync family. Async healthy path unchanged
-(the override enforces `deficit ≤ 0` or reverts).
+**`_recalibrateFlow()` is NOT guarded** (see Revision 2026-05-27). The
+"guarded recalibrate" rule earlier sketched here (Revision 2026-05-22, row θ)
+was never implemented and has been **dropped**: terminal external impairment is
+handled at the vault's `max*` layer (a full pause) rather than inside the
+streaming engine. Consequently `setStableYieldRate` / `ensureYieldFlowDuration`
+(and the sync `onDeposit` / `onWithdraw`) call `_recalibrateFlow()`
+unconditionally. Under terminal impairment the user hooks never run (the vault
+is paused), and the operator setters are permitted to revert
+`GDA_INSUFFICIENT_BALANCE` — accepted; the operator's bleed-stopping lever
+`setStableYieldRate(0)` still succeeds because recalibrating to a zero flow is a
+*close* (no GDA buffer required).
 
 ### `SyncFundManager` (extends `FundManagerBase`) — the capital custodian
 
@@ -258,11 +297,11 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
   4. `EXTERNAL_VAULT.deposit(assets − toUpgrade, address(this))` — the remainder
      is deployed as principal; **no underlying is left at rest in the FM**
      (Invariant 7);
-  5. **guarded** `_recalibrateFlow()` (`if evaluateYieldAssetsDeficit() <= 0`)
-     — the stream starts/raises at deposit time. Terminal impairment
-     (`EXTERNAL_VAULT.maxWithdraw(FM) == 0` AND `assets` cannot cover the
-     residual) silently skips; units are granted; the next
-     `ensureYieldFlowDuration()` restarts the stream.
+  5. `_recalibrateFlow()` (unconditional) — the stream starts/raises at deposit
+     time. This hook cannot be reached under terminal external impairment: the
+     vault is paused (`maxDeposit == 0`) whenever `EXTERNAL_VAULT.maxWithdraw(FM)
+     == 0`, so a drained, un-refillable reserve never meets a deposit here (see
+     Revision 2026-05-27).
 
 - `onWithdraw(holder, shares, totalSharesOwned, supplyBeforeBurn, receiver,
   redeemingAssets)` — `VAULT_ROLE`. The async-`settleEpoch`-netting analog:
@@ -270,11 +309,11 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
      *pre-existing* deficit (no-op in the common pre-withdraw solvent case);
   2. proportional unit decrease (same math as async `onRequestRedeem`). Total
      units are now lower;
-  3. **guarded `_recalibrateFlow()`**
-     (`if getTotalFlowRate() != 0 || evaluateYieldAssetsDeficit() <= 0`) — the
-     new lower flow rate refunds the GDA buffer slice for the removed units
-     back into `YIELD_ASSET.balanceOf(FM)`. Terminal impairment leaves a
-     stalled vault stalled; the withdrawal is never bricked;
+  3. `_recalibrateFlow()` (unconditional) — the new lower flow rate refunds the
+     GDA buffer slice for the removed units back into `YIELD_ASSET.balanceOf(FM)`.
+     Like `onDeposit`, this hook is unreachable under terminal external impairment
+     (the vault is paused, `maxWithdraw == 0`), so the drained-reserve recalibrate
+     revert cannot occur here (see Revision 2026-05-27);
   4. `deficit = evaluateYieldAssetsDeficit()` (post-recalibrate);
      `excessUnderlying = (deficit < 0) ? uint(−deficit) / SCALING_FACTOR : 0`;
      `fromReserve = min(excessUnderlying, redeemingAssets)`;
@@ -309,8 +348,9 @@ Holds **no assets**. Immutable `FUND_MANAGER`; the constructor validates
 `IERC4626(_externalVault).asset() == asset()` (keeps `EXTERNAL_ASSET_MISMATCH`
 on `IStableYieldVault`) then deploys & pins `SyncFundManager` (`msg.sender ==
 vault`), passing `_externalVault` through. The `EXTERNAL_VAULT()` getter
-delegates to the FM. Overrides `_decimalsOffset()` to a positive value
-(**proposed**) for first-deposit inflation resistance (see §Security).
+delegates to the FM. Overrides `_decimalsOffset()` to a hardcoded `12`
+(implemented 2026-05-27) for first-deposit inflation resistance — `10 ** 12`
+attack-cost multiplier, 18-dec shares for the 6-dec USDC deployment (see §Security).
 
 - `totalAssets()` → `FUND_MANAGER.totalManagedAssets()`
   `= EXTERNAL_VAULT.maxWithdraw(FM) + scaledYieldAssetsBalance() +
@@ -335,8 +375,17 @@ delegates to the FM. Overrides `_decimalsOffset()` to a positive value
   by `FUND_MANAGER.totalManagedAssets()` (the
   reserve-inclusive NAV is the global upper bound on what a redeem can source,
   since the recalibration-freed reserve excess scales with the redeemer's unit
-  share). Under external impairment the lower recoverable NAV shrinks this
-  appropriately, making `max*` 4626-honest about external illiquidity.
+  share). Under partial external impairment the lower recoverable NAV shrinks
+  this appropriately, making `max*` 4626-honest about external illiquidity.
+- **Terminal-impairment full pause (Revision 2026-05-27).** When
+  `FUND_MANAGER.maxExternalVaultWithdraw() == 0` *and the FM holds an external
+  position* (`_isExternallyPaused()`), all four `max*` return `0`, so OZ reverts
+  every deposit/mint/withdraw/redeem with `ERC4626ExceededMax*`. The
+  empty-position bootstrap (`maxWithdraw(FM) == 0` because nothing is deployed
+  yet) is excluded so the first deposit is not bricked. This is the in-engine
+  liveness story for terminal impairment — there are deliberately **no**
+  `_recalibrateFlow()` guards (the hooks can't run while paused). See
+  Revision 2026-05-27.
 - `_update` → `FUND_MANAGER.onShareTransfer(from, to, value)` on
   shareholder↔shareholder transfers (unchanged rule).
 - `previewDeposit/Mint/Redeem/Withdraw` work synchronously (OZ default — no
@@ -378,7 +427,7 @@ sequenceDiagram
     V->>FM: onWithdraw(owner, shares, totalOwnedBefore, supplyBeforeBurn, receiver, assets)
     FM->>FM: _rebalanceYieldAssets()  %% pre-rebalance: no-op when solvent (common case)
     FM->>FM: proportional unit decrease  %% required reserve now lower
-    FM->>FM: guarded _recalibrateFlow()  %% lower target — refunds GDA buffer slice into reserve
+    FM->>FM: _recalibrateFlow()  %% lower target — refunds GDA buffer slice into reserve (vault paused under terminal impairment, so unreachable here)
     FM->>FM: fromReserve = min(freed excess, assets) ; _downgrade(fromReserve·SF)
     FM->>E: withdraw(assets − fromReserve, receiver, FM)  %% external remainder
     FM->>FM: safeTransfer(receiver, fromReserve)
@@ -408,7 +457,7 @@ sequenceDiagram
     else deficit < 0
         FM->>FM: _downgrade(excess) ; redeposit underlying into external vault (surplus keeps compounding)
     end
-    FM->>FM: guarded _recalibrateFlow()  %% restart stalled flow iff deficit <= 0
+    FM->>FM: _recalibrateFlow()  %% restart stalled flow (may revert under terminal impairment — accepted; operator uses setStableYieldRate(0))
     Note over E: surplus beyond the deficit stays compounding in the external vault (counted in NAV, accrues to holders); under impairment the pull eats deeper into the position (loss reflected directly in NAV)
 ```
 
@@ -490,12 +539,15 @@ stalling.
   it is an irrational gift, not a profitable attack (the donor strictly loses).
   The one genuinely exploitable surface is the classic ERC-4626 **first-deposit
   inflation attack** (front-run the first depositor, donate to inflate price per
-  share, the victim's deposit rounds to 0 shares). Mitigations replacing the
-  clamp: OZ **virtual shares** via a positive `_decimalsOffset()` override on the
-  vault (**proposed** — the offset value is still to be confirmed; a value at or
-  above the underlying decimals makes the attack economically infeasible),
-  optionally a small dead-shares seed at deployment and/or rejecting deposits
-  that would mint 0 shares. To be characterised by tests on both donation paths.
+  share, the victim's deposit rounds to 0 shares). Mitigation replacing the
+  clamp (implemented 2026-05-27): OZ **virtual shares** via a `_decimalsOffset()`
+  override on the vault returning a hardcoded `12` — `10 ** 12` attack-cost
+  multiplier, 18-dec shares for the 6-dec USDC deployment. The offset alone makes
+  the attack economically infeasible; the dead-shares seed was rejected and the
+  "mint 0 shares ⇒ revert" guard deferred. For a non-6-dec underlying the value
+  must be revisited (the bare `18 − d` normalize form gives `0` protection at an
+  18-dec underlying; floor it as `max(K, 18 − d)`). Pinned by
+  `test_firstDepositInflation_victimMintsNonZero`.
 - **Share price ticks between rebalances.** The stream continuously drains the
   reserve, so NAV (and thus `convertToShares/Assets`, deposit/withdraw/transfer
   pricing) decays between rebalances and recovers at each funded rebalance
