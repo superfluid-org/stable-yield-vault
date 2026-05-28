@@ -42,11 +42,11 @@ underlyingAsset.balanceOf(FM) == 0   (between calls)
 
 Principal never rests in the FM as raw underlying across calls — within each call it is either deposited into `EXTERNAL_VAULT` or `_upgrade`d into the super-token reserve.
 
-**Where.** `onDeposit` deploys the remainder to external (`SyncFundManager.sol:106-110`); `_rebalanceYieldAssets` `deficit < 0` branch downgrades then redeposits its *entire* underlying balance (`SyncFundManager.sol:218-227`); `onWithdraw` downgrades `fromReserve` and transfers it to the receiver (`SyncFundManager.sol:160-162`).
+**Where.** `onDeposit` deploys the remainder to external (`SyncFundManager.sol:106-110`); `_rebalanceYieldAssets` `deficit < 0` branch downgrades then redeposits its *entire* underlying balance — and the branch is **skipped entirely if `EXTERNAL_VAULT.maxDeposit(FM)` is insufficient** (Revision 2026-05-28, `SyncFundManager.sol` `_rebalanceYieldAssets`), so the downgrade never happens when the redeposit can't follow it; `onWithdraw` downgrades `fromReserve` and transfers it to the receiver (`SyncFundManager.sol:160-162`).
 
 **Holds when.** Hard, at rest (between external calls). Transiently nonzero mid-call.
 
-**Breaks if.** Any path leaves underlying in the FM at rest — the next `_rebalanceYieldAssets()` `deficit < 0` branch would sweep it into the reserve (`SyncFundManager.sol:222`), silently converting unaccounted underlying into reserve and disturbing NAV partitioning. This is design Invariant 7 and the load-bearing reason every hook ends with the FM flat in underlying.
+**Breaks if.** Any path leaves underlying in the FM at rest — the next `_rebalanceYieldAssets()` `deficit < 0` branch would sweep it into the reserve, silently converting unaccounted underlying into reserve and disturbing NAV partitioning. This is design Invariant 7 and the load-bearing reason every hook ends with the FM flat in underlying. The 2026-05-28 best-effort-trim gate preserves this hard even when the external is deposits-closed: skipping the *whole* branch (rather than a `try/catch` around the deposit) avoids any post-downgrade "underlying-at-rest" state. Pinned by `test_prop_aboveTargetReserveDoesNotBlockWithdraw` (multi-op fuzz under `setDepositCap(0)` asserting `balanceOf(FM)_underlying == 0` throughout).
 
 ### A.3 — FM is the sole custodian and NAV authority
 
@@ -149,9 +149,11 @@ receiver underlying balance increases by exactly redeemingAssets
 
 **Where.** Grant: `onDeposit` (`SyncFundManager.sol:87-91`). Transfer: `_update` → `onShareTransfer`, `delta = ceil(senderUnits · shares / vault.balanceOf(sender))` (`StableYieldSyncVault.sol:222-227`, `FundManagerBase.sol:236-244`). Withdraw: proportional decrease `ceil(holderUnits · shares / totalSharesOwned)` (`SyncFundManager.sol:130-138`).
 
-**Holds when.** Hard for each individual operation.
+**Holds when.** Hard, per-op (deposit grants exactly `_toUnit(assets)`; transfer moves `ceil(senderUnits · shares / senderShares)`; withdraw decreases `ceil(holderUnits · shares / totalSharesOwned)` — full exit zeros).
 
-**Breaks if.** — see the **open tension** below: under the floating share, `units / shares` is **not** a global constant (units track nominal principal; shares track NAV). Design Invariant 6 ("units proportional to share balance") is loose. This is flagged in §G.1, not asserted as an equality here.
+**Breaks if.** A deposit grants units off any base other than `_toUnit(assets)`; a transfer/withdraw delta is computed against the wrong sender-side denominator; a unit move escapes `onDeposit` / `onWithdraw` / `onShareTransfer`.
+
+**Resolved-by-design (2026-05-28).** Under the floating share, `units / shares` is **NOT** a global constant — units track nominal contributed principal; shares track NAV. This is intentional and matches the design's total-return decomposition: the streamed component is sized to **nominal principal** (the "stable yield on what you put in" narrative — `_toUnit(assets) = assets / RAW_PER_UNIT` is NAV-independent), while the residual `external − promised` is delivered as share-price appreciation. A secondary-market buyer of appreciated shares inherits the seller's slot's `units / share`, distinct from what a fresh deposit at the same cash would mint — informational, not a value leak. See `docs/sync-vault/design.md` Invariant 6 (restated 2026-05-28) and the `test_prop_units*` suite in `test/vault/sync/StableYieldSyncVault.props.t.sol`. §H.1 retired.
 
 ### C.2 — Yield stream starts at deposit and stops proportionally at withdraw
 
@@ -213,13 +215,15 @@ i.e. `evaluateYieldAssetsDeficit() <= 0` after every user op, **unless** the reb
 
 **Holds when.** Expected behaviour, not a violation. Timing/MEV is a known consideration — mitigated by per-op rebalance, virtual shares, rounding in the vault's favour, `nonReentrant`.
 
-### D.4 — Reserve returns to target after withdraw (no slack at rest)
+### D.4 — Reserve returns to target after withdraw (best-effort, gated on external `maxDeposit`)
 
-**State.** After `onWithdraw`, the post-payout `_rebalanceYieldAssets()` trims any residual freed excess back into the external vault, so the reserve is at target (not above) and the FM is flat in underlying (A.2).
+**State.** Under normal operation (external vault accepting deposits), after `onWithdraw` the post-payout `_rebalanceYieldAssets()` trims any residual freed excess back into the external vault, so the reserve is at target (not above) and the FM is flat in underlying (A.2). When the external signals deposits closed (`EXTERNAL_VAULT.maxDeposit(FM) < underlyingNeeded`), the trim is **skipped entirely** (Revision 2026-05-28) and the freed excess stays as above-target super-token slack in the reserve until the external accepts deposits again.
 
-**Where.** `SyncFundManager.sol:164-166`. Design Revision 2026-05-22 row η, Invariant 5.
+**Where.** `SyncFundManager.sol` `_rebalanceYieldAssets` (`deficit < 0` branch with the `maxDeposit` gate); called from `onWithdraw` post-payout. Design Revision 2026-05-22 row η + Revision 2026-05-28; design.md Invariant 5 / Decision 2.
 
-**Holds when.** Best-effort (subject to external-vault `deposit` accepting the redeposit).
+**Holds when.** Best-effort. Drops to "reserve sits above target" while external deposits are closed; idempotent retry on every subsequent `_rebalanceYieldAssets()` call (no accumulation pathology — `deficit < 0` is the steady-state cue, retried until the trim takes). Above-target slack is **safe**: it just funds the stream for longer, doesn't over-issue shares, doesn't transfer value between holders. Inv. 7 / A.2 ("no raw underlying at rest") is preserved hard throughout — the whole branch is skipped rather than down­graded-then-stuck, so we never end up holding raw underlying with nowhere to send it.
+
+**Known limitation.** A non-compliant external vault whose `deposit` reverts despite reporting `maxDeposit > 0` would bypass the pre-check, propagate its revert, and brick the calling op. Pinned by `test_withdraw_brickedByNonCompliantExternal` in `StableYieldSyncVault.t.sol`. Accepted; design.md §Security requires standard, audited ERC-4626 externals.
 
 ### D.5 — Flow & fee rate relationships (inherited)
 
@@ -330,7 +334,7 @@ RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
 
 These are not settled invariants — they are properties the design claims but the code does not yet robustly enforce, or where the design prose and the floating-share model are in tension. Listed so they are not lost.
 
-1. **Units vs. shares are not globally proportional (design Invariant 6 is loose).** Units are granted on **underlying deposited** (`_toUnit(assets)`, `SyncFundManager.sol:87`) while shares mint on **NAV** (`assets · supply / NAV`). Once the share appreciates, equal deposits buy fewer shares but the same units, so `units / shares` differs across holders and even across one holder's deposits at different prices. On-transfer the slice moves proportional to *shares* (`FundManagerBase.sol:240`), so it is self-consistent per holder, but there is no global `units == k · shares`. This is likely intentional (the stream pays the promised rate on **nominal principal**; appreciation is handled by the share price) — but Invariant 6 should be restated as *"units track contributed principal; transfers move a share-proportional slice"*. **Confirm the intended yield base before encoding a property test.**
+1. **Units vs. shares under the floating share — RESOLVED 2026-05-28.** Confirmed intended: units track **nominal contributed principal** (the streamed component is sized to what each holder put in — the "stable yield on what you put in" narrative), not shares. Design Invariant 6 restated; §C.1 promoted to a confirmed invariant with the "no global `units == k · shares`" property captured explicitly. Pinned by `test_prop_unitGrantEqualsToUnitAssets`, `test_prop_unitsTrackPrincipalAcrossPrices`, `test_prop_unitsPerShareNotGlobal`, `test_prop_transferConservesUnits`, `test_prop_withdrawDecreasesUnitsProportional` in `test/vault/sync/StableYieldSyncVault.props.t.sol`. See `docs/sync-vault/open-questions.md` (OQ #3 RESOLVED).
 
 2. **First-deposit inflation mitigation — RESOLVED 2026-05-27.** `StableYieldSyncVault` now overrides `_decimalsOffset()` to return `12` (hardcoded for the 6-dec USDC deployment → `10 ** 12` attack-cost multiplier, 18-dec shares). The classic ERC-4626 first-deposit inflation attack is closed; the pinned `test_firstDepositInflation_victimMintsNonZero` passes. Offset alone — no dead-shares seed, no min-shares-minted guard (the guard was deferred). For a non-6-dec underlying the value must be revisited (the bare `18 − d` normalize form gives `0` protection at 18-dec underlyings; floor it). See `docs/sync-vault/open-questions.md`.
 

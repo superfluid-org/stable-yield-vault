@@ -56,37 +56,46 @@ remains tracked under the "[DECIDE] Donation characterisation under the floating
 
 Pinned by `test_terminalImpairment_pausesAllEntrypoints`, `test_terminalImpairment_resumesAfterUnfreeze`, `test_terminalImpairment_operatorCanZeroRate` (in `StableYieldSyncVault.t.sol`). See `docs/sync-vault/design.md §Revision 2026-05-27`.
 
-## [DECIDE] Units track nominal principal, not shares — restate Invariant 6
+## [RESOLVED 2026-05-28] Units track nominal contributed principal — Invariant 6 restated
 
-Design Invariant 6 reads "a holder's GDA units are proportional to their share balance." Under the **floating** share this is not a global equality. Units are granted on **underlying deposited**:
+**Decision (Option A — current code, intended).** The streamed component of total return is keyed to **nominal contributed principal**, not to current share value. Units are granted on **underlying deposited** (`_toUnit(assets) = assets / RAW_PER_UNIT`, NAV-independent); shares mint on **NAV** (`assets · supply / NAV`). Under the floating share these diverge — `units / shares` is **not** a global constant once NAV departs from `supply · RAW_PER_UNIT`. The narrative is straightforward and matches the async vault's behaviour: *Alice deposits 100 USDC at 5% — she receives 5 USDCx over one year, and if the external vault was earning 10% her shares are worth 105 USDC at exit*. The residual (`external − promised`) is delivered as share-price appreciation. No code change — the current `_toUnit(assets)` grant + share-proportional transfer/withdraw slicing implements this directly.
 
-```solidity
-// SyncFundManager.onDeposit
-YIELD_POOL.increaseMemberUnits(receiver, _toUnit(assets));   // assets / RAW_PER_UNIT
-```
+Secondary-market consequence (accepted, informational): a buyer of appreciated shares inherits the seller's per-slot `units / share`, i.e. a smaller stream-per-dollar-paid than a fresh deposit at the same cash would give. This is **not a value leak** — the seller realises NAV value in cash, the buyer inherits the embedded units slice; an efficient secondary market would discount accordingly. The secondary market is not a core feature of the vault, just a permissionless exit avenue; the wrinkle is documented for off-chain pricing integrators, not encoded on-chain.
 
-while shares mint on **NAV** (`assets · supply / NAV`). Once the share has appreciated, equal deposits buy fewer shares but the same units, so `units / shares` differs across holders — and even across one holder's successive deposits at different prices. On transfer the slice moves proportional to *shares* (`onShareTransfer`), so the relationship is self-consistent within a holder's transfers but there is no global `units == k · shares`.
+The dropped alternative (Option B) — making the stream track current share value — would require continuous GDA-unit rebasing as NAV moves (and would re-absorb the external surplus into the stream, contradicting the floating-share decision of 2026-05-26 that the surplus accrues to holders as share appreciation). Infeasible in GDA's discrete-units model and incoherent with the floating-share product.
 
-This is most likely intended: the stream pays the promised `stableYieldRate` on **nominal contributed principal**, and the excess (`external − promised`) is delivered as share appreciation — the two-part return the design describes. But it means the stream a holder receives is keyed to what they *deposited*, not to what their shares are currently *worth*.
+Decisions taken:
 
-Open question:
+- **Invariant 6 restated** in `docs/sync-vault/design.md` from *"units proportional to share balance"* (the loose-but-true form under the dropped clamp) to *"units track contributed principal; transfers move a share-proportional slice; the buyer inherits the sender's per-slot `units / share` ratio."*
+- **`docs/sync-vault/invariants.md §C.1` promoted** from open tension (§H.1) to a confirmed invariant with the "no global `units == k · shares`" property explicitly captured.
+- **`CLAUDE.md` "Shares & roles"** addended to call out the sync-vault unit-grant rule.
+- **Pinned by five property tests** in `test/vault/sync/StableYieldSyncVault.props.t.sol` (§C.1 block): `test_prop_unitGrantEqualsToUnitAssets`, `test_prop_unitsTrackPrincipalAcrossPrices`, `test_prop_unitsPerShareNotGlobal`, `test_prop_transferConservesUnits`, `test_prop_withdrawDecreasesUnitsProportional`.
 
-Confirm the intended yield base. If "stream on nominal deposited principal" is intended (current code), restate Invariant 6 as *"units track contributed principal; transfers move a share-proportional slice"* and document the consequence (a holder who bought appreciated shares on the secondary market gets a smaller stream per share than an early depositor). If instead the stream should track current share value, the unit-grant math needs to change. Resolve before encoding any units↔shares property test.
+## [RESOLVED 2026-05-28] Withdraw bricked by external rejecting post-payout redeposit — fixed with a best-effort trim (α: maxDeposit pre-check)
 
-## [VERIFY] Withdraw can be bricked by the external vault rejecting the post-payout redeposit
+**Decision (Option α — maxDeposit pre-check, no try/catch).** `_rebalanceYieldAssets()`'s `deficit < 0` branch now gates the whole trim on `EXTERNAL_VAULT.maxDeposit(FM) >= (uint256(-deficit) / SCALING_FACTOR)`. If the external will accept the redeposit, the trim runs as before (downgrade + redeposit). If it won't, the **whole branch is skipped** — the excess stays as above-target super-token slack in the reserve; the next rebalance retries idempotently. The fix lives inside `_rebalanceYieldAssets()` so every caller benefits (`onDeposit` pre-rebalance, `onWithdraw` pre-rebalance + post-payout trim, `setStableYieldRate`, `ensureYieldFlowDuration`).
 
-`onWithdraw` ends with a post-payout trim that redeposits any residual freed reserve excess back into the external vault:
+Rejected alternatives:
 
-```solidity
-// SyncFundManager.onWithdraw — final line
-_rebalanceYieldAssets();   // deficit < 0 branch: _downgrade + EXTERNAL_VAULT.deposit(...)
-```
+- **β — `try/catch` around `EXTERNAL_VAULT.deposit`**: handles non-compliant externals too, but the failure path leaves raw underlying at rest in the FM (violating Inv. 7 / A.2) and would need a re-upgrade rollback. Over-engineered.
+- **γ — α + defensive `try/catch`**: pre-check AND catch — most defensive but redundant given the design already requires standard, audited ERC-4626s (§Security).
 
-If the external vault is paused-for-deposits (or its `maxDeposit(FM) == 0`) while still allowing withdrawals, this `EXTERNAL_VAULT.deposit` call could revert and brick an otherwise-valid withdrawal. The accepted illiquidity case (decision 5) only covers the external *withdraw* leg; the redeposit leg is a separate, less-obvious revert surface.
+Why α won:
 
-Open question:
+- **Inv. 7 / A.2 preserved hard** — skipping the whole branch (rather than downgrading first) means we never end up holding raw underlying with nowhere to send it.
+- **Only D.4 weakens** (reserve may sit above target while external deposits are closed) — and the relaxation is safe: above-target slack just funds the stream for longer, doesn't over-issue shares, doesn't transfer value between holders.
+- **Trusts ERC-4626 compliance** — consistent with the existing §Security stance ("integrate only standard, audited, non-rebasing 4626s").
 
-Should the post-payout trim's redeposit be best-effort (skip if the external vault won't accept it, leaving the excess in the reserve as transient slack — at the cost of violating "no slack at rest", D.4), or is bricking acceptable here? Characterise with a mock external vault whose `deposit` reverts but `withdraw` succeeds.
+Decisions taken:
+
+- **`docs/sync-vault/design.md`** — Decision 2 row reworded ("best-effort, gated on external `maxDeposit`"); `SyncFundManager` contract section's `deficit < 0` bullet rewritten; `onWithdraw` step 6 reworded; new Revision 2026-05-28 section added; Invariant 5 / §Security extended.
+- **`docs/sync-vault/invariants.md`** — D.4 rewritten ("best-effort, gated on external `maxDeposit`"); A.2 / Inv. 7 cross-referenced to the new gate; known-limitation note added.
+- **`CLAUDE.md`** — sync vault paragraph noted the best-effort trim.
+- **Code** — `SyncFundManager._rebalanceYieldAssets()` gained the `EXTERNAL_VAULT.maxDeposit(this) >= underlyingNeeded` pre-check.
+- **Tests** —
+  - `test_withdraw_notBrickedByRedepositCap` (formerly `test_withdraw_notBrickedByRedepositRevert`) — repinned to use `setDepositCap(0)` (the standard ERC-4626 deposits-closed signal) and **moved out of `openQuestions.t.sol` into `StableYieldSyncVault.t.sol`** (risk-characterisations section, next to the OQ #1 first-deposit-inflation test). Now passes.
+  - `test_withdraw_brickedByNonCompliantExternal` — new known-limitation pin: asserts the withdraw *does* brick when the external reverts despite `maxDeposit > 0` (via `setDepositReverts(true)`). Documents the trust boundary.
+  - `test_prop_aboveTargetReserveDoesNotBlockWithdraw` — new property test in `StableYieldSyncVault.props.t.sol`: fuzz two withdraws at `setDepositCap(0)` + reopen + operator rebalance; assert exact payouts, no reverts, and `balanceOf(FM)_underlying == 0` throughout (Inv. 7 holds across the slack state).
 
 ## [VERIFY] `maxRedeem` / `maxWithdraw` are genuinely never-bricking
 

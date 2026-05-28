@@ -1,12 +1,49 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
 **stable** yield is streamed to depositors via the same Superfluid GDA engine the
 async vault uses. The external vault replaces the async vault's manual off-chain
 "working assets" leg.
+
+---
+
+## ⚠️ Revision 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort
+
+The earlier `deficit < 0` branch unconditionally `_downgrade`d the excess
+super-token then called `EXTERNAL_VAULT.deposit(...)`. If the external vault
+rejected the redeposit (paused-for-deposits or `maxDeposit(FM) == 0`) while
+still servicing withdrawals, that revert propagated and bricked the calling op
+— most painfully `onWithdraw`'s post-payout trim, but also the pre-rebalance
+at the top of `onDeposit` / `onWithdraw` and the operator setters
+(`setStableYieldRate`, `ensureYieldFlowDuration`). The fix sits inside
+`_rebalanceYieldAssets()` so every caller benefits.
+
+**Policy.** The `deficit < 0` branch now pre-checks
+`EXTERNAL_VAULT.maxDeposit(FM) >= (uint256(-deficit) / SCALING_FACTOR)`. If the
+external will accept the redeposit, the trim runs as before. If it won't, the
+**whole branch is skipped**: the excess stays as above-target super-token
+slack in the reserve and the next `_rebalanceYieldAssets()` call retries
+(idempotent — `deficit < 0` reappears identically). The `deficit > 0`
+branch (pull-from-external) is untouched.
+
+| Aspect | Decision (2026-05-28) | Rationale |
+|---|---|---|
+| Calling-op liveness | **Withdraw / deposit / operator setters never brick on a closed external `maxDeposit`.** Best-effort trim is silent when external won't accept. | Letting an external "deposits closed, withdrawals open" state brick exits would trap holders in a recoverable position for no upside. |
+| Inv. 7 / A.2 (no raw underlying at rest) | **Preserved hard.** Skipping the *entire* branch avoids the downgrade — so we never end up holding raw underlying with no place to send it. | Cleaner than try/catch around `deposit` (which would leave raw underlying at rest and force a re-upgrade rollback). |
+| D.4 (reserve returns to target) | **Weakened to best-effort, gated on external `maxDeposit`.** The reserve may sit above target while external deposits are unavailable; once they reopen, the next rebalance trims back down. | Safe relaxation: above-target slack just funds the stream for longer; no over-issuance, no value transfer between holders. |
+| Non-compliant external (revert despite `maxDeposit > 0`) | **Still bricks the calling op (known limitation).** Pinned by `test_withdraw_brickedByNonCompliantExternal`. | The design already requires standard, audited ERC-4626 externals (§Security); modelling non-compliant `deposit` reverts is out of scope. |
+| Composability with the deficit > 0 branch | Unchanged — pull-from-external still runs unconditionally; only the trim is gated. | Pull never needs the external to accept anything; it only consumes external `maxWithdraw`. |
+
+The pinned `test_withdraw_notBrickedByRedepositCap` (in
+`StableYieldSyncVault.t.sol`) flips green with this change; the paired
+`test_withdraw_brickedByNonCompliantExternal` pins the trust-boundary; the
+property test `test_prop_aboveTargetReserveDoesNotBlockWithdraw` (in
+`StableYieldSyncVault.props.t.sol`) fuzzes that above-target slack never
+blocks subsequent ops and Inv. 7 holds throughout. Decision **2** is refined.
+Invariant **5** / **D.4** is rewritten accordingly.
 
 ---
 
@@ -167,11 +204,17 @@ Consequences:
   offset). It is *not* pegged. It ticks slightly as the stream drains the
   reserve between rebalances and tracks the external vault's real NAV otherwise.
 - A holder's **total return decomposes** as: the streamed component (the
-  promised `stableYieldRate`, smooth, in super-token) **plus** share
-  appreciation (`external yield − promised rate`, booked into the share price).
+  promised `stableYieldRate` on the **nominal underlying they contributed**,
+  smooth, in super-token) **plus** share appreciation (`external yield −
+  promised rate`, booked into the share price).
   The sum is the external vault's real yield — **single-counted**, because the
   stream is funded by pulling from the external position (every streamed unit
   lowers `maxWithdraw(FM)` by that unit; the appreciation is the residual).
+  The stream's per-holder size is keyed to **nominal principal**, not to the
+  current share value, via `_toUnit(assets) = assets / RAW_PER_UNIT` (see
+  Invariant 6); the simple narrative is *Alice deposits 100 USDC at 5% — she
+  receives 5 USDCx over one year, and if the external earned 10% her shares
+  are worth 105 USDC at exit.*
 - There is **no protocol-owned buffer** held aside from the share price. The
   external surplus between rebalances physically compounds in the external vault
   and is fully counted in NAV — it belongs to shareholders. The treasury earns
@@ -193,7 +236,7 @@ Consequences:
 | # | Decision | Choice | Status |
 |---|---|---|---|
 | 1 | Share / loss model | **Floating** ERC-4626 share priced `totalManagedAssets()/totalSupply` (no clamp, no peg); total return = streamed promised rate + appreciation for `external − promised`; immediate honest loss pass-through via real-recoverable NAV | **revised 2026-05-26** |
-| 2 | Surplus handling | External surplus compounds inside the external vault and is **counted in NAV** (accrues to shareholders as appreciation) — **no protocol-owned excluded buffer**. The per-op rebalance and `ensureYieldFlowDuration()` pull only the reserve *deficit* (surplus stays deployed/compounding); under impairment the same deficit-only pull continues uncapped into the external position. Excess super-token is trimmed back to external on every rebalance — `onWithdraw` trims its post-payout residual freed excess (no above-target slack at rest) | **revised 2026-05-26** |
+| 2 | Surplus handling | External surplus compounds inside the external vault and is **counted in NAV** (accrues to shareholders as appreciation) — **no protocol-owned excluded buffer**. The per-op rebalance and `ensureYieldFlowDuration()` pull only the reserve *deficit* (surplus stays deployed/compounding); under impairment the same deficit-only pull continues uncapped into the external position. Excess super-token is trimmed back to external on every rebalance **(best-effort — the trim's `deficit < 0` branch is gated on `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded`; if the external signals deposits closed, the excess stays as above-target super-token slack in the reserve and the next rebalance retries — see Revision 2026-05-28)** — `onWithdraw` trims its post-payout residual freed excess (no above-target slack at rest under normal operation) | **revised 2026-05-28** |
 | 3 | Rate model | Operator-set promised `stableYieldRate` (reuse async model) | unchanged |
 | 4 | Stream funding | **Pre-funded from each deposit** into the super-token reserve (async-style), then continuously replenished from the external position — surplus first, then deeper into the external position under impairment (uncapped). Stream only stalls at terminal impairment (`maxWithdraw(FM) == 0`); no on-chain operator subsidy | **revised** |
 | 5 | Withdraw liquidity | Async-faithful: decreasing the redeemer's units lowers the required reserve; the **recalibration-freed excess** (capped at `min(freedExcess, redeemingAssets)`) funds the reserve slice (preserves stayers' horizon by construction), the remainder is drawn from the external vault (reverts only if the external vault is illiquid). Reserve is redeemable | **revised** |
@@ -276,10 +319,22 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
     holders directly via the (unclamped) NAV. The pull is capped at
     `maxWithdraw(this)`, so a compliant (trusted) external vault never reverts
     it → it can **never brick** the calling user op.
-  - `deficit < 0`: `_downgrade(uint256(-deficit))` then `forceApprove` +
-    `EXTERNAL_VAULT.deposit` the resulting underlying back into the external
-    vault so the surplus keeps compounding externally. Inv. 7 is preserved
-    (no raw underlying at rest in the FM).
+  - `deficit < 0`: **best-effort trim** (revised 2026-05-28). Pre-check
+    `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded` (where
+    `underlyingNeeded = uint256(-deficit) / SCALING_FACTOR`); if the external
+    vault will accept the redeposit, `_downgrade(uint256(-deficit))` then
+    `forceApprove` + `EXTERNAL_VAULT.deposit` the resulting underlying back
+    into the external vault so the surplus keeps compounding externally
+    (Inv. 7 preserved — no raw underlying at rest in the FM). Otherwise
+    **skip the whole branch**: leave the excess as above-target super-token
+    slack in the reserve; the next rebalance retries idempotently
+    (`deficit < 0` reappears identically next call). This preserves Inv. 7 /
+    A.2 hard at the cost of relaxing D.4 ("reserve returns to target")
+    while external deposits are unavailable. Trusts ERC-4626 compliance: a
+    non-compliant external whose `deposit` reverts despite `maxDeposit > 0`
+    still bricks the calling op (pinned by
+    `test_withdraw_brickedByNonCompliantExternal` as a known limitation —
+    see §Security).
   - Residual `deficit > 0` after the upgrade is **tolerated** — callers (per-op
     hooks and the base setters) guard their `_recalibrateFlow()` accordingly.
 
@@ -323,10 +378,14 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
      (reverts only if the external vault is illiquid — accepted, decision 5);
      then `safeTransfer(receiver, fromReserve)` so the receiver gets exactly
      `redeemingAssets`;
-  6. `_rebalanceYieldAssets()` — **post-payout trim** (2026-05-22, Q1=B). Any
-     residual freed excess `freedExcess − redeemingAssets` (when positive) is
-     downgraded and redeposited into the external vault. The reserve returns
-     to target; Inv. 7 holds (no raw underlying at rest).
+  6. `_rebalanceYieldAssets()` — **post-payout trim** (2026-05-22, Q1=B;
+     gated 2026-05-28). Any residual freed excess `freedExcess − redeemingAssets`
+     (when positive) is downgraded and redeposited into the external vault
+     **iff `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded`**; otherwise
+     the excess stays as above-target super-token slack in the reserve. The
+     reserve returns to target under normal operation; Inv. 7 / A.2 holds
+     unconditionally (no raw underlying at rest, even when the trim is
+     skipped).
 
   There is **no principal-counter decrement** — `redeemingAssets` is OZ's
   `previewRedeem(shares) = shares · NAV / supply` (floating, floor), so the burn
@@ -431,8 +490,8 @@ sequenceDiagram
     FM->>FM: fromReserve = min(freed excess, assets) ; _downgrade(fromReserve·SF)
     FM->>E: withdraw(assets − fromReserve, receiver, FM)  %% external remainder
     FM->>FM: safeTransfer(receiver, fromReserve)
-    FM->>FM: _rebalanceYieldAssets()  %% post-payout trim: residual freed excess back to external
-    Note over E: external remainder reverts only if the external vault is illiquid (accepted)
+    FM->>FM: _rebalanceYieldAssets()  %% post-payout trim: residual freed excess back to external (best-effort, gated on EXTERNAL.maxDeposit(FM) >= underlyingNeeded; skipped under deposits-closed → above-target slack stays in reserve)
+    Note over E: external withdraw remainder reverts only if the external vault is illiquid (accepted); the trim's redeposit leg is best-effort, never reverts (pre-check honours external maxDeposit)
 ```
 
 Under impairment (external position recoverable < deposited principal): NAV
@@ -515,13 +574,42 @@ stalling.
    A withdraw cannot break it for stayers: units drop → required reserve drops,
    and only the recalibration-*freed* excess up to `redeemingAssets` is
    downgraded for the redeemer (`fromReserve ≤ freedExcess`); any residual is
-   trimmed back to the external vault by the post-payout rebalance. The only
-   state where the reserve cannot meet horizon is terminal impairment (external
-   vault returns 0 on `maxWithdraw`); in that limit the stream is left stalled
-   and (re)started by the next operator-called `ensureYieldFlowDuration()`.
-   Deposits/withdrawals are never bricked.
-6. **Units track shareholding.** A holder's GDA units are proportional to their
-   share balance; transfers move a proportional slice (`onShareTransfer`).
+   trimmed back to the external vault by the post-payout rebalance —
+   **best-effort, gated on `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded`**
+   (Revision 2026-05-28). When the trim's gate refuses (external deposits
+   closed), the residual stays as above-target super-token slack in the
+   reserve; the reserve sits above target until the gate reopens. This is a
+   *safe relaxation*: the reserve still satisfies horizon (it's above target,
+   not below); above-target slack doesn't over-issue shares or transfer value
+   between holders; Inv. 7 / A.2 holds hard (the whole `deficit < 0` branch
+   is skipped, not downgrade-then-stuck). The only state where the reserve
+   cannot meet horizon is terminal impairment (external vault returns 0 on
+   `maxWithdraw`); in that limit the stream is left stalled and (re)started by
+   the next operator-called `ensureYieldFlowDuration()`. Deposits/withdrawals
+   are never bricked by the trim leg (a non-compliant external whose `deposit`
+   reverts despite `maxDeposit > 0` is the known limitation — pinned by
+   `test_withdraw_brickedByNonCompliantExternal`).
+6. **Units track contributed principal (not shares).** On deposit a holder's
+   GDA units increase by `_toUnit(assets) = assets / RAW_PER_UNIT` —
+   proportional to **underlying contributed**, not to shares minted. Under the
+   floating share `units / shares` is intentionally **not** a global constant:
+   equal-dollar deposits buy equal units but unequal shares once NAV departs
+   from `supply · RAW_PER_UNIT`. On a shareholder↔shareholder transfer, units
+   move proportional to the *shares* transferred relative to the sender's
+   share balance (`ceil(senderUnits · shares / vault.balanceOf(sender))`) —
+   the buyer inherits the sender's per-slot `units / share` ratio. On withdraw,
+   units decrease proportional to *shares* relative to the holder's total
+   shares (revised 2026-05-28, was "units proportional to share balance"; the
+   loose form was correct under the dropped clamp model and stops holding once
+   the share floats). Consequence: the streamed component of total return
+   tracks **nominal principal contributed** (the "stable yield on what you put
+   in" narrative — see Core principle); the residual `external − promised` is
+   delivered as share-price appreciation. A secondary-market buyer of
+   appreciated shares inherits the seller's `units / share`, i.e. a smaller
+   stream-per-dollar-paid than a fresh deposit at the same cash would give —
+   not a value leak; an informational point for off-chain market pricing of
+   secondary shares. Pinned by the `test_prop_units*` suite in
+   `test/vault/sync/StableYieldSyncVault.props.t.sol`.
 7. **FM is the sole custodian.** All vault-controlled assets (external-vault
    shares, super-token reserve, transient unutilized underlying) live in the FM;
    the vault's underlying/super-token balances are 0 at rest. **Custody hazard
@@ -600,6 +688,17 @@ stalling.
   cannot service it. `maxWithdraw`/`maxRedeem` reflect it via
   `totalManagedAssets()` — under external impairment the lower recoverable NAV
   shrinks the bound, so a request ≤ `max*` never bricks.
+- **External deposit-closed asymmetry** (Revision 2026-05-28): a separate
+  failure mode is the external vault rejecting *deposits* (paused or
+  `maxDeposit(FM) == 0`) while still servicing withdrawals. The
+  `_rebalanceYieldAssets()` `deficit < 0` branch's pre-check on
+  `EXTERNAL_VAULT.maxDeposit(FM)` skips the trim in that state, letting the
+  freed excess sit as above-target super-token slack in the reserve until the
+  external accepts deposits again. Inv. 7 / A.2 preserved hard; D.4 weakened
+  to best-effort. Known limitation: a non-compliant external whose `deposit`
+  reverts despite `maxDeposit > 0` will still brick the calling op — pinned by
+  `test_withdraw_brickedByNonCompliantExternal`. Integrate only standard
+  ERC-4626s whose `maxDeposit` honestly signals capacity.
 - **Rate > sustainable yield** (accepted; **diverges from async**): the external
   surplus depletes, the per-op replenisher continues uncapped deeper into the
   external position, and the (unclamped) NAV passes the loss to shares honestly
