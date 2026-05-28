@@ -133,6 +133,24 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     // ──────────────────────────────────────────────
 
     /**
+     * @notice Emitted when the operator closes an epoch (snapshot is taken, rate is locked).
+     * @dev Fires inside {onCloseEpoch} before settlement. Pair with {EpochSettled} (fires from
+     *      {onSettleEpoch}) to observe the full close→settle transition. The rate locked here is
+     *      the rate the epoch will settle at — between these two events, indexers know an epoch
+     *      is in flight without polling {getSnapshot}.
+     * @param epoch The epoch number that was just closed (== snapshot epoch)
+     * @param totalAssets NAV reported by the operator (working + unutilized + scaled yield)
+     * @param effectiveSupply totalSupply + unclaimed deposit shares - unclaimed redeem shares
+     * @param assetsPerShare The exchange rate locked for this epoch (scaled by ASSETS_PER_SHARE_SCALE)
+     */
+    event EpochClosed(
+        uint256 indexed epoch,
+        uint256 totalAssets,
+        uint256 effectiveSupply,
+        uint256 assetsPerShare
+    );
+
+    /**
      * @notice Emitted when the operator settles an epoch.
      * @param epoch The epoch number that was settled
      * @param totalAssets The NAV reported by the operator

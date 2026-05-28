@@ -232,9 +232,11 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         uint256 epochRate =
             effectiveSupply == 0 ? ASSETS_PER_SHARE_SCALE : _totalAssets.mulDiv(ASSETS_PER_SHARE_SCALE, effectiveSupply);
 
+        uint256 closingEpoch = currentEpoch;
+
         // Take a snapshot of the epoch's pending deposits and redeems to be used during settlement
         _snapshot = Snapshot({
-            epoch: currentEpoch,
+            epoch: closingEpoch,
             depositingAssets: totalPendingDepositAssets,
             redeemingShares: totalPendingRedeemShares,
             rate: epochRate
@@ -249,6 +251,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
         // Persist the last reported total assets for view functions
         _lastReportedTotalAssets = _totalAssets;
+
+        emit EpochClosed(closingEpoch, _totalAssets, effectiveSupply, epochRate);
     }
 
     /// @inheritdoc IStableYieldAsyncVault
