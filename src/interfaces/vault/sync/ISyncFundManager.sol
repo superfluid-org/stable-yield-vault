@@ -87,4 +87,12 @@ interface ISyncFundManager is IFundManagerBase {
      */
     function maxExternalDeposit() external view returns (uint256);
 
+    /**
+     * @notice The external vault's withdraw limit with the FM as holder
+     *         (`EXTERNAL_VAULT.maxWithdraw(FM)`). A value of `0` is the **terminal external
+     *         impairment** signal: the deployed principal cannot be recovered, so the vault
+     *         treats it as a full pause (the vault zeroes all four `max*` while it holds).
+     */
+    function maxExternalVaultWithdraw() external view returns (uint256);
+
 }

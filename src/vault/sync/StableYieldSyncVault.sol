@@ -138,35 +138,88 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
     }
 
     /**
+     * @dev First-deposit inflation-attack resistance via OZ virtual shares. With the NAV clamp
+     *      dropped (floating share, 2026-05-26), donations are no longer absorbed by the price, so
+     *      the empty-vault bootstrap is the one genuinely exploitable surface; a positive offset
+     *      makes it economically infeasible (the donation needed to round a victim to zero, and the
+     *      attacker's unrecoverable loss on it, both scale by `10 ** offset`).
+     *
+     *      Hardcoded `12` targets the 6-dec USDC deployment: it yields a `10 ** 12` attack-cost
+     *      multiplier and `6 + 12 = 18`-decimal shares (the conventional 18-dec presentation).
+     *      Note: 18-dec shares coincide with the 18-dec `YIELD_ASSET` (USDCx) purely by arithmetic
+     *      — shares track NAV in underlying terms and are unrelated to the super-token reserve.
+     *      The offset only scales the share <-> `totalAssets` conversion; it does not touch the FM's
+     *      super-token reserve, `SCALING_FACTOR`, or the GDA units (computed off `assets`).
+     *      For a non-6-dec underlying, revisit this value (see `docs/sync-vault/open-questions.md`).
+     */
+    function _decimalsOffset() internal pure override returns (uint8) {
+        return 12;
+    }
+
+    /**
      * @inheritdoc ERC4626
-     * @dev Additionally capped by the external vault's own deposit limit (FM as holder).
+     * @dev Additionally capped by the external vault's own deposit limit (FM as holder). Returns
+     *      `0` under terminal external impairment (see {_isExternallyPaused}): we never route a
+     *      user into a vault they cannot withdraw from.
      */
     function maxDeposit(address) public view override(ERC4626, IERC4626) returns (uint256) {
+        if (_isExternallyPaused()) return 0;
         return FUND_MANAGER.maxExternalDeposit();
     }
 
     /**
      * @inheritdoc ERC4626
-     * @dev Additionally capped by the external vault's own deposit limit (in share terms).
+     * @dev Additionally capped by the external vault's own deposit limit (in share terms). Returns
+     *      `0` under terminal external impairment (see {_isExternallyPaused}).
      */
     function maxMint(address) public view override(ERC4626, IERC4626) returns (uint256) {
+        if (_isExternallyPaused()) return 0;
         uint256 externalMax = FUND_MANAGER.maxExternalDeposit();
         if (externalMax == type(uint256).max) return type(uint256).max;
         return _convertToShares(externalMax, Math.Rounding.Floor);
     }
 
-    /// @inheritdoc ERC4626
+    /**
+     * @inheritdoc ERC4626
+     * @dev Returns `0` under terminal external impairment (see {_isExternallyPaused}); the surviving
+     *      reserve is reserved for the yield stream, not for withdrawal. Otherwise capped by the
+     *      reserve-inclusive NAV.
+     */
     function maxWithdraw(address owner) public view override(ERC4626, IERC4626) returns (uint256) {
+        if (_isExternallyPaused()) return 0;
         uint256 byShares = _convertToAssets(balanceOf(owner), Math.Rounding.Floor);
         uint256 serviceable = FUND_MANAGER.totalManagedAssets();
         return byShares < serviceable ? byShares : serviceable;
     }
 
-    /// @inheritdoc ERC4626
+    /**
+     * @inheritdoc ERC4626
+     * @dev Returns `0` under terminal external impairment (see {_isExternallyPaused}). Otherwise
+     *      capped by the reserve-inclusive NAV (in share terms).
+     */
     function maxRedeem(address owner) public view override(ERC4626, IERC4626) returns (uint256) {
+        if (_isExternallyPaused()) return 0;
         uint256 ownerShares = balanceOf(owner);
         uint256 redeemableByLiquidity = _convertToShares(FUND_MANAGER.totalManagedAssets(), Math.Rounding.Floor);
         return ownerShares < redeemableByLiquidity ? ownerShares : redeemableByLiquidity;
+    }
+
+    /**
+     * @dev Terminal external impairment ⇒ full pause. When `EXTERNAL_VAULT.maxWithdraw(FM) == 0`
+     *      the deployed principal cannot be recovered through the external vault, so all four
+     *      `max*` return `0` (OZ then reverts any deposit/mint/withdraw/redeem with
+     *      `ERC4626ExceededMax*`). The vault simply waits for the external position to unfreeze;
+     *      meanwhile the Superfluid stream keeps paying existing holders out of the reserve until
+     *      it is naturally liquidated. `maxWithdraw(FM) == 0` does not distinguish a permanent loss
+     *      from a temporary liquidity freeze — both are treated as a pause; 
+     *
+     *      The pause is gated on the FM actually *holding* an external position: an empty external
+     *      balance also reads `maxWithdraw(FM) == 0` but is the healthy bootstrap state (no principal
+     *      deployed yet), not impairment — pausing it would brick the first deposit.
+     */
+    function _isExternallyPaused() internal view returns (bool) {
+        return FUND_MANAGER.maxExternalVaultWithdraw() == 0
+            && FUND_MANAGER.EXTERNAL_VAULT().balanceOf(address(FUND_MANAGER)) > 0;
     }
 
     //      ____      __                        __   ______                 __  _

@@ -183,6 +183,11 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
         return EXTERNAL_VAULT.maxDeposit(address(this));
     }
 
+    /// @inheritdoc ISyncFundManager
+    function maxExternalVaultWithdraw() external view returns (uint256) {
+        return EXTERNAL_VAULT.maxWithdraw(address(this));
+    }
+
     //      ____      __                        __   ______                 __  _
     //     /  _/___  / /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //     / // __ \/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
