@@ -14,6 +14,10 @@ import { Math } from "@openzeppelin-v5/contracts/utils/math/Math.sol";
  *           - `simulateLoss(amount)`  : burns underlying out of the vault (external loss).
  *           - `setLiquidityCap(cap)`  : caps `maxWithdraw`/`maxRedeem` to model external
  *                                       illiquidity (a withdrawal beyond the cap reverts).
+ *           - `setDepositCap(cap)`    : caps `maxDeposit`/`maxMint` to model a capacity-limited
+ *                                       external vault (deposit beyond the cap reverts).
+ *           - `setDepositReverts(v)`  : makes `deposit` revert unconditionally while `withdraw`
+ *                                       still works — models a paused-for-deposits external vault.
  * @dev Yield/loss move `totalAssets()` (= underlying balance) directly, so the external share
  *      price drifts realistically; the StableYieldSyncVault values its position via
  *      `EXTERNAL_VAULT.maxWithdraw(vault)`.
@@ -27,6 +31,12 @@ contract MockERC4626 is ERC4626 {
 
     /// @notice Max underlying serviceable by a single owner's withdrawal. `max` = uncapped.
     uint256 public liquidityCap = type(uint256).max;
+
+    /// @notice Max underlying acceptable per `maxDeposit`. `max` = uncapped.
+    uint256 public depositCap = type(uint256).max;
+
+    /// @notice When true, `deposit` reverts (withdraw still works): models a paused-deposit vault.
+    bool public depositReverts;
 
     constructor(IERC20 asset_, string memory name_, string memory symbol_) ERC20(name_, symbol_) ERC4626(asset_) { }
 
@@ -54,11 +64,41 @@ contract MockERC4626 is ERC4626 {
         liquidityCap = cap;
     }
 
+    /// @notice Cap the underlying acceptable per `maxDeposit`/`maxMint` (external capacity limit).
+    function setDepositCap(uint256 cap) external {
+        depositCap = cap;
+    }
+
+    /// @notice Toggle a paused-for-deposits external vault (withdrawals continue to work).
+    function setDepositReverts(bool v) external {
+        depositReverts = v;
+    }
+
     //   _    ___                 _     __
     //  | |  / (_)__ _      __   | |  / /__  __________
     //  | | / / / _ \ | /| / /   | | / / _ \/ ___/ ___/
     //  | |/ / /  __/ |/ |/ /    | |/ /  __/ /  (__  )
     //  |___/_/\___/|__/|__/     |___/\___/_/  /____/
+
+    /// @dev Capacity-capped deposit limit (in underlying terms).
+    function maxDeposit(address owner) public view override returns (uint256) {
+        uint256 standard = super.maxDeposit(owner);
+        return standard < depositCap ? standard : depositCap;
+    }
+
+    /// @dev Capacity-capped mint limit (in share terms).
+    function maxMint(address owner) public view override returns (uint256) {
+        uint256 standard = super.maxMint(owner);
+        if (depositCap == type(uint256).max) return standard;
+        uint256 capInShares = _convertToShares(depositCap, Math.Rounding.Floor);
+        return standard < capInShares ? standard : capInShares;
+    }
+
+    /// @dev Honour the paused-deposit knob; otherwise standard OZ deposit.
+    function deposit(uint256 assets, address receiver) public override returns (uint256) {
+        if (depositReverts) revert("MockERC4626: deposit paused");
+        return super.deposit(assets, receiver);
+    }
 
     /// @dev Liquidity-capped withdrawal limit (in underlying terms).
     function maxWithdraw(address owner) public view override returns (uint256) {
