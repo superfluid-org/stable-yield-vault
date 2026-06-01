@@ -10,6 +10,49 @@ Each entry is tagged:
 
 ---
 
+## [RESOLVED 2026-05-29] `maxRedeem` / `maxWithdraw` are genuinely never-bricking — fixed by shares-proportional reserve sourcing (R-shares)
+
+**Finding (verified).** The prior `onWithdraw` shipped a pre-payout `_rebalanceYieldAssets()` that physically evicted the redeemer's proportional reserve slice back to the external vault before they could consume it. Under any **loss** state (`EXTERNAL_VAULT.maxWithdraw(FM) > 0` but the external position has lost some principal), redeems within `maxRedeem` then asked the external for the redeemer's full NAV slice, exceeding `ext.maxWithdraw(FM)` and reverting `ERC4626ExceededMaxWithdraw`. F.2 (`request ≤ max* ⇒ never reverts`) was violated against a compliant external — a bug, not a doc limitation. Pinned previously by the RED `test_maxRedeem_neverBricks` in `openQuestions.t.sol`.
+
+**Resolution (Option R-shares).** `onWithdraw` now sources the redeemer's reserve slice **directly and shares-proportionally**:
+
+```
+fromReserve = ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)
+              (clamped at redeemingAssets)
+```
+
+The pre-payout `_rebalanceYieldAssets()` is **removed** (it was the eviction mechanism); the post-payout `_rebalanceYieldAssets()` keeps the same OQ #4 `maxDeposit`-gated trim/refill and cures any deficit/surplus the shares-proportional sourcing leaves (`(f − f_u) · scaledReserve`; best-effort, D.1). `_recalibrateFlow()` moves to the end of the call so the new (lower) flow rate reflects the steady-state reserve balance; flow-rate decreases never need GDA buffer and cannot revert from a drained reserve.
+
+The algebra:
+
+```
+f             = sharesBurnt / supplyBeforeBurn   (the redeemer's NAV fraction)
+redeemingAssets ≈ f · NAV                        (OZ floor)
+fromReserve   ≈ f · scaledReserve                (Ceil; safe rounding direction)
+fromExternal  = redeemingAssets − fromReserve
+              = f · ext.maxWithdraw + f · raw
+              ≤ ext.maxWithdraw(FM)              (raw = 0 at rest by Inv. 7)
+```
+
+Decisions taken (loss vs. terminal-impairment terminology adopted):
+
+- **"Partial impairment" terminology dropped.** Going forward: **loss** = `ext.maxWithdraw(FM) > 0` but the external position has lost some principal; **terminal impairment** = `ext.maxWithdraw(FM) == 0` (→ D.2 vault pause). The "partial impairment" label mixed liquidity caps and principal loss and confused the model.
+- **Q1-Keep / S2 stance.** F.2's "Hard, modulo non-compliant external" wording stays untouched; the algorithm now actually delivers it end-to-end. Rejected alternatives: Q1-Carve (scoped promise + named known-limit corner — added complexity for no F.2 win) and Q1-Tighten (per-holder cap shrinks under loss — under-promises vs. recoverable NAV).
+- **Decision 5 softened.** "Preserves stayers' horizon **by construction**" → "best-effort, via the post-payout rebalance (D.1)". The "by construction" claim was written under the dropped clamp where `units / share` was effectively uniform; under the floating share + locked C.1 (units track principal), drift is the normal state and either Decision 5 or F.2 must give. R-shares picks F.2 (the user-visible API contract); D.1 already names stayers' horizon as best-effort, so the trade is a doc edit, not a regression.
+- **`Ceil` rounding on `fromReserve`** is the symmetric safe choice — `previewRedeem` rounds floor in vault's favour, so rounding the reserve slice up keeps `fromExternal ≤ s · ext.maxWithdraw / supply` without the 1-atom residual that pure floor on both legs can leave. `Ceil` still satisfies `fromReserve ≤ scaledReserve` because `shares ≤ supplyBeforeBurn`.
+
+Tests:
+
+- **`test_maxRedeem_neverBricks` is gone** along with `openQuestions.t.sol` (deleted; all OQs resolved).
+- **New positive pins in `StableYieldSyncVault.t.sol`** (risk-characterisations section): `test_redeem_serviceableUnderLoss`, `test_withdraw_serviceableUnderLoss`, `test_redeem_atMaxRedeemUnderLoss`. Use `simulateLoss` (loss framing), replacing the prior `setLiquidityCap` framing.
+- **New multi-holder property test** in `StableYieldSyncVault.props.t.sol`: `test_prop_F2_neverBricksUnderLoss` — two holders at different entry prices (NAV drifted between deposits), external loss, either holder redeems within `maxRedeem`, payout = `previewRedeem(s)`. 258 runs.
+- **Known-limit pin shifted** (paired with a positive characterisation):
+  - Positive: `test_withdraw_singleHolderFullExit_notBrickedByNonCompliantExternal` — under R-shares, sole-holder full exits have `f == f_u ⇒ deficit ≈ 0 ⇒ no trim attempt`, so the non-compliant deposit path is never reached. Previously this case bricked.
+  - Negative (known limit): `test_withdraw_lateEntrantAfterGain_brickedByNonCompliantExternal` — the trim path is still reachable via multi-holder exits where the holder has higher-than-average `units / share` (`f < f_u ⇒ surplus ⇒ trim ⇒ non-compliant deposit reverts`). Bob (late entrant after gain) is the holder with higher `units / share` because his shares are "expensive" — same units packed into fewer shares. His partial exit triggers the surplus.
+- **Temporary repro file** `_oq5Repro.t.sol` deleted.
+
+Doc edits landed: `docs/sync-vault/design.md` (Revision 2026-05-29 block at top; Decision 5 row rewritten; `SyncFundManager.onWithdraw` contract section rewritten; `SyncFundManager` view-helper rationale + `StableYieldVault` `max*` rationale updated to "shares fraction"; withdraw Mermaid diagram rewritten; §Security external-illiquidity bullet restated under loss framing). `docs/sync-vault/invariants.md` (B.6 code references updated; D.1 gains a sentence on the post-payout cure path; F.2 pinning-by line updated to name the new R-shares tests). `CLAUDE.md` `onWithdraw` bullet updated.
+
 ## [RESOLVED 2026-05-27] First-deposit inflation mitigation — `_decimalsOffset() = 12`
 
 `StableYieldSyncVault` now overrides `_decimalsOffset()` to return a hardcoded `12`
@@ -96,16 +139,6 @@ Decisions taken:
   - `test_withdraw_notBrickedByRedepositCap` (formerly `test_withdraw_notBrickedByRedepositRevert`) — repinned to use `setDepositCap(0)` (the standard ERC-4626 deposits-closed signal) and **moved out of `openQuestions.t.sol` into `StableYieldSyncVault.t.sol`** (risk-characterisations section, next to the OQ #1 first-deposit-inflation test). Now passes.
   - `test_withdraw_brickedByNonCompliantExternal` — new known-limitation pin: asserts the withdraw *does* brick when the external reverts despite `maxDeposit > 0` (via `setDepositReverts(true)`). Documents the trust boundary.
   - `test_prop_aboveTargetReserveDoesNotBlockWithdraw` — new property test in `StableYieldSyncVault.props.t.sol`: fuzz two withdraws at `setDepositCap(0)` + reopen + operator rebalance; assert exact payouts, no reverts, and `balanceOf(FM)_underlying == 0` throughout (Inv. 7 holds across the slack state).
-
-## [VERIFY] `maxRedeem` / `maxWithdraw` are genuinely never-bricking
-
-The vault caps `maxWithdraw`/`maxRedeem` by `totalManagedAssets()` (the reserve-inclusive NAV) on the claim that NAV is the global upper bound on what a redeem can source, because the recalibration-freed reserve excess scales with the redeemer's unit share. The actual `onWithdraw` sources `redeemingAssets` from `fromReserve` (freed excess) + `fromExternal` (`EXTERNAL_VAULT.withdraw`).
-
-The freed-excess slice depends on the *recalibrate* freeing exactly enough buffer for the redeemer's removed units. The claim that `request ≤ max* ⇒ never reverts` couples three moving parts (NAV, freed-excess sizing, external liquidity) and is worth proving rather than assuming.
-
-Open question:
-
-Property test: for any holder and any `shares ≤ maxRedeem(holder)`, `redeem` succeeds and pays `previewRedeem(shares)`; likewise `withdraw ≤ maxWithdraw`. Include the impaired-external case where `totalManagedAssets()` is the binding cap.
 
 ## [DECIDE] Minimum deposit / dust shares (carried over from async)
 

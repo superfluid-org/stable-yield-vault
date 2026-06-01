@@ -1,12 +1,62 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
 **stable** yield is streamed to depositors via the same Superfluid GDA engine the
 async vault uses. The external vault replaces the async vault's manual off-chain
 "working assets" leg.
+
+---
+
+## ⚠️ Revision 2026-05-29 — shares-proportional reserve sourcing in `onWithdraw` (OQ #5)
+
+The earlier `onWithdraw` sourced the redeemer's reserve slice from
+`evaluateYieldAssetsDeficit()` after a pre-payout `_rebalanceYieldAssets()` and
+a recalibrate. That pre-payout rebalance physically evicted the holder's
+proportional reserve slice back to the external vault before they could consume
+it — under any **loss** state (`EXTERNAL_VAULT.maxWithdraw(FM) > 0` but the
+external position has lost some principal), redeems within `maxRedeem` then
+asked the external for the redeemer's full NAV slice, exceeding
+`ext.maxWithdraw(FM)` and reverting. F.2 (`request ≤ max* ⇒ never reverts`) was
+violated against a compliant external — a bug, not a doc/spec limitation.
+
+**Policy.** `onWithdraw` now sources the redeemer's reserve slice **directly and
+shares-proportionally**:
+
+```
+fromReserve = ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)
+              (clamped at redeemingAssets)
+```
+
+Combined with the OZ floor-priced `redeemingAssets = shares · NAV / supply`,
+this guarantees `fromExternal = f · ext.maxWithdraw + f · raw ≤ ext.maxWithdraw`
+for a compliant external — F.2 holds end-to-end under any loss state with any
+multi-holder `units / share` drift. The pre-payout `_rebalanceYieldAssets()` is
+**removed**; the post-payout `_rebalanceYieldAssets()` keeps the same OQ #4
+`maxDeposit`-gated trim/refill and cures any deficit/surplus the
+shares-proportional sourcing leaves (`(f − f_u) · scaledReserve`; best-effort,
+D.1). `_recalibrateFlow()` moves to the end of the call so the new flow rate
+reflects the steady-state reserve balance; flow-rate decreases never need GDA
+buffer and cannot revert from a drained reserve.
+
+| Aspect | Decision (2026-05-29) | Rationale |
+|---|---|---|
+| F.2 (`request ≤ max* ⇒ never reverts`) under loss | **Holds end-to-end** for any holder, with a compliant external as the only documented escape hatch. | Direct algebraic property of shares-proportional sourcing — `fromExternal` is bounded by `f · ext.maxWithdraw` regardless of `units / share` drift. |
+| Decision 5 "preserves stayers' horizon **by construction**" | **Softened to "best-effort, via the post-payout rebalance" (D.1).** | "By construction" was written under the dropped clamp where `units / share` was effectively uniform. Under the floating share + C.1 (units track principal), drift is the normal state — units-proportional sourcing would defend stayers' horizon "by construction" but at the cost of F.2 under non-uniform drift. R-shares picks F.2; D.1 already names the horizon as best-effort. |
+| Pre-payout `_rebalanceYieldAssets()` in `onWithdraw` | **Removed.** Any pre-existing deficit is caught by the post-payout rebalance instead. | The pre-payout call was the eviction mechanism that broke the redeemer's reserve slice. Dropping it stops the eviction; nothing downstream relies on a pre-burn reserve cure. |
+| Multi-holder × non-uniform `units / share` × loss | **Covered.** F.2 holds for any holder regardless of their `units / share` position relative to the global average. | Pinned by `test_prop_F2_neverBricksUnderLoss` (multi-holder fuzz: two holders at different entry prices, external loss, either redeems within `maxRedeem`). |
+| Known limitation (non-compliant external on the trim leg) | **Surface shifted.** Single-holder full exits no longer reach the trim (`f == f_u ⇒ deficit ≈ 0`); the limit is reachable via multi-holder exits where the holder has higher-than-average `units / share` (post-payout `deficit < 0` triggers the trim, which then revert-bricks on a non-compliant external). | Pinned by `test_withdraw_lateEntrantAfterGain_brickedByNonCompliantExternal`; paired positive characterisation `test_withdraw_singleHolderFullExit_notBrickedByNonCompliantExternal`. |
+| "Partial impairment" terminology | **Dropped.** | Use **loss** (`ext.maxWithdraw(FM) > 0` but external position has lost some principal) vs. **terminal impairment** (`ext.maxWithdraw(FM) == 0` → D.2 vault pause). The old "partial impairment" mixed liquidity caps and principal loss and confused the model. |
+
+Decision **5** is revised again; Invariant **5** is rewritten to match;
+`SyncFundManager.onWithdraw` contract section + view-helper rationale +
+`StableYieldVault` `max*` rationale + the withdraw flow Mermaid diagram are all
+updated. §Security's "External illiquidity" bullet is restated under the loss
+framing. Invariant **D.1** (best-effort horizon) gains a sentence noting the
+post-payout cure path. Invariant **F.2** wording stays (it was already correct;
+the algorithm now actually delivers it).
 
 ---
 
@@ -239,7 +289,7 @@ Consequences:
 | 2 | Surplus handling | External surplus compounds inside the external vault and is **counted in NAV** (accrues to shareholders as appreciation) — **no protocol-owned excluded buffer**. The per-op rebalance and `ensureYieldFlowDuration()` pull only the reserve *deficit* (surplus stays deployed/compounding); under impairment the same deficit-only pull continues uncapped into the external position. Excess super-token is trimmed back to external on every rebalance **(best-effort — the trim's `deficit < 0` branch is gated on `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded`; if the external signals deposits closed, the excess stays as above-target super-token slack in the reserve and the next rebalance retries — see Revision 2026-05-28)** — `onWithdraw` trims its post-payout residual freed excess (no above-target slack at rest under normal operation) | **revised 2026-05-28** |
 | 3 | Rate model | Operator-set promised `stableYieldRate` (reuse async model) | unchanged |
 | 4 | Stream funding | **Pre-funded from each deposit** into the super-token reserve (async-style), then continuously replenished from the external position — surplus first, then deeper into the external position under impairment (uncapped). Stream only stalls at terminal impairment (`maxWithdraw(FM) == 0`); no on-chain operator subsidy | **revised** |
-| 5 | Withdraw liquidity | Async-faithful: decreasing the redeemer's units lowers the required reserve; the **recalibration-freed excess** (capped at `min(freedExcess, redeemingAssets)`) funds the reserve slice (preserves stayers' horizon by construction), the remainder is drawn from the external vault (reverts only if the external vault is illiquid). Reserve is redeemable | **revised** |
+| 5 | Withdraw liquidity | **Shares-proportional reserve sourcing**: `fromReserve = ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)` (clamped at `redeemingAssets`); the remainder is drawn from the external vault. F.2 (`request ≤ max* ⇒ never reverts`) holds end-to-end under any loss state with a compliant external (`fromExternal = f · ext.maxWithdraw + f · raw ≤ ext.maxWithdraw`). Stayers' horizon is restored by the post-payout `_rebalanceYieldAssets()` (best-effort, D.1) — the "by construction" guarantee from the dropped clamp model no longer holds under floating-share `units / share` drift. Reserve is redeemable | **revised 2026-05-29** |
 | 6 | Reserve-poking entrypoint | **Operator-only via inherited `ensureYieldFlowDuration()`** (`FUND_OPERATOR_ROLE`). No permissionless `harvest()`. Per-op hooks keep the stream forward-solvent on any user activity; the operator must call between periods of inactivity. Tradeoff: loses permissionless liveness backstop in exchange for a smaller surface | **revised** |
 | 7 | Code reuse | Extract shared `FundManagerBase` | unchanged |
 | 8 | Solvency trust model | Operator + views (no rate cap / settle gate). Stream starts at deposit via pre-funding and is continuously self-funded from the external position thereafter. **No operator injection / no `fundReserve`** — sync diverges from async here because programmatic `EXTERNAL_VAULT` access removes the off-chain top-up gap. The operator's only sustainability lever is `setStableYieldRate`; impairment is signalled by share-price-below-par (canonical 4626) | **revised** |
@@ -359,33 +409,44 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
      Revision 2026-05-27).
 
 - `onWithdraw(holder, shares, totalSharesOwned, supplyBeforeBurn, receiver,
-  redeemingAssets)` — `VAULT_ROLE`. The async-`settleEpoch`-netting analog:
-  1. `_rebalanceYieldAssets()` — pre-rebalance opportunistically cures any
-     *pre-existing* deficit (no-op in the common pre-withdraw solvent case);
-  2. proportional unit decrease (same math as async `onRequestRedeem`). Total
-     units are now lower;
-  3. `_recalibrateFlow()` (unconditional) — the new lower flow rate refunds the
-     GDA buffer slice for the removed units back into `YIELD_ASSET.balanceOf(FM)`.
-     Like `onDeposit`, this hook is unreachable under terminal external impairment
-     (the vault is paused, `maxWithdraw == 0`), so the drained-reserve recalibrate
-     revert cannot occur here (see Revision 2026-05-27);
-  4. `deficit = evaluateYieldAssetsDeficit()` (post-recalibrate);
-     `excessUnderlying = (deficit < 0) ? uint(−deficit) / SCALING_FACTOR : 0`;
-     `fromReserve = min(excessUnderlying, redeemingAssets)`;
-     `if (fromReserve > 0) _downgrade(fromReserve · SCALING_FACTOR)`;
-  5. `fromExternal = redeemingAssets − fromReserve`;
-     `if (fromExternal > 0) EXTERNAL_VAULT.withdraw(fromExternal, receiver, this)`
-     (reverts only if the external vault is illiquid — accepted, decision 5);
-     then `safeTransfer(receiver, fromReserve)` so the receiver gets exactly
-     `redeemingAssets`;
-  6. `_rebalanceYieldAssets()` — **post-payout trim** (2026-05-22, Q1=B;
-     gated 2026-05-28). Any residual freed excess `freedExcess − redeemingAssets`
-     (when positive) is downgraded and redeposited into the external vault
-     **iff `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded`**; otherwise
-     the excess stays as above-target super-token slack in the reserve. The
-     reserve returns to target under normal operation; Inv. 7 / A.2 holds
-     unconditionally (no raw underlying at rest, even when the trim is
-     skipped).
+  redeemingAssets)` — `VAULT_ROLE`. **Rewritten 2026-05-29** (OQ #5) to use
+  shares-proportional reserve sourcing instead of the prior freed-excess
+  reading. The pre-payout `_rebalanceYieldAssets()` is removed (it was the
+  eviction mechanism that broke the redeemer's reserve slice under loss);
+  `_recalibrateFlow()` moves to the end of the call.
+  1. Proportional unit decrease (`delta = ceil(holderUnits · shares /
+     totalSharesOwned)`, full-exit shortcut zeros units; same math as async
+     `onRequestRedeem`). A dust-position holder (zero units) skips this leg
+     rather than reverting.
+  2. **Shares-proportional reserve slice (R-shares).** `fromReserve =
+     ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)`; clamped at
+     `redeemingAssets` (the safety clamp guards tiny dust redeems). `Ceil` is
+     the symmetric safe rounding direction: `previewRedeem` rounds floor in the
+     vault's favour, so rounding the reserve slice up keeps `fromExternal ≤
+     s · ext.maxWithdraw / supply` without the 1-atom residual that pure floor
+     on both legs can leave. `fromReserve ≤ scaledYieldAssetsBalance()` is
+     guaranteed because `shares ≤ supplyBeforeBurn`.
+     `if (fromReserve > 0) _downgrade(fromReserve · SCALING_FACTOR)`.
+  3. `fromExternal = redeemingAssets − fromReserve`;
+     `if (fromExternal > 0) EXTERNAL_VAULT.withdraw(fromExternal, receiver, this)`.
+     For a compliant external this is bounded by `f · ext.maxWithdraw + f · raw
+     ≤ ext.maxWithdraw` (raw = 0 at rest by Inv. 7), so F.2 holds end-to-end;
+     reverts only if the external vault is non-compliant (`maxWithdraw`
+     over-reports). Then `safeTransfer(receiver, fromReserve)` so the receiver
+     gets exactly `redeemingAssets`.
+  4. `_rebalanceYieldAssets()` — **post-payout cleanup** (2026-05-22, Q1=B;
+     gated 2026-05-28; surface restated 2026-05-29). Shares-proportional
+     sourcing leaves a deficit when `f > f_u` (the holder had lower-than-average
+     `units / share`) or a surplus when `f < f_u` (higher-than-average
+     `units / share`). The deficit branch pulls `min(deficit/SF + 1,
+     ext.maxWithdraw)` from external (best-effort, D.1); the surplus branch
+     trims back to external **iff `EXTERNAL_VAULT.maxDeposit(FM) >=
+     underlyingNeeded`** (OQ #4 gate, untouched). Inv. 7 / A.2 holds
+     unconditionally.
+  5. `_recalibrateFlow()` (unconditional). Flow rate decreases (units went
+     down), so this releases GDA buffer and never needs balance — cannot revert
+     from a drained reserve. Like `onDeposit`, this hook is unreachable under
+     terminal external impairment (the vault is paused, `maxWithdraw == 0`).
 
   There is **no principal-counter decrement** — `redeemingAssets` is OZ's
   `previewRedeem(shares) = shares · NAV / supply` (floating, floor), so the burn
@@ -395,9 +456,11 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
 
 - View helpers the vault proxies (pure reads, no per-call counters):
   `totalManagedAssets()` (the reserve-inclusive NAV — Invariant 2; also caps
-  `maxWithdraw`/`maxRedeem`: the per-call freed reserve excess scales with the
-  redeemer's unit share, so NAV itself is the global upper bound on what a
-  redeem can source, and under impairment the lower recoverable NAV shrinks it
+  `maxWithdraw`/`maxRedeem`: under shares-proportional sourcing (R-shares,
+  Revision 2026-05-29) the redeemer's reserve slice equals `f · scaledReserve`
+  and the external slice equals `f · ext.maxWithdraw + f · raw`, summing to
+  exactly `f · NAV` — so NAV itself is the global upper bound on what a redeem
+  can source, and under loss the lower recoverable NAV shrinks it
   appropriately), `maxExternalDeposit()`, plus the `EXTERNAL_VAULT` getter (no
   `trackedPrincipal` getter — the counter is gone).
 
@@ -431,11 +494,14 @@ attack-cost multiplier, 18-dec shares for the 6-dec USDC deployment (see §Secur
   user activity is operator-only via the inherited `ensureYieldFlowDuration()`.
 - `maxDeposit/maxMint` capped by `FUND_MANAGER.maxExternalDeposit()` (the
   external vault's deposit limit, FM as holder). `maxWithdraw/maxRedeem` capped
-  by `FUND_MANAGER.totalManagedAssets()` (the
-  reserve-inclusive NAV is the global upper bound on what a redeem can source,
-  since the recalibration-freed reserve excess scales with the redeemer's unit
-  share). Under partial external impairment the lower recoverable NAV shrinks
-  this appropriately, making `max*` 4626-honest about external illiquidity.
+  by `FUND_MANAGER.totalManagedAssets()` (the reserve-inclusive NAV is the
+  global upper bound on what a redeem can source; under R-shares sourcing
+  (Revision 2026-05-29) the reserve slice equals `f · scaledReserve` and the
+  external slice equals `f · ext.maxWithdraw + f · raw`, summing to exactly
+  `f · NAV` for a compliant external). Under loss the lower recoverable NAV
+  shrinks this appropriately, making `max*` 4626-honest end-to-end: F.2
+  (`request ≤ max* ⇒ never reverts`) holds against a compliant external in any
+  loss state.
 - **Terminal-impairment full pause (Revision 2026-05-27).** When
   `FUND_MANAGER.maxExternalVaultWithdraw() == 0` *and the FM holds an external
   position* (`_isExternallyPaused()`), all four `max*` return `0`, so OZ reverts
@@ -473,7 +539,7 @@ sequenceDiagram
     Note over P: NAV-neutral at entry (principal split into external shares + reserve, both in NAV); thereafter the share floats with the external vault — honest tick-down under impairment
 ```
 
-### Withdraw / Redeem (reserve-inclusive NAV; reserve slice from recalibration-freed excess)
+### Withdraw / Redeem (reserve-inclusive NAV; shares-proportional reserve slice)
 
 ```mermaid
 sequenceDiagram
@@ -484,22 +550,25 @@ sequenceDiagram
     U->>V: withdraw(assets, receiver, owner)  %% assets = previewRedeem-priced NAV slice
     V->>V: spendAllowance? ; read balance/supply ; _burn(owner, shares)
     V->>FM: onWithdraw(owner, shares, totalOwnedBefore, supplyBeforeBurn, receiver, assets)
-    FM->>FM: _rebalanceYieldAssets()  %% pre-rebalance: no-op when solvent (common case)
-    FM->>FM: proportional unit decrease  %% required reserve now lower
-    FM->>FM: _recalibrateFlow()  %% lower target — refunds GDA buffer slice into reserve (vault paused under terminal impairment, so unreachable here)
-    FM->>FM: fromReserve = min(freed excess, assets) ; _downgrade(fromReserve·SF)
-    FM->>E: withdraw(assets − fromReserve, receiver, FM)  %% external remainder
+    FM->>FM: proportional unit decrease  %% Δunits = ceil(holderUnits · shares / totalOwned); required reserve target now lower
+    FM->>FM: fromReserve = ceil(scaledYieldAssetsBalance · shares / supplyBeforeBurn), clamped at assets ; _downgrade(fromReserve·SF)
+    FM->>E: withdraw(assets − fromReserve, receiver, FM)  %% external slice = f · ext.maxWithdraw ≤ ext.maxWithdraw (R-shares, F.2 holds)
     FM->>FM: safeTransfer(receiver, fromReserve)
-    FM->>FM: _rebalanceYieldAssets()  %% post-payout trim: residual freed excess back to external (best-effort, gated on EXTERNAL.maxDeposit(FM) >= underlyingNeeded; skipped under deposits-closed → above-target slack stays in reserve)
-    Note over E: external withdraw remainder reverts only if the external vault is illiquid (accepted); the trim's redeposit leg is best-effort, never reverts (pre-check honours external maxDeposit)
+    FM->>FM: _rebalanceYieldAssets()  %% post-payout cleanup: deficit>0 (f>f_u) pulls from external (D.1 best-effort); deficit<0 (f<f_u) trims back to external (OQ #4 gated on EXTERNAL.maxDeposit(FM))
+    FM->>FM: _recalibrateFlow()  %% flow rate decreases → releases GDA buffer; never needs balance, cannot revert from drained reserve
+    Note over E: external withdraw reverts only if the external vault is non-compliant (`maxWithdraw` over-reports); the trim's redeposit leg is best-effort, gated by external `maxDeposit`
 ```
 
-Under impairment (external position recoverable < deposited principal): NAV
-falls, `previewRedeem` prices the share below par, the redeemer takes the
-pro-rata impaired payout. The burn removes exactly `redeemingAssets =
-shares · NAV / supply`, so the share price is unchanged for stayers (floor
-rounding favours them) — no value transfers between leavers and stayers, handled
-by OZ proportional accounting rather than a principal-counter decrement.
+Under loss (external position recoverable < deposited principal): NAV falls,
+`previewRedeem` prices the share below par, the redeemer takes the pro-rata
+impaired payout. The burn removes exactly `redeemingAssets = shares · NAV /
+supply`, so the share price is unchanged for stayers (floor rounding favours
+them) — no value transfers between leavers and stayers, handled by OZ
+proportional accounting rather than a principal-counter decrement. Under
+shares-proportional sourcing (Revision 2026-05-29) the redeemer's reserve slice
+equals `f · scaledReserve` and the external slice equals `f · ext.maxWithdraw +
+f · raw`, summing to `f · NAV` for a compliant external — so the request is
+always serviceable within `ext.maxWithdraw(FM)`, satisfying F.2 end-to-end.
 
 ### Operator solvency restore (`ensureYieldFlowDuration`)
 
@@ -682,12 +751,19 @@ stalling.
   reserve (not just GDA units as in the original model). The `VAULT_ROLE` gate
   and the custody hazard invariant (7) are load-bearing; audit must confirm no
   principal can be diverted via the rebalance path.
-- **External illiquidity** (accepted, decision 5): the redeemer's reserve slice
-  is funded from the recalibration-freed reserve excess (always serviceable via
-  `_downgrade`); only the *external remainder* reverts if the external vault
-  cannot service it. `maxWithdraw`/`maxRedeem` reflect it via
-  `totalManagedAssets()` — under external impairment the lower recoverable NAV
-  shrinks the bound, so a request ≤ `max*` never bricks.
+- **External loss** (accepted, decision 5; F.2 invariant): the redeemer's
+  reserve slice is sourced **shares-proportionally** (R-shares, Revision
+  2026-05-29) — `fromReserve = ceil(scaledReserve · shares /
+  supplyBeforeBurn)`, clamped at `redeemingAssets`. Combined with the OZ
+  floor-priced `redeemingAssets = shares · NAV / supply`, this guarantees
+  `fromExternal = f · ext.maxWithdraw + f · raw ≤ ext.maxWithdraw(FM)` for a
+  compliant external. `maxWithdraw`/`maxRedeem` reflect this via
+  `totalManagedAssets()`; under loss the lower recoverable NAV shrinks the
+  bound. **`request ≤ max* ⇒ never reverts` (F.2) holds end-to-end for a
+  compliant external in any loss state.** Terminal external impairment
+  (`ext.maxWithdraw(FM) == 0` while the FM holds a position) triggers the
+  vault-level pause (D.2, Revision 2026-05-27), so requests cannot land in
+  that regime in the first place.
 - **External deposit-closed asymmetry** (Revision 2026-05-28): a separate
   failure mode is the external vault rejecting *deposits* (paused or
   `maxDeposit(FM) == 0`) while still servicing withdrawals. The

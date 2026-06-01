@@ -133,11 +133,11 @@ fromReserve + fromExternal == redeemingAssets
 receiver underlying balance increases by exactly redeemingAssets
 ```
 
-**Where.** `onWithdraw`: `fromExternal = redeemingAssets − fromYieldAssets` (`SyncFundManager.sol:155`), external leg (`:156-159`), reserve leg transfer (`:160-162`).
+**Where.** `onWithdraw` (Revision 2026-05-29): `fromYieldAssets = ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)` clamped at `redeemingAssets` (shares-proportional sourcing — R-shares); `fromExternal = redeemingAssets − fromYieldAssets`; external leg via `EXTERNAL_VAULT.withdraw(fromExternal, receiver, FM)`; reserve leg via `_downgrade(fromYieldAssets · SCALING_FACTOR)` + `safeTransfer(receiver, fromYieldAssets)`.
 
-**Holds when.** Hard, when the call does not revert. The external leg reverts only if `EXTERNAL_VAULT` is illiquid (accepted, decision 5).
+**Holds when.** Hard, when the call does not revert. Under R-shares, the external leg `fromExternal = f · ext.maxWithdraw + f · raw ≤ ext.maxWithdraw(FM)` is bounded for a compliant external, so F.2 guarantees the call lands for `request ≤ max*` in any loss state. The external leg reverts only on a non-compliant external (decision 5, accepted as a known limitation).
 
-**Breaks if.** `fromYieldAssets` is computed against the wrong sign of the deficit, or `_downgrade` yields less underlying than requested (decimals clipping — guarded elsewhere by the `+1`).
+**Breaks if.** `fromYieldAssets` is computed against the wrong divisor, or `_downgrade` yields less underlying than requested (decimals clipping — guarded by `Ceil` rounding on `fromYieldAssets`).
 
 ---
 
@@ -193,7 +193,7 @@ yieldAssetsBalance() >= _targetFlowRate · guaranteedFlowDuration   (+ fee leg)
 
 i.e. `evaluateYieldAssetsDeficit() <= 0` after every user op, **unless** the rebalance was supply-constrained by the external vault.
 
-**Where.** `evaluateYieldAssetsDeficit` (`FundManagerBase.sol:263-273`); replenished by `_rebalanceYieldAssets` `deficit > 0` branch, `pulled = min(need, EXTERNAL_VAULT.maxWithdraw(FM))` (`SyncFundManager.sol:204-217`); pre-funded from the incoming deposit, capped at `assets` (`SyncFundManager.sol:97-103`); operator `ensureYieldFlowDuration()` (`FundManagerBase.sol:185-194`). Design Invariant 5.
+**Where.** `evaluateYieldAssetsDeficit` (`FundManagerBase.sol:263-273`); replenished by `_rebalanceYieldAssets` `deficit > 0` branch, `pulled = min(need, EXTERNAL_VAULT.maxWithdraw(FM))` (`SyncFundManager.sol`); pre-funded from the incoming deposit, capped at `assets` (`SyncFundManager.sol` `onDeposit`); operator `ensureYieldFlowDuration()` (`FundManagerBase.sol:185-194`); **post-payout `_rebalanceYieldAssets()` in `onWithdraw`** cures any deficit (`f > f_u`) or surplus (`f < f_u`) left by shares-proportional reserve sourcing (R-shares, Revision 2026-05-29) — best-effort, bounded by `EXTERNAL_VAULT.maxWithdraw(FM)` on the deficit branch and the OQ #4 `maxDeposit` gate on the surplus branch. Design Invariant 5.
 
 **Holds when.** Best-effort. Clean terminal form: after a deposit large enough to cover its own residual, `deficit > 0 ⇒ EXTERNAL_VAULT.maxWithdraw(FM) == 0` (terminal impairment).
 
@@ -294,9 +294,9 @@ RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
 
 **State.** `maxDeposit/maxMint` capped by `EXTERNAL_VAULT.maxDeposit(FM)`; `maxWithdraw/maxRedeem` capped by `totalManagedAssets()` (the reserve-inclusive NAV is the global upper bound a redeem can source). A request at exactly `max*` is serviceable.
 
-**Where.** `StableYieldSyncVault.sol:144-170`; `maxExternalDeposit` (`SyncFundManager.sol:182-184`).
+**Where.** `StableYieldSyncVault.sol:144-170`; `maxExternalDeposit` (`SyncFundManager.sol:182-184`). Delivered by **shares-proportional reserve sourcing in `SyncFundManager.onWithdraw`** (R-shares, Revision 2026-05-29 / OQ #5): `fromReserve = ceil(scaledReserve · shares / supplyBeforeBurn)`, leaving `fromExternal = f · ext.maxWithdraw + f · raw ≤ ext.maxWithdraw(FM)` for a compliant external. Pinned by `test_redeem_serviceableUnderLoss`, `test_withdraw_serviceableUnderLoss`, `test_redeem_atMaxRedeemUnderLoss` (`StableYieldSyncVault.t.sol`) and the multi-holder fuzz `test_prop_F2_neverBricksUnderLoss` (`StableYieldSyncVault.props.t.sol`).
 
-**Holds when.** Hard, modulo external-vault liquidity on the external leg (decision 5).
+**Holds when.** Hard, modulo external-vault liquidity on the external leg (decision 5). End-to-end against a compliant external in any loss state with any `units / share` drift.
 
 **Breaks if.** External vault reports a `maxWithdraw` larger than it can actually service on `withdraw` (non-standard external vault).
 
