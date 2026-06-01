@@ -137,19 +137,12 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             YIELD_POOL.decreaseMemberUnits(holder, delta);
         }
 
-        _rebalanceYieldAssets();
-        _recalibrateFlow();
-
-        // The unit decrease (+ recalibrate buffer-refund) has lowered the required yield asset balance
-        // `evaluateYieldAssetsDeficit()` now reports the freed excess that can be used to fund the redemption
-        int256 deficit = evaluateYieldAssetsDeficit();
-        uint256 fromYieldAssets;
-        if (deficit < 0) {
-            uint256 excessUnderlying = uint256(-deficit) / SCALING_FACTOR;
-            fromYieldAssets = excessUnderlying < redeemingAssets ? excessUnderlying : redeemingAssets;
-            if (fromYieldAssets > 0) {
-                _downgrade(fromYieldAssets * SCALING_FACTOR);
-            }
+        // Pay the withdrawal from the reserve and the external vault. The yield reserve slice is
+        // proportional to the amount of shares being redeemed
+        uint256 fromYieldAssets = scaledYieldAssetsBalance().mulDiv(shares, supplyBeforeBurn, Math.Rounding.Ceil);
+        if (fromYieldAssets > redeemingAssets) fromYieldAssets = redeemingAssets;
+        if (fromYieldAssets > 0) {
+            _downgrade(fromYieldAssets * SCALING_FACTOR);
         }
 
         uint256 fromExternal = redeemingAssets - fromYieldAssets;
@@ -161,9 +154,9 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             UNDERLYING_ASSET.safeTransfer(receiver, fromYieldAssets);
         }
 
-        // If any freed excess remains beyond `redeemingAssets`, the
-        // rebalance downgrades it and redeposits into the external vault
+        // Rebalance the yield reserve and recalibrate the yield stream
         _rebalanceYieldAssets();
+        _recalibrateFlow();
     }
 
     //   _    ___                 ______                 __  _
