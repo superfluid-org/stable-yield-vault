@@ -312,4 +312,65 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
         );
     }
 
+    //     ______   ___      _   __                          ____       _      __
+    //    / ____/  |__ \    / | / /__ _   _____  _____      / __ )_____(_)____/ /__  _____
+    //   / /_      __/ /   /  |/ / _ \ | / / _ \/ ___/     / __  / ___/ / ___/ //_/ / ___/
+    //  / __/     / __/   / /|  /  __/ |/ /  __/ /        / /_/ / /  / / /__/ ,< (__  )
+    // /_/       /____/  /_/ |_/\___/|___/\___/_/        /_____/_/  /_/\___/_/|_/____/
+    //
+    // F.2 — `request <= max* => never reverts` under loss with a compliant external.
+    // Pins the OQ #5 resolution (R-shares, 2026-05-29) across the multi-holder `units/share`
+    // drift regime that arises naturally with the floating share and external P&L.
+
+    /// @dev Two holders enter at different prices (Alice first, gain, Bob), then external
+    ///      loss leaves `ext.maxWithdraw(FM) > 0` (loss, not terminal). Either holder
+    ///      redeeming any `s <= maxRedeem(holder)` succeeds and pays `previewRedeem(s)`.
+    ///      This is the multi-holder generalisation of `test_redeem_serviceableUnderLoss`,
+    ///      pinning F.2 across `units / share` non-uniformity.
+    function test_prop_F2_neverBricksUnderLoss(
+        uint256 amountA,
+        uint256 gainBetween,
+        uint256 amountB,
+        uint256 lossPortion,
+        bool aliceRedeems,
+        uint256 sPortion
+    ) public {
+        amountA = bound(amountA, 2e6, ONE_BILLION * 1e6);
+        amountB = bound(amountB, 2e6, ONE_BILLION * 1e6);
+        _deposit(ALICE, amountA);
+
+        // Strictly positive gain so Bob enters at a different (higher) NAV than Alice,
+        // producing `units/share` non-uniformity (the regime the prior session worried about).
+        uint256 extBal0 = _usdc.balanceOf(address(_external));
+        gainBetween = bound(gainBetween, 1, extBal0);
+        _external.simulateGain(gainBetween);
+
+        _deposit(BOB, amountB);
+
+        // Loss after both have entered. Bound strictly below `extBal` so a positive
+        // `ext.maxWithdraw(FM)` survives (loss regime, not D.2 terminal-pause).
+        uint256 extBal1 = _usdc.balanceOf(address(_external));
+        uint256 loss = bound(lossPortion, 1, extBal1 - 1);
+        _external.simulateLoss(loss);
+
+        address holder = aliceRedeems ? ALICE : BOB;
+        uint256 maxR = _vault.maxRedeem(holder);
+        if (maxR == 0) return;
+        uint256 s = bound(sPortion, 1, maxR);
+
+        uint256 expected = _vault.previewRedeem(s);
+        uint256 balBefore = _usdc.balanceOf(holder);
+
+        vm.prank(holder);
+        try _vault.redeem(s, holder, holder) returns (uint256 assets) {
+            assertEq(assets, expected, "F.2: redeem(s<=maxR) pays previewRedeem(s)");
+            assertEq(_usdc.balanceOf(holder) - balBefore, expected, "receiver exact");
+        } catch {
+            // Either side reverts → the early-entrant-non-compliant-deposit known-limit corner
+            // would have to be reachable here, but the external is compliant in this test, so
+            // this branch is a genuine F.2 violation. Asserting `false` surfaces it clearly.
+            assertEq(uint256(1), uint256(0), "F.2: redeem(s<=maxR) reverted with compliant external");
+        }
+    }
+
 }

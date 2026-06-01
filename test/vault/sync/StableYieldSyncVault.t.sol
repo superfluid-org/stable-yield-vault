@@ -635,23 +635,146 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw not bricked by external maxDeposit == 0");
     }
 
-    /// @dev KNOWN LIMITATION: the best-effort trim trusts ERC-4626 compliance. If the external
-    ///      vault reverts `deposit` despite reporting `maxDeposit > 0`, the pre-check waves the
-    ///      call through and the revert propagates, bricking the withdraw. Accepted; design.md
-    ///      §Security already requires standard, audited externals. This test pins the boundary
-    ///      so an audit cannot mistake it for a regression.
-    function test_withdraw_brickedByNonCompliantExternal() public {
-        _deposit(ALICE, DEFAULT_DEPOSIT);
+    //     ____  ____    __  ________
+    //    / __ \/ __ \  / / / / ____/
+    //   / / / / / / / /_/ /___ \
+    //  / /_/ / /_/ / __  /___/ /
+    //  \____/\___\_\/ /_//____/
+    //
+    // OQ #5 (RESOLVED 2026-05-29): `request <= max* => never reverts` holds end-to-end under
+    // loss with a compliant external. Implemented via shares-proportional reserve sourcing in
+    // `SyncFundManager.onWithdraw` (R-shares). These pins replace the previously RED
+    // `test_maxRedeem_neverBricks` from openQuestions.t.sol (deleted).
 
-        // Non-compliant: deposit reverts unconditionally, maxDeposit still returns uint256.max.
+    /// @dev F.2 under loss: for any holder and any `s <= maxRedeem(holder)`, `redeem` succeeds
+    ///      and pays `previewRedeem(s)`. Loss framing — `simulateLoss` for the realistic
+    ///      external-position-impaired case (replaces the prior `setLiquidityCap` framing).
+    function test_redeem_serviceableUnderLoss(uint256 amount, uint256 lossPortion, uint256 sPortion) public {
+        amount = bound(amount, 2e6, ONE_BILLION * 1e6);
+        _deposit(ALICE, amount);
+
+        // External loses a fraction of its principal; strictly < extBal so `maxWithdraw(FM) > 0`
+        // (loss regime, not the D.2 terminal-impairment pause).
+        uint256 extBal = _usdc.balanceOf(address(_external));
+        uint256 loss = bound(lossPortion, 1, extBal - 1);
+        _external.simulateLoss(loss);
+
+        uint256 maxR = _vault.maxRedeem(ALICE);
+        if (maxR == 0) return;
+        uint256 s = bound(sPortion, 1, maxR);
+
+        uint256 expected = _vault.previewRedeem(s);
+        uint256 balBefore = _usdc.balanceOf(ALICE);
+
+        vm.prank(ALICE);
+        uint256 assets = _vault.redeem(s, ALICE, ALICE);
+
+        assertEq(assets, expected, "redeem(s<=maxR) pays previewRedeem(s)");
+        assertEq(_usdc.balanceOf(ALICE) - balBefore, expected, "receiver got exactly previewRedeem");
+        // Inv. 7 / A.2 preserved.
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
+    }
+
+    /// @dev F.2 under loss, withdraw leg: `a <= maxWithdraw(holder)` always pays exactly `a`.
+    function test_withdraw_serviceableUnderLoss(uint256 amount, uint256 lossPortion, uint256 wPortion) public {
+        amount = bound(amount, 2e6, ONE_BILLION * 1e6);
+        _deposit(ALICE, amount);
+
+        uint256 extBal = _usdc.balanceOf(address(_external));
+        uint256 loss = bound(lossPortion, 1, extBal - 1);
+        _external.simulateLoss(loss);
+
+        uint256 maxW = _vault.maxWithdraw(ALICE);
+        if (maxW == 0) return;
+        uint256 a = bound(wPortion, 1, maxW);
+
+        uint256 balBefore = _usdc.balanceOf(ALICE);
+        vm.prank(ALICE);
+        _vault.withdraw(a, ALICE, ALICE);
+
+        assertEq(_usdc.balanceOf(ALICE) - balBefore, a, "withdraw(a<=maxW) pays exactly a");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
+    }
+
+    /// @dev The load-bearing case from Step 2's repro: redeem `maxR` under loss.
+    ///      `redeem(maxR)` must succeed and pay `previewRedeem(maxR)`. The reserve slice
+    ///      `scaledReserve * maxR / supply` bridges precisely the gap between `previewRedeem(maxR)`
+    ///      (= NAV-ish) and `ext.maxWithdraw(FM)` (= NAV - scaledReserve - raw). Note `maxR` may
+    ///      be a hair below `balanceOf` under loss because the NAV-share cap binds, so this is
+    ///      not necessarily a *full* unit exit — the assertions reflect that.
+    function test_redeem_atMaxRedeemUnderLoss(uint256 amount, uint256 lossPortion) public {
+        amount = bound(amount, 2e6, ONE_BILLION * 1e6);
+        _deposit(ALICE, amount);
+
+        uint256 extBal = _usdc.balanceOf(address(_external));
+        uint256 loss = bound(lossPortion, 1, extBal - 1);
+        _external.simulateLoss(loss);
+
+        uint256 maxR = _vault.maxRedeem(ALICE);
+        if (maxR == 0) return;
+        uint256 expected = _vault.previewRedeem(maxR);
+
+        vm.prank(ALICE);
+        uint256 assets = _vault.redeem(maxR, ALICE, ALICE);
+
+        assertEq(assets, expected, "redeem(maxR) pays previewRedeem(maxR)");
+        // Inv. 7 / A.2 preserved even at the cap.
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
+    }
+
+    /// @dev Positive characterisation of the R-shares improvement (paired with
+    ///      `test_withdraw_earlyEntrant_brickedByNonCompliantExternal`). Single-holder full exit
+    ///      under a non-compliant external: `f == f_u == 1` (sole holder), so post-payout
+    ///      deficit ~= 0 and `_rebalanceYieldAssets()` does not attempt the trim that would
+    ///      reach `EXTERNAL_VAULT.deposit`. The withdraw succeeds. Previously bricked under the
+    ///      old pre-payout-eviction code path.
+    function test_withdraw_singleHolderFullExit_notBrickedByNonCompliantExternal() public {
+        _deposit(ALICE, DEFAULT_DEPOSIT);
         _external.setDepositReverts(true);
 
-        // A withdrawal that needs the post-payout trim will brick. We confirm the cause is the
-        // mock's revert string (not e.g. a different error), so the test is pinning the right thing.
         uint256 wAssets = _vault.maxWithdraw(ALICE);
+        uint256 balBefore = _usdc.balanceOf(ALICE);
         vm.prank(ALICE);
-        vm.expectRevert(bytes("MockERC4626: deposit paused"));
         _vault.withdraw(wAssets, ALICE, ALICE);
+
+        assertEq(_usdc.balanceOf(ALICE) - balBefore, wAssets, "single-holder full exit not bricked");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
+    }
+
+    /// @dev KNOWN LIMITATION (R-shares restated): the best-effort trim trusts ERC-4626 compliance.
+    ///      Under R-shares the single-holder full exit no longer reaches the trim path (paired
+    ///      positive test above), but multi-holder exits where the holder has *higher* `units /
+    ///      share` than the global average do — they leave `f < f_u` and the post-payout
+    ///      `_rebalanceYieldAssets()` `deficit < 0` branch tries to redeposit. A non-compliant
+    ///      external that reverts `deposit` despite `maxDeposit > 0` bricks the withdraw.
+    ///      Accepted; design.md §Security requires standard, audited externals.
+    ///
+    ///      Setup: external gains after Alice's deposit, so Bob enters at a higher
+    ///      price-per-share and ends up with a *higher* `units / share` than Alice (his shares
+    ///      are "expensive", same units packed into fewer shares). Bob then partial-exits — the
+    ///      surplus appears, the trim attempts `EXTERNAL_VAULT.deposit`, and the non-compliant
+    ///      external reverts.
+    function test_withdraw_lateEntrantAfterGain_brickedByNonCompliantExternal() public {
+        // Alice deposits first into the empty vault.
+        _deposit(ALICE, DEFAULT_DEPOSIT);
+
+        // External gains so NAV drifts up; Bob then enters at a higher price-per-share, so he
+        // receives fewer shares per underlying than Alice and ends up with a *higher* `units /
+        // share` than her (units track principal, shares track NAV under the floating share).
+        _external.simulateGain(DEFAULT_DEPOSIT / 2);
+        _deposit(BOB, DEFAULT_DEPOSIT);
+
+        // Non-compliant external: `deposit` reverts unconditionally; `maxDeposit` still > 0 so
+        // the OQ #4 pre-check does not skip the trim. Withdrawals from external still work.
+        _external.setDepositReverts(true);
+
+        // Bob partial-exits half his shares. His `units / share` exceeds the global average
+        // (Alice drags it down), so for his removal `f_u > f` → post-payout deficit < 0 (surplus)
+        // → trim → `EXTERNAL_VAULT.deposit` reverts → the redeem bricks.
+        uint256 half = _vault.balanceOf(BOB) / 2;
+        vm.prank(BOB);
+        vm.expectRevert(bytes("MockERC4626: deposit paused"));
+        _vault.redeem(half, BOB, BOB);
     }
 
 }
