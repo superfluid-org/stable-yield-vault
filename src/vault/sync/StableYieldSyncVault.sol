@@ -246,9 +246,10 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
 
     /**
      * @dev Withdraw workflow: spend allowance, snapshot balance/supply, burn shares, then
-     *      hand off to the FundManager — which decrements units, funds the payout from the
-     *      recalibration-freed yield asset excess + the external vault, and decrements principal
-     *      proportionally.
+     *      hand off to the FundManager — which decrements the holder's units proportionally and
+     *      funds the payout from a shares-proportional reserve slice + the external vault (R-shares
+     *      sourcing). There is no principal counter; `assets` is the OZ pro-rata `shares · NAV /
+     *      supply` (floor), so stayers stay whole automatically.
      */
     function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)
         internal

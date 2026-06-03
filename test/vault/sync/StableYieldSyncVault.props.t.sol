@@ -8,10 +8,10 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 /**
  * @title StableYieldSyncVaultPropsTest
  * @notice Property / multi-user tests for the sync vault, mapped to `docs/sync-vault/invariants.md`.
- *         These assert settled invariants that hold today (the target-behaviour tests for the
- *         open-questions surfaces live in `StableYieldSyncVault.openQuestions.t.sol`). Everything is
- *         fuzzed over amounts + magnitudes; multi-holder where the invariant is about cross-holder
- *         isolation.
+ *         These assert settled invariants that hold today (all former open-questions surfaces were
+ *         resolved 2026-05-29 and their target-behaviour tests folded into the main suite
+ *         `StableYieldSyncVault.t.sol`). Everything is fuzzed over amounts + magnitudes; multi-holder
+ *         where the invariant is about cross-holder isolation.
  */
 contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
 

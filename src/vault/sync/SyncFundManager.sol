@@ -12,14 +12,15 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title SyncFundManager
- * @notice Synchronous-vault FundManager — the **sole capital custodian and NAV authority**.
+ * @notice Synchronous-vault FundManager — the sole capital custodian and NAV authority.
  *         Extends the shared {FundManagerBase} streaming engine and additionally holds the
  *         external ERC-4626 shares (deployed principal) and the
  *         yield asset reserve. The yield stream is pre-funded from each deposit (after a
- *         best-effort buffer replenish) so it starts at deposit time; redemptions are paid from
- *         the recalibration-freed reserve excess plus the external vault; `harvest()` is a single
- *         permissionless entrypoint. Pinned to its paired {StableYieldSyncVault} at construction via
- *         `msg.sender` (no factory/proxy). See `docs/sync-vault/design.md`.
+ *         best-effort reserve replenish from the external position) so it starts at deposit time;
+ *         redemptions are paid from a shares-proportional reserve slice plus the external vault.
+ *         There is no permissionless reserve-poking entrypoint —
+ *         solvency between user activity is the operator's `ensureYieldFlowDuration()`. Pinned to
+ *         its paired {StableYieldSyncVault} at construction via `msg.sender` (no factory/proxy).
  */
 contract SyncFundManager is FundManagerBase, ISyncFundManager {
 
