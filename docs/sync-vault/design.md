@@ -1,12 +1,89 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
 **stable** yield is streamed to depositors via the same Superfluid GDA engine the
 async vault uses. The external vault replaces the async vault's manual off-chain
 "working assets" leg.
+
+---
+
+## ⚠️ Revision 2026-06-02 — `_rebalanceYieldAssets()` trim deposits exactly `underlyingNeeded` (deposit-brick griefing fix)
+
+The 2026-05-28 best-effort trim shipped a latent griefing surface. Inside the
+`deficit < 0` branch, after `_downgrade(excessYield)`, the redeposit step read
+`UNDERLYING_ASSET.balanceOf(address(this))` — sweeping **every** raw underlying
+atom in the FM, not just the freshly downgraded slice. Under Inv. 7 / A.2 the
+FM holds 0 raw between calls, so this was observationally correct at all
+**operator-setter** callsites and at `onWithdraw`'s post-payout call (the
+payout's reserve-slice transfer to the receiver runs first → 0 raw remaining).
+But `onDeposit` calls `_rebalanceYieldAssets()` while the user's just-arrived
+`assets` are still sitting in the FM as raw underlying — and the trim swept
+those into `EXTERNAL_VAULT.deposit(...)` ahead of the explicit deposit step
+later in `onDeposit`. With the FM then empty, the explicit
+`EXTERNAL_VAULT.deposit(toExternal, ...)` reverted on
+`ERC20InsufficientBalance`, bricking the user's deposit.
+
+**Attack surface.** Any persistent reserve-above-target state at deposit time
+triggers the bug:
+
+- **Donation griefing (low-cost DoS).** An attacker wraps `N` USDC into `N · SF`
+  USDCx and transfers it directly to the FM (donations are unrestricted; no
+  role, no allowance). Reserve bloats above target; **every** subsequent
+  `deposit`/`mint` reverts. Operator can unbrick with
+  `ensureYieldFlowDuration()` (FM has 0 raw at that call → trim runs cleanly),
+  but the attacker can re-brick by donating again. Cost to attacker = the
+  donation amount per re-brick.
+- **Natural trigger.** Operator drops the rate while
+  `EXTERNAL_VAULT.maxDeposit(FM) == 0` (the 2026-05-28 best-effort gate skips
+  the trim → reserve sits above the new target). When external reopens, the
+  next user `deposit` brick-reverts on the now-reachable trim path.
+
+**Policy.** The `deficit < 0` branch redeposits **exactly** `underlyingNeeded`
+back to the external, not `balanceOf(FM)`:
+
+```solidity
+} else if (deficit < 0) {
+    uint256 excessYield = uint256(-deficit);
+    uint256 underlyingNeeded = excessYield / SCALING_FACTOR;
+    if (underlyingNeeded == 0) return;                               // sub-SF surplus → no-op
+    if (EXTERNAL_VAULT.maxDeposit(address(this)) >= underlyingNeeded) {
+        _downgrade(underlyingNeeded * SCALING_FACTOR);               // exact, no rounding residue
+        UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), underlyingNeeded);
+        EXTERNAL_VAULT.deposit(underlyingNeeded, address(this));     // exact, no in-flight sweep
+    }
+}
+```
+
+Blast radius:
+
+| Callsite | FM raw at entry | Pre-fix behaviour | Post-fix behaviour |
+|---|---|---|---|
+| `setStableYieldRate` / `setGuaranteedFlowDuration` / `ensureYieldFlowDuration` | 0 (Inv. 7) | sweep == downgraded amount | unchanged |
+| `onWithdraw` post-payout | 0 (`safeTransfer` to receiver runs first) | sweep == downgraded amount | unchanged |
+| `onDeposit` top-of-hook | `assets` (user's in-flight underlying) | **sweep includes `assets` → outer deposit reverts** | trim leaves `assets` alone → outer deposit succeeds |
+
+Symmetric improvements bundled with the fix:
+
+- `_downgrade(underlyingNeeded * SCALING_FACTOR)` replaces `_downgrade(excessYield)` — semantically identical on chain (Superfluid's downgrade floors `excessYield` to a `SCALING_FACTOR` multiple anyway), but the new form makes the matched `(_downgrade, EXTERNAL_VAULT.deposit)` pair explicit.
+- Early return for `underlyingNeeded == 0`: the prior code reached `EXTERNAL_VAULT.deposit(0, …)` on sub-SF surplus, a tax for no work and a soft-revert risk on stricter 4626s.
+
+| Aspect | Decision (2026-06-02) | Rationale |
+|---|---|---|
+| Trim source of underlying | **Exactly `underlyingNeeded`, not `balanceOf(FM)`.** | The FM holds in-flight raw mid-call during `onDeposit`; sweeping it is a custody-hazard violation under Inv. 7 (within-call form). The exact form is observationally identical at every other callsite. |
+| Sub-`SCALING_FACTOR` surplus | **Early return.** | `_downgrade` would round to a no-op anyway; the avoided `EXTERNAL_VAULT.deposit(0, …)` saves gas and tolerates 4626s that revert on a zero deposit. |
+| Inv. 7 ("custody hazard") wording | **Kept verbatim.** The "or the base rebalance silently consumes it" warning is now defensive — future code paths that linger raw underlying mid-call are still warned, but the active vulnerability is closed. | Already foreshadowed the bug; no need to soften. |
+| D.4 (reserve back to target, best-effort) | **Unchanged.** | Same gate, same downgrade amount, same outcome at the rest-state callsites. |
+| OQ "Donation characterisation under the floating share" | **Escalated to a confirmed property + pinned.** Pre-fix, donations were a DoS surface; post-fix, donations are genuinely an irrational gift to existing holders. | Pinned by `test_deposit_notBrickedAfterSuperTokenDonation`. |
+
+Pinned by:
+
+- `test_deposit_notBrickedAfterSuperTokenDonation` (`StableYieldSyncVault.t.sol`) — donation → follow-up deposit succeeds.
+- `test_deposit_notBrickedAfterRateDropWithClosedExternal` (`StableYieldSyncVault.t.sol`) — natural-trigger variant: rate drop while external capped, then external reopens, then deposit succeeds.
+
+Both fail pre-fix with `ERC20InsufficientBalance(FM, 0, depositAmount)` from the external's `transferFrom` against the swept FM, exactly characterising the bug.
 
 ---
 
@@ -369,22 +446,27 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
     holders directly via the (unclamped) NAV. The pull is capped at
     `maxWithdraw(this)`, so a compliant (trusted) external vault never reverts
     it → it can **never brick** the calling user op.
-  - `deficit < 0`: **best-effort trim** (revised 2026-05-28). Pre-check
-    `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded` (where
-    `underlyingNeeded = uint256(-deficit) / SCALING_FACTOR`); if the external
-    vault will accept the redeposit, `_downgrade(uint256(-deficit))` then
-    `forceApprove` + `EXTERNAL_VAULT.deposit` the resulting underlying back
-    into the external vault so the surplus keeps compounding externally
-    (Inv. 7 preserved — no raw underlying at rest in the FM). Otherwise
-    **skip the whole branch**: leave the excess as above-target super-token
-    slack in the reserve; the next rebalance retries idempotently
+  - `deficit < 0`: **best-effort trim** (revised 2026-05-28; redeposit step
+    revised 2026-06-02). `underlyingNeeded = uint256(-deficit) / SCALING_FACTOR`.
+    Early return for `underlyingNeeded == 0` (sub-SF surplus; `_downgrade` would
+    round to no-op and the saved external call avoids deposit-zero hazards on
+    stricter 4626s). Otherwise pre-check
+    `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded`; if the external will
+    accept the redeposit, downgrade and redeposit **exactly** `underlyingNeeded`
+    (`_downgrade(underlyingNeeded * SCALING_FACTOR)` then `forceApprove` +
+    `EXTERNAL_VAULT.deposit(underlyingNeeded, this)`). The "exact" form replaces
+    the prior `EXTERNAL_VAULT.deposit(UNDERLYING_ASSET.balanceOf(this), ...)`
+    sweep — which silently consumed any in-flight raw underlying (e.g. the
+    user's just-arrived deposit during `onDeposit`) and bricked the outer op.
+    Otherwise **skip the whole branch**: leave the excess as above-target
+    super-token slack in the reserve; the next rebalance retries idempotently
     (`deficit < 0` reappears identically next call). This preserves Inv. 7 /
-    A.2 hard at the cost of relaxing D.4 ("reserve returns to target")
-    while external deposits are unavailable. Trusts ERC-4626 compliance: a
+    A.2 hard at the cost of relaxing D.4 ("reserve returns to target") while
+    external deposits are unavailable. Trusts ERC-4626 compliance: a
     non-compliant external whose `deposit` reverts despite `maxDeposit > 0`
     still bricks the calling op (pinned by
-    `test_withdraw_brickedByNonCompliantExternal` as a known limitation —
-    see §Security).
+    `test_withdraw_brickedByNonCompliantExternal` as a known limitation — see
+    §Security).
   - Residual `deficit > 0` after the upgrade is **tolerated** — callers (per-op
     hooks and the base setters) guard their `_recalibrateFlow()` accordingly.
 
@@ -689,14 +771,22 @@ stalling.
 
 ## Security considerations
 
-- **Donations under a floating share (clamp dropped 2026-05-26).** NAV is the
-  raw sum of external `maxWithdraw` + super-token reserve + raw underlying, with
-  no clamp. A super-token or raw-underlying transfer to the FM therefore *does*
-  raise NAV and the share price — but it raises it for **existing holders**, so
-  it is an irrational gift, not a profitable attack (the donor strictly loses).
-  The one genuinely exploitable surface is the classic ERC-4626 **first-deposit
-  inflation attack** (front-run the first depositor, donate to inflate price per
-  share, the victim's deposit rounds to 0 shares). Mitigation replacing the
+- **Donations under a floating share (clamp dropped 2026-05-26; deposit-brick
+  surface closed 2026-06-02).** NAV is the raw sum of external `maxWithdraw` +
+  super-token reserve + raw underlying, with no clamp. A super-token or
+  raw-underlying transfer to the FM therefore *does* raise NAV and the share
+  price — but it raises it for **existing holders**, so it is an irrational
+  gift, not a profitable attack (the donor strictly loses). *Historically
+  (before the 2026-06-02 trim fix), the donation also opened a deposit-bricking
+  DoS surface: the rebalance trim swept the FM's full underlying balance back
+  into the external vault, which during `onDeposit` included the user's
+  just-arrived raw underlying, reverting the outer deposit. That surface is
+  closed — the trim now redeposits exactly `underlyingNeeded`. Pinned by
+  `test_deposit_notBrickedAfterSuperTokenDonation` and
+  `test_deposit_notBrickedAfterRateDropWithClosedExternal`.* The one genuinely
+  exploitable surface remaining is the classic ERC-4626 **first-deposit
+  inflation attack** (front-run the first depositor, donate to inflate price
+  per share, the victim's deposit rounds to 0 shares). Mitigation replacing the
   clamp (implemented 2026-05-27): OZ **virtual shares** via a `_decimalsOffset()`
   override on the vault returning a hardcoded `12` — `10 ** 12` attack-cost
   multiplier, 18-dec shares for the 6-dec USDC deployment. The offset alone makes

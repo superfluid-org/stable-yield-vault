@@ -9,13 +9,19 @@ Two classes are called out throughout:
 - **Hard** — must hold after every op regardless of operator behaviour or external-vault state (modulo external-vault solvency limits).
 - **Best-effort** — maintained on every user op and by the operator, but not structurally enforced; degrades gracefully (never bricks user ops) under terminal external impairment. Same trust model as the async family.
 
-This is the **floating-share** model (clamp / `trackedPrincipal` dropped 2026-05-26). There is no protocol-owned buffer excluded from the share price.
+Each entry also carries a **verification tag** so the small set worth continuous fuzzing is visually distinct:
+
+- `[echidna]` — a hard, runtime property fuzzed continuously by `test/echidna/EchidnaStableYieldSyncVault.sol`. This is the serious core; a violation is a real bug.
+- `[best-effort]` — a real property with legitimate carve-outs (external supply-constrained, deposits closed, terminal impairment); documented, not asserted under fuzzing (too many carve-outs to assert cleanly).
+- `[inherited]` — established by `FundManagerBase` (the shared engine) and covered by the async echidna suite, or a one-time constructor-time immutable check; not re-fuzzed here.
+
+**Retired entries.** Some ids below are tombstones (`*removed YYYY-MM-DD*`). The letter+number scheme is **stable** — `docs/sync-vault/design.md` and the echidna harness cross-reference entries by id — so removed invariants leave a stub rather than renumbering the rest. Same convention as `design.md` Invariant 3 and the glossary's retired stubs.
 
 ---
 
 ## A. Custody
 
-### A.1 — Vault holds no assets
+### A.1 — Vault holds no assets `[echidna]`
 
 **State.**
 
@@ -30,9 +36,9 @@ The vault is a pure share/accounting face. On deposit it pulls underlying from t
 
 **Holds when.** Hard, always.
 
-**Breaks if.** A future code path mints/holds assets in the vault, or a token is transferred to the vault out-of-band (would inflate nothing — the vault's balance is not read by NAV — but violates the "thin face" assumption).
+**Breaks if.** A token is transferred to the vault manually (would not have any inflation impact as the vault's balance is not read by NAV).
 
-### A.2 — Custody hazard: no raw underlying at rest in the FM
+### A.2 — Custody hazard: no raw underlying at rest in the FM `[echidna]`
 
 **State.**
 
@@ -40,45 +46,27 @@ The vault is a pure share/accounting face. On deposit it pulls underlying from t
 underlyingAsset.balanceOf(FM) == 0   (between calls)
 ```
 
-Principal never rests in the FM as raw underlying across calls — within each call it is either deposited into `EXTERNAL_VAULT` or `_upgrade`d into the super-token reserve.
+Principal never rests in the FM as raw underlying across calls. It is either deposited into `EXTERNAL_VAULT` or `_upgrade`d into the super-token as part of the yield reserve.
 
-**Where.** `onDeposit` deploys the remainder to external (`SyncFundManager.sol:106-110`); `_rebalanceYieldAssets` `deficit < 0` branch downgrades then redeposits its *entire* underlying balance — and the branch is **skipped entirely if `EXTERNAL_VAULT.maxDeposit(FM)` is insufficient** (Revision 2026-05-28, `SyncFundManager.sol` `_rebalanceYieldAssets`), so the downgrade never happens when the redeposit can't follow it; `onWithdraw` downgrades `fromReserve` and transfers it to the receiver (`SyncFundManager.sol:160-162`).
+**Where.** `onDeposit` deploys the remainder to external (`SyncFundManager.sol:106-110`); `_rebalanceYieldAssets` `deficit < 0` branch downgrades exactly `underlyingNeeded` super-token and redeposits **exactly** that amount. `onWithdraw` downgrades `fromReserve` and transfers it to the receiver (`SyncFundManager.sol:160-162`).
 
 **Holds when.** Hard, at rest (between external calls). Transiently nonzero mid-call.
 
-**Breaks if.** Any path leaves underlying in the FM at rest — the next `_rebalanceYieldAssets()` `deficit < 0` branch would sweep it into the reserve, silently converting unaccounted underlying into reserve and disturbing NAV partitioning. This is design Invariant 7 and the load-bearing reason every hook ends with the FM flat in underlying. The 2026-05-28 best-effort-trim gate preserves this hard even when the external is deposits-closed: skipping the *whole* branch (rather than a `try/catch` around the deposit) avoids any post-downgrade "underlying-at-rest" state. Pinned by `test_prop_aboveTargetReserveDoesNotBlockWithdraw` (multi-op fuzz under `setDepositCap(0)` asserting `balanceOf(FM)_underlying == 0` throughout).
+**Breaks if.** Any path leaves underlying in the FM at rest **or** the rebalance trim sweeps `balanceOf(FM)` while mid-call raw underlying is present. This is design Invariant 7 and the load-bearing reason every hook ends with the FM flat in underlying. Pinned by `test_prop_aboveTargetReserveDoesNotBlockWithdraw` (multi-op fuzz under `setDepositCap(0)` asserting `balanceOf(FM)_underlying == 0` throughout), `test_deposit_notBrickedAfterSuperTokenDonation`, and `test_deposit_notBrickedAfterRateDropWithClosedExternal`.
 
-### A.3 — FM is the sole custodian and NAV authority
+### A.3 — *removed 2026-06-03*
 
-**State.** All vault-controlled assets — external-vault shares, the super-token reserve, and (transiently) raw underlying — live in the FM. The vault proxies `totalAssets` / `max*` to FM views.
-
-**Where.** `totalManagedAssets` (`SyncFundManager.sol:176-179`), `maxExternalDeposit` (`SyncFundManager.sol:182-184`); vault delegates `totalAssets` (`StableYieldSyncVault.sol:136-138`), `maxDeposit`/`maxMint` (`StableYieldSyncVault.sol:144-156`), `maxWithdraw`/`maxRedeem` (`StableYieldSyncVault.sol:159-170`).
-
-**Holds when.** Hard, by construction (`EXTERNAL_VAULT` is immutable on the FM; the vault has no external-vault reference of its own).
+Was "FM is the sole custodian and NAV authority." A structural/architectural statement ("hard, by construction"), not a falsifiable runtime property — nothing for echidna to check. The custody facts it asserted are covered operationally by A.1 (vault holds nothing) + A.2 (no raw underlying at rest in the FM). The FM-is-NAV-authority design point lives in `design.md` Decision 11 / Invariant 7.
 
 ---
 
 ## B. NAV & share accounting
 
-### B.1 — Total assets is the unclamped sum of recoverable balances
+### B.1 — *removed 2026-06-03*
 
-**State.**
+Was "total assets is the sum of recoverable balances" (`totalAssets() == ext.maxWithdraw(FM) + scaledReserve + rawUnderlying`). Near-tautological: `totalManagedAssets()` *literally returns* that sum, so an echidna assertion re-computing the same formula only checks the vault→FM delegation — negligible bug-finding power. The economically-load-bearing consequence (no over-issuance against this NAV) is **B.2**, which is the one worth fuzzing. The unclamped-NAV design rationale lives in `design.md` Invariant 2 / Decision 1.
 
-```
-totalAssets() == EXTERNAL_VAULT.maxWithdraw(FM)
-              +  scaledYieldAssetsBalance()
-              +  underlyingAsset.balanceOf(FM)
-```
-
-A plain sum — **no clamp, no `trackedPrincipal`**. The external surplus is included and accrues to holders as share appreciation; under impairment the sum falls and the share takes the loss immediately and honestly.
-
-**Where.** `SyncFundManager.totalManagedAssets` (`SyncFundManager.sol:176-179`); `scaledYieldAssetsBalance` (`FundManagerBase.sol:258-260`). Design Invariant 2.
-
-**Holds when.** Hard, by definition. The meaningful fuzz target is that the sum never reverts (overflow / external-vault view revert) and that the third term is 0 at rest (A.2).
-
-**Breaks if.** A clamp or counter is reintroduced, or `maxWithdraw` of a non-standard external vault reverts / rebases unexpectedly.
-
-### B.2 — No share over-issuance
+### B.2 — No share over-issuance `[echidna]`
 
 **State.**
 
@@ -92,39 +80,28 @@ Strictly `<` with the virtual-shares offset. The total claim priced at NAV never
 
 **Holds when.** Hard.
 
-**Breaks if.** Shares are minted without a matching NAV increase (e.g. units/shares granted on a deposit whose principal didn't reach the FM), or NAV is read before the deposit lands.
+### B.3 — Deposits are NAV-neutral at entry `[echidna]`
 
-### B.3 — Deposits are NAV-neutral at entry
-
-**State.** A deposit only changes the *form* of the FM's assets (incoming underlying → external-vault shares + a reserve slice), both counted in NAV. Price-per-share immediately before and after a deposit is unchanged (modulo virtual-shares rounding in the vault's favour).
+**State.** A deposit only changes the *form* of the FM's assets (incoming underlying → external-vault shares + a yield reserve slice), both counted in NAV. Price-per-share immediately before and after a deposit is unchanged (modulo virtual-shares rounding in the vault's favour).
 
 **Where.** `onDeposit`: units granted (`SyncFundManager.sol:87-91`), pre-fund slice upgraded (`SyncFundManager.sol:97-103`), remainder deployed to external (`SyncFundManager.sol:106-110`). Mint happens in the vault before the hook (`StableYieldSyncVault.sol:187-189`).
 
-**Holds when.** Hard for the entry transition. (Thereafter the share floats — see B.5.)
+**Holds when.** Hard for the entry transition.
 
-**Breaks if.** Some incoming underlying is consumed without entering NAV (would dilute), or the pre-fund pulls more than `assets` (capped at `assets`, `SyncFundManager.sol:101`).
-
-### B.4 — Stayers are not diluted by another holder's op
+### B.4 — Stayers are not diluted by another holder's op `[echidna]`
 
 **State.** With external NAV and the reserve held fixed, a deposit or withdraw by user X does not decrease `convertToAssets(balanceOf(Y))` for an untouched holder Y. Deposits are NAV-neutral (B.3); withdraws are floor-priced (`shares · NAV / supply`), so rounding leaves residual value with stayers.
 
-**Where.** OZ proportional accounting; withdraw is priced by `_withdraw` → `previewWithdraw`/`_convertToShares` with floor rounding; `onWithdraw` removes exactly the pro-rata slice (`SyncFundManager.sol:116-167`). This is the property that replaced the old `trackedPrincipal` decrement (design Invariant 1, Revision 2026-05-26).
+**Where.** OZ proportional accounting; withdraw is priced by `_withdraw` → `previewWithdraw`/`_convertToShares` with floor rounding; `onWithdraw` removes exactly the pro-rata slice (`SyncFundManager.sol:116-167`).
 
 **Holds when.** Hard, isolating same-block other-user activity from stream drain (D.3) and external performance (B.5).
 
-**Breaks if.** A withdraw removes less NAV than the shares it burns are worth (over-payment to leaver), or a deposit mints more shares than `assets · supply / NAV`.
+### B.5 — *removed 2026-06-03*
 
-### B.5 — Share floats with external performance
+Was "share floats with external performance." Explicitly an **economic / directional** property, not a hard equality ("the relevant fuzz check is directional; no clamp pins the price"). There is no invariant equation to falsify — it is the design's intended *behaviour*, documented in `design.md` Core principle / Decision 1 / Invariant 1. The hard accounting guarantees that survive it are B.2 (no over-issuance) and B.4 (no stayer dilution).
 
-**State.** Between rebalances and across external NAV changes, price-per-share = `totalManagedAssets() / totalSupply` moves: up by `external yield − promised rate` while the external vault out-earns the rate, down (honest, immediate) under impairment. A holder's total return = streamed promised rate **plus** this appreciation — single-counted (the stream is funded by pulling from external, lowering `maxWithdraw(FM)` by exactly the streamed amount).
 
-**Where.** Design Core principle / Invariant 1. NAV reads live values (`SyncFundManager.sol:176-179`); the rebalance pulls only the *deficit*, leaving surplus compounding externally (`SyncFundManager.sol:204-217`).
-
-**Holds when.** Economic property, not a hard equality — the relevant fuzz check is directional (no clamp pins the price; price tracks external NAV minus streamed drain).
-
-**Breaks if.** A clamp is reintroduced, or the rebalance pulls the full external position rather than the deficit.
-
-### B.6 — Withdrawal pays exactly the priced amount
+### B.6 — Withdrawal pays exactly the priced amount `[echidna]`
 
 **State.**
 
@@ -133,7 +110,7 @@ fromReserve + fromExternal == redeemingAssets
 receiver underlying balance increases by exactly redeemingAssets
 ```
 
-**Where.** `onWithdraw` (Revision 2026-05-29): `fromYieldAssets = ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)` clamped at `redeemingAssets` (shares-proportional sourcing — R-shares); `fromExternal = redeemingAssets − fromYieldAssets`; external leg via `EXTERNAL_VAULT.withdraw(fromExternal, receiver, FM)`; reserve leg via `_downgrade(fromYieldAssets · SCALING_FACTOR)` + `safeTransfer(receiver, fromYieldAssets)`.
+**Where.** `onWithdraw`: `fromYieldAssets = ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)` clamped at `redeemingAssets`; `fromExternal = redeemingAssets − fromYieldAssets`; external leg via `EXTERNAL_VAULT.withdraw(fromExternal, receiver, FM)`; reserve leg via `_downgrade(fromYieldAssets · SCALING_FACTOR)` + `safeTransfer(receiver, fromYieldAssets)`.
 
 **Holds when.** Hard, when the call does not revert. Under R-shares, the external leg `fromExternal = f · ext.maxWithdraw + f · raw ≤ ext.maxWithdraw(FM)` is bounded for a compliant external, so F.2 guarantees the call lands for `request ≤ max*` in any loss state. The external leg reverts only on a non-compliant external (decision 5, accepted as a known limitation).
 
@@ -143,7 +120,7 @@ receiver underlying balance increases by exactly redeemingAssets
 
 ## C. Shares & GDA units
 
-### C.1 — Units are granted on deposited principal; transfers move a share-proportional slice
+### C.1 — Units are granted on deposited principal; transfers move a share-proportional slice `[echidna]`
 
 **State.** On deposit a holder's units increase by `_toUnit(assets) = assets / RAW_PER_UNIT` — proportional to **underlying contributed**, not to shares minted. On a shareholder↔shareholder transfer, units move proportional to the *shares* transferred relative to the sender's share balance. On withdraw, units decrease proportional to *shares* burned.
 
@@ -155,7 +132,7 @@ receiver underlying balance increases by exactly redeemingAssets
 
 **Resolved-by-design (2026-05-28).** Under the floating share, `units / shares` is **NOT** a global constant — units track nominal contributed principal; shares track NAV. This is intentional and matches the design's total-return decomposition: the streamed component is sized to **nominal principal** (the "stable yield on what you put in" narrative — `_toUnit(assets) = assets / RAW_PER_UNIT` is NAV-independent), while the residual `external − promised` is delivered as share-price appreciation. A secondary-market buyer of appreciated shares inherits the seller's slot's `units / share`, distinct from what a fresh deposit at the same cash would mint — informational, not a value leak. See `docs/sync-vault/design.md` Invariant 6 (restated 2026-05-28) and the `test_prop_units*` suite in `test/vault/sync/StableYieldSyncVault.props.t.sol`. §H.1 retired.
 
-### C.2 — Yield stream starts at deposit and stops proportionally at withdraw
+### C.2 — Yield stream starts at deposit and stops proportionally at withdraw `[echidna]`
 
 **State.** A depositor accrues stream from deposit time (units granted + `_recalibrateFlow()` in the same call). A full exit removes all the holder's units; a partial exit removes a `shares/totalSharesOwned` slice.
 
@@ -163,7 +140,7 @@ receiver underlying balance increases by exactly redeemingAssets
 
 **Holds when.** Hard for the unit moves; the *flow* (re)start is best-effort (guarded `_recalibrateFlow()`, see D.2).
 
-### C.3 — Dust position (shares but zero units) does not brick withdraw
+### C.3 — Dust position (shares but zero units) does not brick withdraw `[echidna]`
 
 **State.** A sub-`RAW_PER_UNIT` deposit can mint shares but 0 units. `onWithdraw` skips the unit decrease when `holderUnits == 0` rather than reverting.
 
@@ -171,19 +148,15 @@ receiver underlying balance increases by exactly redeemingAssets
 
 **Holds when.** Hard.
 
-### C.4 — Withdraw argument sanity
+### C.4 — *removed 2026-06-03*
 
-**State.** `onWithdraw` reverts `BAD_WITHDRAW_ARGS` if `totalSharesOwned == 0` or `shares > totalSharesOwned`.
-
-**Where.** `SyncFundManager.sol:124`.
-
-**Holds when.** Hard. (The vault burns before the hook, so these reflect pre-burn snapshots passed by the vault — `StableYieldSyncVault.sol:208-213`.)
+Was "withdraw argument sanity" (`onWithdraw` reverts `BAD_WITHDRAW_ARGS` on `totalSharesOwned == 0` or `shares > totalSharesOwned`). A defensive internal guard, **unreachable from echidna**: `onWithdraw` carries `VAULT_ROLE`, and the only caller (the vault's `_withdraw`) always passes a consistent pre-burn snapshot, so the fuzzer cannot drive the guard true. It is a unit-test concern (a direct-call negative test), not a system invariant.
 
 ---
 
 ## D. Yield stream & reserve
 
-### D.1 — Forward-solvency horizon (best-effort)
+### D.1 — Forward-solvency horizon `[best-effort]`
 
 **State.**
 
@@ -199,7 +172,7 @@ i.e. `evaluateYieldAssetsDeficit() <= 0` after every user op, **unless** the reb
 
 **Breaks if.** Nothing structurally enforces it — same trust model as async. Operator must call `ensureYieldFlowDuration()` between periods of user inactivity (no permissionless `harvest()`).
 
-### D.2 — User ops never bricked: terminal external impairment ⇒ full pause
+### D.2 — User ops never bricked: terminal external impairment ⇒ full pause `[echidna]`
 
 **State.** Under terminal external impairment (`EXTERNAL_VAULT.maxWithdraw(FM) == 0` while the FM holds an external position) the vault is **fully paused** — deposits/mints/withdraws/redeems revert cleanly with `ERC4626ExceededMax*`, never `GDA_INSUFFICIENT_BALANCE`. The Superfluid stream keeps paying existing holders from the reserve until it is naturally liquidated.
 
@@ -207,15 +180,11 @@ i.e. `evaluateYieldAssetsDeficit() <= 0` after every user op, **unless** the reb
 
 **Holds when.** Hard for user ops (the `max*` gate is deterministic). Operator-call liveness under terminal impairment is best-effort / accepted-to-revert.
 
-### D.3 — Share price ticks down between rebalances as the stream drains the reserve
+### D.3 — *removed 2026-06-03*
 
-**State.** `scaledYieldAssetsBalance()` decreases as the GDA flow drains the reserve, so NAV (and price-per-share) decays between rebalances and recovers at each funded rebalance. This is the async forward-priced property made continuously observable.
+Was "share price ticks down between rebalances as the stream drains the reserve." Explicitly **"expected behaviour, not a violation"** — an anti-invariant (it describes NAV *decaying*, which is by design). Nothing to assert; asserting it would be asserting a non-property. The timing/MEV consideration it raised is captured in `design.md §Security` ("Share price ticks between rebalances").
 
-**Where.** Reserve drained by the live `distributeFlow` (`FundManagerBase._recalibrateFlow`, `:290-296`); replenished per-op and by the operator.
-
-**Holds when.** Expected behaviour, not a violation. Timing/MEV is a known consideration — mitigated by per-op rebalance, virtual shares, rounding in the vault's favour, `nonReentrant`.
-
-### D.4 — Reserve returns to target after withdraw (best-effort, gated on external `maxDeposit`)
+### D.4 — Reserve returns to target after withdraw (gated on external `maxDeposit`) `[best-effort]`
 
 **State.** Under normal operation (external vault accepting deposits), after `onWithdraw` the post-payout `_rebalanceYieldAssets()` trims any residual freed excess back into the external vault, so the reserve is at target (not above) and the FM is flat in underlying (A.2). When the external signals deposits closed (`EXTERNAL_VAULT.maxDeposit(FM) < underlyingNeeded`), the trim is **skipped entirely** (Revision 2026-05-28) and the freed excess stays as above-target super-token slack in the reserve until the external accepts deposits again.
 
@@ -225,7 +194,7 @@ i.e. `evaluateYieldAssetsDeficit() <= 0` after every user op, **unless** the reb
 
 **Known limitation.** A non-compliant external vault whose `deposit` reverts despite reporting `maxDeposit > 0` would bypass the pre-check, propagate its revert, and brick the calling op. Pinned by `test_withdraw_brickedByNonCompliantExternal` in `StableYieldSyncVault.t.sol`. Accepted; design.md §Security requires standard, audited ERC-4626 externals.
 
-### D.5 — Flow & fee rate relationships (inherited)
+### D.5 — Flow & fee rate relationships `[inherited]`
 
 **State.**
 
@@ -241,7 +210,7 @@ Treasury retains its 1 fee-pool unit for the FM's lifetime.
 
 **Holds when.** Hard (shared engine; see async D.4).
 
-### D.6 — Duration floor (inherited)
+### D.6 — Duration floor `[inherited]`
 
 **State.** `guaranteedFlowDuration >= MIN_GUARANTEED_FLOW_DURATION` (= 1 day). Enforced in the base constructor and `setGuaranteedFlowDuration`.
 
@@ -253,19 +222,19 @@ Treasury retains its 1 fee-pool unit for the FM's lifetime.
 
 ## E. Scaling & decimals (inherited)
 
-### E.1 — Yield asset wraps the underlying
+### E.1 — Yield asset wraps the underlying `[inherited]`
 
 **State.** `YIELD_ASSET.getUnderlyingToken() == underlyingAsset`; constructor reverts `ASSET_MISMATCH` otherwise.
 
 **Where.** `FundManagerBase.sol:137`.
 
-### E.2 — External vault asset matches underlying
+### E.2 — External vault asset matches underlying `[inherited]`
 
 **State.** `EXTERNAL_VAULT.asset() == asset()`; the vault constructor reverts `EXTERNAL_ASSET_MISMATCH` otherwise. Not re-validated in the FM.
 
 **Where.** `StableYieldSyncVault.sol:71`.
 
-### E.3 — Scaling factors
+### E.3 — Scaling factors `[inherited]`
 
 **State.**
 
@@ -282,7 +251,7 @@ RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
 
 ## F. ERC-4626 compliance
 
-### F.1 — Preview functions work synchronously
+### F.1 — Preview functions work synchronously `[echidna]`
 
 **State.** `previewDeposit/Mint/Redeem/Withdraw` use the OZ default and do **not** revert (unlike the async vault). They price off live `totalAssets()`.
 
@@ -290,7 +259,7 @@ RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
 
 **Holds when.** Hard.
 
-### F.2 — `max*` are honest, never-bricking bounds
+### F.2 — `max*` are honest, never-bricking bounds `[echidna]`
 
 **State.** `maxDeposit/maxMint` capped by `EXTERNAL_VAULT.maxDeposit(FM)`; `maxWithdraw/maxRedeem` capped by `totalManagedAssets()` (the reserve-inclusive NAV is the global upper bound a redeem can source). A request at exactly `max*` is serviceable.
 
@@ -300,7 +269,7 @@ RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
 
 **Breaks if.** External vault reports a `maxWithdraw` larger than it can actually service on `withdraw` (non-standard external vault).
 
-### F.3 — Conversion round-trips favour the vault
+### F.3 — Conversion round-trips favour the vault `[echidna]`
 
 **State.** `convertToAssets(convertToShares(a)) <= a` and `convertToShares(convertToAssets(s)) <= s` (OZ rounding).
 
@@ -309,37 +278,3 @@ RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
 **Holds when.** Hard.
 
 ---
-
-## G. Access control
-
-### G.1 — Value-bearing FM hooks are vault-only
-
-**State.** `onDeposit`, `onWithdraw`, `onShareTransfer` revert for any caller other than the pinned vault (`VAULT_ROLE`, granted to `msg.sender` at FM construction).
-
-**Where.** `onlyRole(VAULT_ROLE)` (`SyncFundManager.sol:86`, `:123`; `FundManagerBase.sol:236`); role grant (`FundManagerBase.sol:151`).
-
-**Holds when.** Hard. These hooks now move principal + reserve (not just units), so the gate is load-bearing.
-
-### G.2 — Operator / admin setters
-
-**State.** `setStableYieldRate` and `ensureYieldFlowDuration` are `FUND_OPERATOR_ROLE`; `setGuaranteedFlowDuration` is `DEFAULT_ADMIN_ROLE`. The sync FM adds **no** extra operator entrypoint (no `harvest()`, no `fundReserve`).
-
-**Where.** `FundManagerBase.sol:185`, `:197`, `:214`.
-
-**Holds when.** Hard.
-
----
-
-## H. Open tensions / gaps (for audit attention)
-
-These are not settled invariants — they are properties the design claims but the code does not yet robustly enforce, or where the design prose and the floating-share model are in tension. Listed so they are not lost.
-
-1. **Units vs. shares under the floating share — RESOLVED 2026-05-28.** Confirmed intended: units track **nominal contributed principal** (the streamed component is sized to what each holder put in — the "stable yield on what you put in" narrative), not shares. Design Invariant 6 restated; §C.1 promoted to a confirmed invariant with the "no global `units == k · shares`" property captured explicitly. Pinned by `test_prop_unitGrantEqualsToUnitAssets`, `test_prop_unitsTrackPrincipalAcrossPrices`, `test_prop_unitsPerShareNotGlobal`, `test_prop_transferConservesUnits`, `test_prop_withdrawDecreasesUnitsProportional` in `test/vault/sync/StableYieldSyncVault.props.t.sol`. See `docs/sync-vault/open-questions.md` (OQ #3 RESOLVED).
-
-2. **First-deposit inflation mitigation — RESOLVED 2026-05-27.** `StableYieldSyncVault` now overrides `_decimalsOffset()` to return `12` (hardcoded for the 6-dec USDC deployment → `10 ** 12` attack-cost multiplier, 18-dec shares). The classic ERC-4626 first-deposit inflation attack is closed; the pinned `test_firstDepositInflation_victimMintsNonZero` passes. Offset alone — no dead-shares seed, no min-shares-minted guard (the guard was deferred). For a non-6-dec underlying the value must be revisited (the bare `18 − d` normalize form gives `0` protection at 18-dec underlyings; floor it). See `docs/sync-vault/open-questions.md`.
-
-3. **Terminal-impairment recalibrate-brick — RESOLVED 2026-05-27 by a full pause.** The design's guarded-recalibrate (Revision 2026-05-22, row θ) had **never actually landed** — all four callsites called `_recalibrateFlow()` unguarded, so they could revert `GDA_INSUFFICIENT_BALANCE` from a drained, un-refillable reserve under terminal external impairment. Resolved **not** by guarding the recalibrate but by treating terminal impairment as a **full vault pause** (`maxWithdraw(FM) == 0 ⇒ all max* = 0`, see D.2): the user hooks never run while paused, so there is nothing to brick; operator setters may revert (accepted), and `setStableYieldRate(0)` (a flow-close) always works. The GDA-buffer modeling of item 5 below is unrelated and stays separately open.
-
-4. **Donations raise the share price (floating share).** With the clamp gone, a super-token or raw-underlying transfer to the FM raises NAV and the price for existing holders — an irrational gift, not a profitable attack, but worth a characterisation test on both donation paths (design §Security).
-
-5. **Inherited `FIXME`s carry over** from the shared engine: no minimum era duration on `setStableYieldRate` (`FundManagerBase.sol:198`); `evaluateYieldAssetsDeficit` neglects the Superfluid GDA buffer/security deposit (`FundManagerBase.sol:264`), so the literal reserve inequality (D.1) can read false immediately after a successful recalibrate even though the missing amount is locked as protocol buffer rather than lost; the 18-dec underlying assumption (`SCALING_FACTOR` math).

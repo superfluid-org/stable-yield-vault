@@ -154,13 +154,46 @@ Open question:
 
 Same policy question as async: enforce a minimum deposit of `RAW_PER_UNIT`, or explicitly support sub-unit share balances? For 6-dec USDC (`RAW_PER_UNIT == 1`) this is moot; it only bites >6-dec underlyings, which also hit the 18-dec `SCALING_FACTOR` `FIXME` below.
 
-## [DECIDE] Donation characterisation under the floating share
+## [RESOLVED 2026-06-02] Donation characterisation under the floating share — deposit-brick DoS surface closed; donations are an irrational gift
 
-With the clamp gone, a super-token or raw-underlying transfer directly to the FM raises `totalManagedAssets()` and thus the share price — for **existing** holders. This is an irrational gift (the donor strictly loses), not a profitable attack, *except* in the empty-vault first-deposit case (the [FIX] above).
+**Finding (verified).** With the clamp gone, a super-token transfer to the FM raises `totalManagedAssets()` and thus the share price for **existing** holders. The donor strictly loses and mints no shares — so the **value-flow direction** was always "donor → holders" (an irrational gift), confirming the doc-level characterisation.
 
-Open question:
+**But the previous implementation also opened a deposit-bricking DoS surface.** Pre-fix, `_rebalanceYieldAssets()` `deficit < 0` branch read `UNDERLYING_ASSET.balanceOf(this)` and redeposited the **whole** balance — which during `onDeposit` includes the user's just-arrived `assets`. After the trim ran, the FM was empty, and the explicit `EXTERNAL_VAULT.deposit(toExternal, …)` later in `onDeposit` reverted with `ERC20InsufficientBalance(FM, 0, assets)`. An attacker could trigger this by donating any non-trivial amount of super-token to the FM (donor loses the donation amount, but **every subsequent `deposit`/`mint` reverts** until the operator un-bricks via `ensureYieldFlowDuration()` — which an attacker can immediately re-brick). Low-cost persistent DoS. A non-malicious trigger also existed: operator drops the rate while `EXTERNAL_VAULT.maxDeposit(FM) == 0` (the 2026-05-28 best-effort gate skips the trim, leaving the reserve above the new target); when external reopens, the next deposit bricks on the now-reachable trim path.
 
-Confirm via tests that a mid-life donation only ever benefits existing holders (no value extraction by the donor or by a same-block sandwich), and document it as accepted behaviour rather than a vulnerability. Pairs with the first-deposit mitigation decision.
+**Resolution.** `SyncFundManager._rebalanceYieldAssets()` `deficit < 0` branch redeposits **exactly** `underlyingNeeded` (the converted excess) instead of sweeping `balanceOf(FM)`:
+
+```solidity
+} else if (deficit < 0) {
+    uint256 excessYield = uint256(-deficit);
+    uint256 underlyingNeeded = excessYield / SCALING_FACTOR;
+    if (underlyingNeeded == 0) return;                               // sub-SF surplus → no-op
+    if (EXTERNAL_VAULT.maxDeposit(address(this)) >= underlyingNeeded) {
+        _downgrade(underlyingNeeded * SCALING_FACTOR);
+        UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), underlyingNeeded);
+        EXTERNAL_VAULT.deposit(underlyingNeeded, address(this));
+    }
+}
+```
+
+Blast radius: zero behaviour change at any other callsite. The three operator setters (`setStableYieldRate`, `ensureYieldFlowDuration`, `setGuaranteedFlowDuration`) and the post-payout call in `onWithdraw` all run with FM raw = 0 by Inv. 7 / A.2 (`onWithdraw` does its reserve-slice `safeTransfer` to the receiver before the rebalance), so `balanceOf(FM) == underlyingNeeded` there and the new code is observationally identical. The only call site whose behaviour changes is the one where the bug fires — `onDeposit`'s top-of-hook rebalance. Inv. 7 hardens from "no raw underlying at rest **between calls**" to additionally "the rebalance trim does not consume in-flight raw underlying **within a call**." D.4 is unaffected (same gate, same downgrade amount). Sub-`SCALING_FACTOR` surplus now early-returns rather than calling `EXTERNAL_VAULT.deposit(0, …)` — minor gas saving and avoids 4626s that revert on a zero deposit.
+
+Decisions taken:
+
+- **Exact redeposit, not balance sweep.** Reads `balanceOf(FM)` were the bug's mechanism; the exact form is correct at every caller because the downgrade and the redeposit are now a tight matched pair.
+- **Early return for `underlyingNeeded == 0`.** The prior code reached `EXTERNAL_VAULT.deposit(0, …)` on sub-SF surplus — a tax for no work and a soft-revert risk on stricter 4626s.
+- **Inv. 7 wording kept verbatim.** "Or the base rebalance silently consumes it" remains as a defensive warning for future in-flight-raw code paths; the active vulnerability is closed but the discipline still matters.
+
+Tests:
+
+- `test_donation_superTokenToFM_accruesToHolders` (unchanged, `StableYieldSyncVault.t.sol`) — NAV rises for existing holders after donation; positive value-flow characterisation.
+- `test_deposit_notBrickedAfterSuperTokenDonation` (new, `StableYieldSyncVault.t.sol`) — donation → follow-up `deposit(BOB, …)` succeeds + FM holds 0 raw + Bob's units == `_toUnit(assets)`.
+- `test_deposit_notBrickedAfterRateDropWithClosedExternal` (new, `StableYieldSyncVault.t.sol`) — natural-trigger variant: rate drop while external capped → external reopens → deposit succeeds.
+
+Both new tests fail pre-fix with `ERC20InsufficientBalance(FM, 0, depositAmount)` from the external's `transferFrom` against the swept FM — exactly characterising the bug.
+
+Doc edits landed: `docs/sync-vault/design.md` (Revision 2026-06-02 block at top; `SyncFundManager._rebalanceYieldAssets` contract section's `deficit < 0` bullet rewritten; §Security donation bullet updated to call out the closed DoS surface). `docs/sync-vault/invariants.md` (A.2 / Inv. 7 updated to note the within-call hardening + new pinning tests; §H.4 moved from open tension to RESOLVED). `CLAUDE.md` sync vault paragraph updated.
+
+Pairs with the first-deposit inflation mitigation (`_decimalsOffset() = 12`) — the empty-vault inflation surface remains the only structural donation-adjacent concern, and it's already mitigated.
 
 ## [FIX] Inherited `FIXME`s from the shared engine
 
