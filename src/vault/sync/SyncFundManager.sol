@@ -197,14 +197,20 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
      *
      *      - `deficit < 0` (reserve above target): if the external vault will accept the
      *        redeposit (`EXTERNAL_VAULT.maxDeposit(this) >= underlyingNeeded`), downgrade the
-     *        excess super-token back to underlying and redeposit it so the buffer keeps
-     *        compounding externally. Otherwise **skip the trim entirely** — the excess stays in
-     *        the reserve as above-target super-token slack and the next rebalance retries. This
-     *        preserves Inv. 7 / A.2 (no raw underlying at rest in the FM) hard, at the cost of
-     *        relaxing D.4 (reserve may sit above target while external deposits are unavailable).
-     *        Trusts ERC-4626 compliance: a non-compliant external whose `deposit` reverts despite
-     *        `maxDeposit > 0` would still brick the calling op — accepted limitation, pinned by
-     *        `test_withdraw_brickedByNonCompliantExternal` (see design.md §Security).
+     *        excess super-token back to underlying and redeposit **exactly that amount**
+     *        (`underlyingNeeded`) so the buffer keeps compounding externally. Otherwise **skip the
+     *        trim entirely** — the excess stays in the reserve as above-target super-token slack
+     *        and the next rebalance retries. This preserves Inv. 7 / A.2 (no raw underlying at
+     *        rest in the FM) hard, at the cost of relaxing D.4 (reserve may sit above target while
+     *        external deposits are unavailable). Trusts ERC-4626 compliance: a non-compliant
+     *        external whose `deposit` reverts despite `maxDeposit > 0` would still brick the
+     *        calling op — accepted limitation, pinned by `test_withdraw_brickedByNonCompliantExternal`
+     *        (see design.md §Security).
+     *
+     *      Note: the trim deposits the **exact** `underlyingNeeded` rather than `balanceOf(this)`.
+     *      The latter would sweep any in-flight raw underlying held mid-call (notably the user's
+     *      just-arrived `assets` during `onDeposit`); see CVE-class regression pinned by
+     *      `test_deposit_notBrickedAfterSuperTokenDonation`.
      */
     function _rebalanceYieldAssets() internal override {
         int256 deficit = evaluateYieldAssetsDeficit();
@@ -224,17 +230,23 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             uint256 excessYield = uint256(-deficit);
             uint256 underlyingNeeded = excessYield / SCALING_FACTOR;
 
+            // Sub-atom surplus (`excessYield < SCALING_FACTOR`): nothing to trim — `_downgrade`
+            // would be a no-op (Superfluid rounds to a SF multiple) and `external.deposit(0, ...)`
+            // is an unnecessary call (and unsafe with some non-compliant 4626s).
+            if (underlyingNeeded == 0) return;
+
             // Best-effort: only trim if the external will accept the redeposit. Otherwise leave
             // the excess as above-target super-token slack in the reserve; the next rebalance
             // retries (idempotent — deficit < 0 reappears identically next call).
             if (EXTERNAL_VAULT.maxDeposit(address(this)) >= underlyingNeeded) {
-                _downgrade(excessYield);
-
-                uint256 underlyingToDeposit = UNDERLYING_ASSET.balanceOf(address(this));
-                if (underlyingToDeposit > 0) {
-                    UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), underlyingToDeposit);
-                    EXTERNAL_VAULT.deposit(underlyingToDeposit, address(this));
-                }
+                // Downgrade and redeposit the EXACT amount, not `balanceOf(this)`. The FM may
+                // be holding in-flight raw underlying (e.g. a user's just-arrived deposit), and
+                // sweeping it here would prematurely deposit it to external and then revert the
+                // outer call when the explicit `EXTERNAL_VAULT.deposit(toExternal, ...)` finds
+                // the FM empty.
+                _downgrade(underlyingNeeded * SCALING_FACTOR);
+                UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), underlyingNeeded);
+                EXTERNAL_VAULT.deposit(underlyingNeeded, address(this));
             }
         }
     }

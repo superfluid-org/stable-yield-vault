@@ -576,6 +576,65 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_vault.convertToAssets(sharesUnit), pxBefore, "share price rises for existing holders");
     }
 
+    /// @dev Regression for the deposit-brick griefing surface that existed before the 2026-06-02
+    ///      `_rebalanceYieldAssets()` trim fix. Pre-fix the trim branch read
+    ///      `UNDERLYING_ASSET.balanceOf(this)` and redeposited everything, sweeping the user's
+    ///      just-arrived `assets` (which live in the FM as raw underlying during `onDeposit`); the
+    ///      explicit `EXTERNAL_VAULT.deposit(toExternal, …)` later in `onDeposit` then reverted
+    ///      against the now-empty FM. The fix downgrades + redeposits **exactly** `underlyingNeeded`,
+    ///      leaving the user's in-flight raw untouched.
+    ///
+    ///      Trigger: any persistent reserve > target state at deposit time. Cheapest is a
+    ///      super-token donation directly to the FM (donor loses the donation, every subsequent
+    ///      `deposit` would brick — a low-cost DoS).
+    function test_deposit_notBrickedAfterSuperTokenDonation() public {
+        _deposit(ALICE, DEFAULT_DEPOSIT);
+
+        // Attacker donates super-token directly to the FM, bloating the reserve above target.
+        // 500 ether USDCx ≈ 500 USDC equivalent — many orders of magnitude above the ~bp-scale
+        // forward-solvency target, so `_rebalanceYieldAssets()` reads deficit < 0 going forward.
+        _dealUSDCx(address(_fundManager), 500 ether);
+
+        // Bob's deposit must succeed: the trim branch in onDeposit must not sweep Bob's raw
+        // underlying. Pre-fix this reverted with ERC20InsufficientBalance from the external's
+        // transferFrom on the empty FM.
+        uint256 bobShares = _deposit(BOB, DEFAULT_DEPOSIT);
+
+        assertGt(bobShares, 0, "Bob's deposit mints shares (no longer bricked)");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds 0 raw underlying after deposit (Inv. 7)");
+        // Bob's units track his nominal contributed principal (Inv. 6 / C.1).
+        assertEq(
+            _fundManager.YIELD_POOL().getUnits(BOB), DEFAULT_DEPOSIT, "Bob units == _toUnit(assets) regardless of NAV"
+        );
+    }
+
+    /// @dev Regression for the non-malicious trigger: operator drops the rate while external
+    ///      deposits are closed (the trim is skipped by the OQ #4 best-effort gate, leaving the
+    ///      reserve above the new target as super-token slack), then external reopens, then a user
+    ///      deposits. Pre-fix the deposit bricked on the now-reachable trim path. Post-fix the
+    ///      trim runs cleanly and the deposit succeeds.
+    function test_deposit_notBrickedAfterRateDropWithClosedExternal() public {
+        _deposit(ALICE, DEFAULT_DEPOSIT);
+
+        // Close external deposits, then operator drops the rate. `setStableYieldRate` runs
+        // `_rebalanceYieldAssets()`; trim branch sees `maxDeposit == 0` and skips, leaving the
+        // reserve as above-target super-token slack.
+        _external.setDepositCap(0);
+        vm.prank(FUND_OPERATOR);
+        _fundManager.setStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE / 10);
+
+        // External reopens. The above-target slack is now redeposit-able.
+        _external.setDepositCap(type(uint256).max);
+
+        // Bob's deposit must succeed: the trim, now reachable, must not sweep Bob's raw
+        // underlying. Pre-fix this reverted at `EXTERNAL_VAULT.deposit(toExternal, …)` against
+        // the swept FM.
+        uint256 bobShares = _deposit(BOB, DEFAULT_DEPOSIT);
+
+        assertGt(bobShares, 0, "Bob's deposit mints shares (no longer bricked)");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds 0 raw underlying after deposit (Inv. 7)");
+    }
+
     /// @dev First-deposit inflation resistance (the clamp's replacement under the floating share).
     ///      An attacker seeds the empty vault with 1 share then donates super-token to the FM to
     ///      inflate price-per-share, aiming to round the victim's deposit to 0 shares. The
