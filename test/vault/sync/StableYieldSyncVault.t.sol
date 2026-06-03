@@ -265,11 +265,6 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_vault.convertToAssets(1e18), pxBefore, "share price appreciates with external surplus");
     }
 
-    //     __                    ____  _____
-    //    / /   ____  __________/ __ \/ ___/
-    //   / /   / __ \/ ___/ ___/ /_/ /\__ \
-    //  / /___/ /_/ (__  |__  ) ____/___/ /
-    // /_____/\____/____/____/_/    /____/
 
     function test_loss_reflectsImmediatelyInSharePrice(uint256 amount, uint256 gain, uint256 loss) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
@@ -323,13 +318,6 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         uint256 bobValue = _vault.convertToAssets(_vault.balanceOf(BOB));
         assertApproxEqRel(bobValue, alicePayout, 0.01e18, "no inter-holder value transfer across impaired exit");
     }
-
-    //     __    _             _     ___ __
-    //    / /   (_)___ ___  __(_)___/ (_) /___  __
-    //   / /   / / __ `/ / / / / __  / / __/ / / /
-    //  / /___/ / /_/ / /_/ / / /_/ / / /_/ /_/ /
-    // /_____/_/\__, /\__,_/_/\__,_/_/\__/\__, /
-    //            /_/                     /____/
 
     function test_externalIlliquidity_withdrawReverts_maxReflectsIt(uint256 amount, uint256 cap) public {
         amount = bound(amount, 4e6, ONE_BILLION * 1e6);
@@ -407,7 +395,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertLt(_vault.convertToAssets(1e18), px0, "share price ticked below par (honest impairment)");
     }
 
-    /// @dev [Revision 2026-05-27] Terminal external impairment ⇒ FULL PAUSE. When
+    /// @dev Terminal external impairment ⇒ FULL PAUSE. When
     ///      `EXTERNAL_VAULT.maxWithdraw(FM) == 0` the deployed principal is unrecoverable through the
     ///      external vault, so the vault zeroes all four `max*` and OZ reverts every entrypoint: we
     ///      never route a user into a vault they cannot exit, and existing holders keep receiving the
@@ -549,13 +537,6 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_fundManager.YIELD_POOL().getUnits(BOB), 0, "units followed the transfer");
     }
 
-    //     ____  _            __     ______
-    //    / __ \(_)   _____  / /_   /_  __/__  _____/ /______
-    //   / /_/ / / | / / _ \/ __/    / / / _ \/ ___/ __/ ___/
-    //  / ____/ /| |/ /  __/ /_     / / /  __(__  ) /_(__  )
-    // /_/   /_/ |___/\___/\__/    /_/  \___/____/\__/____/
-    //
-    // Phase-4 pivot-specific risk characterisations + custody hazard.
 
     /// @dev With the clamp gone a super-token donation to the FM is no longer absorbed: it
     ///      raises NAV and the share price for EXISTING holders. This is an irrational gift, not
@@ -693,17 +674,6 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
         assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw not bricked by external maxDeposit == 0");
     }
-
-    //     ____  ____    __  ________
-    //    / __ \/ __ \  / / / / ____/
-    //   / / / / / / / /_/ /___ \
-    //  / /_/ / /_/ / __  /___/ /
-    //  \____/\___\_\/ /_//____/
-    //
-    // OQ #5 (RESOLVED 2026-05-29): `request <= max* => never reverts` holds end-to-end under
-    // loss with a compliant external. Implemented via shares-proportional reserve sourcing in
-    // `SyncFundManager.onWithdraw` (R-shares). These pins replace the previously RED
-    // `test_maxRedeem_neverBricks` from openQuestions.t.sol (deleted).
 
     /// @dev F.2 under loss: for any holder and any `s <= maxRedeem(holder)`, `redeem` succeeds
     ///      and pays `previewRedeem(s)`. Loss framing — `simulateLoss` for the realistic
