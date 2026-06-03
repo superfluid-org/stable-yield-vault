@@ -14,11 +14,11 @@ echidna-long:
 		--test-limit 1000000 --seq-len 100
 
 echidna-sync-smoke:
-	$(ECHIDNA_ENV) echidna $(ECHIDNA_SYNC_TARGET) --contract $(ECHIDNA_SYNC_CONTRACT) --config echidna.yaml
+	$(ECHIDNA_ENV) echidna $(ECHIDNA_SYNC_TARGET) --contract $(ECHIDNA_SYNC_CONTRACT) --config echidna.sync.yaml
 
 echidna-sync-long:
-	$(ECHIDNA_ENV) echidna $(ECHIDNA_SYNC_TARGET) --contract $(ECHIDNA_SYNC_CONTRACT) --config echidna.yaml \
+	$(ECHIDNA_ENV) echidna $(ECHIDNA_SYNC_TARGET) --contract $(ECHIDNA_SYNC_CONTRACT) --config echidna.sync.yaml \
 		--test-limit 1000000 --seq-len 100
 
 echidna-clean:
-	rm -rf echidna-corpus echidna-coverage crytic-export
+	rm -rf echidna-corpus echidna-corpus-sync echidna-coverage crytic-export
