@@ -32,7 +32,7 @@ yieldAsset.balanceOf(vault)       == 0   (at all times)
 
 The vault is a pure share/accounting face. On deposit it pulls underlying from the caller straight to the FM; it never custodies underlying or super-token.
 
-**Where.** `StableYieldSyncVault._deposit` forwards to the FM (`StableYieldSyncVault.sol:185`); `_withdraw` hands off to `onWithdraw` which pays the receiver directly (`StableYieldSyncVault.sol:213`). The FM holds the unlimited underlying allowance the base constructor grants the vault (`FundManagerBase.sol:134`) but the vault never pulls into itself.
+**Where.** `StableYieldSyncVault._deposit` forwards to the FM (`StableYieldSyncVault.sol:238`); `_withdraw` hands off to `onWithdraw` which pays the receiver directly (`StableYieldSyncVault.sol:253-269`). The FM holds the unlimited underlying allowance the base constructor grants the vault (`FundManagerBase.sol:134`) but the vault never pulls into itself.
 
 **Holds when.** Hard, always.
 
@@ -48,7 +48,7 @@ underlyingAsset.balanceOf(FM) == 0   (between calls)
 
 Principal never rests in the FM as raw underlying across calls. It is either deposited into `EXTERNAL_VAULT` or `_upgrade`d into the super-token as part of the yield reserve.
 
-**Where.** `onDeposit` deploys the remainder to external (`SyncFundManager.sol:106-110`); `_rebalanceYieldAssets` `deficit < 0` branch downgrades exactly `underlyingNeeded` super-token and redeposits **exactly** that amount. `onWithdraw` downgrades `fromReserve` and transfers it to the receiver (`SyncFundManager.sol:160-162`).
+**Where.** `onDeposit` deploys the remainder to external (`SyncFundManager.sol:106-110`); `_rebalanceYieldAssets` `deficit < 0` branch downgrades exactly `underlyingNeeded` super-token and redeposits **exactly** that amount. `onWithdraw` downgrades `fromYieldAssets` and transfers it to the receiver (`SyncFundManager.sol:144-155`).
 
 **Holds when.** Hard, at rest (between external calls). Transiently nonzero mid-call.
 
@@ -84,7 +84,7 @@ Strictly `<` with the virtual-shares offset. The total claim priced at NAV never
 
 **State.** A deposit only changes the *form* of the FM's assets (incoming underlying → external-vault shares + a yield reserve slice), both counted in NAV. Price-per-share immediately before and after a deposit is unchanged (modulo virtual-shares rounding in the vault's favour).
 
-**Where.** `onDeposit`: units granted (`SyncFundManager.sol:87-91`), pre-fund slice upgraded (`SyncFundManager.sol:97-103`), remainder deployed to external (`SyncFundManager.sol:106-110`). Mint happens in the vault before the hook (`StableYieldSyncVault.sol:187-189`).
+**Where.** `onDeposit`: units granted (`SyncFundManager.sol:87-91`), pre-fund slice upgraded (`SyncFundManager.sol:97-103`), remainder deployed to external (`SyncFundManager.sol:106-110`). Mint happens in the vault before the hook (`StableYieldSyncVault.sol:240`, ahead of the `onDeposit` call at `:242`).
 
 **Holds when.** Hard for the entry transition.
 
@@ -124,7 +124,7 @@ receiver underlying balance increases by exactly redeemingAssets
 
 **State.** On deposit a holder's units increase by `_toUnit(assets) = assets / RAW_PER_UNIT` — proportional to **underlying contributed**, not to shares minted. On a shareholder↔shareholder transfer, units move proportional to the *shares* transferred relative to the sender's share balance. On withdraw, units decrease proportional to *shares* burned.
 
-**Where.** Grant: `onDeposit` (`SyncFundManager.sol:87-91`). Transfer: `_update` → `onShareTransfer`, `delta = ceil(senderUnits · shares / vault.balanceOf(sender))` (`StableYieldSyncVault.sol:222-227`, `FundManagerBase.sol:236-244`). Withdraw: proportional decrease `ceil(holderUnits · shares / totalSharesOwned)` (`SyncFundManager.sol:130-138`).
+**Where.** Grant: `onDeposit` (`SyncFundManager.sol:87-91`). Transfer: `_update` → `onShareTransfer`, `delta = ceil(senderUnits · shares / vault.balanceOf(sender))` (`StableYieldSyncVault.sol:275-279`, `FundManagerBase.sol:236-244`). Withdraw: proportional decrease `ceil(holderUnits · shares / totalSharesOwned)` (`SyncFundManager.sol:130-138`).
 
 **Holds when.** Hard, per-op (deposit grants exactly `_toUnit(assets)`; transfer moves `ceil(senderUnits · shares / senderShares)`; withdraw decreases `ceil(holderUnits · shares / totalSharesOwned)` — full exit zeros).
 

@@ -51,7 +51,7 @@ sequenceDiagram
     Note right of V: shares ~ assets (NAV-neutral entry)
     V->>FM: onDeposit(receiver, assets)
     FM->>POOL: increaseMemberUnits(receiver, toUnit(assets))
-    FM->>FM: rebalanceYieldAssets [deficit-only pull from external; surplus stays compounding; deeper into the position under impairment]
+    FM->>FM: rebalanceYieldAssets [deficit-only pull from external — surplus stays compounding, deeper under impairment]
     FM->>FM: toUpgrade = min(ceil(deficit / SCALING_FACTOR) + 1, assets)
     FM->>FM: upgrade(toUpgrade) [pre-fund residual from deposit]
     FM->>E: deposit(assets - toUpgrade, FM) [remainder = principal]
@@ -112,17 +112,19 @@ sequenceDiagram
     d. EXTERNAL_VAULT.deposit(assets − toUpgrade, FM)
        — the remainder is deployed as principal. NOTHING is left at rest in the
          FM as raw underlying (custody hazard invariant, Inv. 7).
-    e. _recalibrateFlow()  (guarded — does not revert in the terminal-impairment
-       limit where evaluateYieldAssetsDeficit() > 0 even after steps b–d)
+    e. _recalibrateFlow()  (unconditional — there is no in-hook guard)
          flowRate = _flowRatePerUnit * POOL.totalUnits   (yield + 1% fee pool)
        → the stream starts/raises at deposit time, including the first deposit.
        The uncapped rebalance in step b together with the residual pre-fund in
        step c clears any pre-existing global deficit in every non-terminal
        regime. The only state where the post-step-d deficit can still be > 0
-       is terminal impairment (EXTERNAL_VAULT.maxWithdraw(FM) == 0 AND the
-       incoming `assets` cannot cover the residual); the guard keeps the
-       deposit non-reverting in that limit and the next operator-called
-       `ensureYieldFlowDuration()` restarts the stream.
+       is terminal impairment (EXTERNAL_VAULT.maxWithdraw(FM) == 0); the
+       recalibrate is NOT guarded against that — instead the vault-level pause
+       (`_isExternallyPaused()` → maxDeposit == 0) makes `onDeposit` unreachable
+       while impaired, so the drained-reserve recalibrate is never met here. The
+       next operator-called `ensureYieldFlowDuration()` restarts the stream once
+       the external position unfreezes. (The earlier "guarded recalibrate" was
+       never implemented and was dropped — see design.md §Revision 2026-05-27.)
 ```
 
 ## Why the stream starts now (and is NAV-neutral)
@@ -135,7 +137,9 @@ sequenceDiagram
   into the position under impairment); the residual incoming-deposit pre-fund
   covers what the external position cannot. In every non-terminal regime the
   post-step deficit is ≤ 0 and `_recalibrateFlow()` brings the stream live in
-  this block.
+  this block. The recalibrate is unconditional; terminal impairment is kept out
+  of this hook by the vault-level pause (it makes `maxDeposit == 0`), not by a
+  guard inside `_recalibrateFlow()`.
 - The deposit only changes the *form* of the FM's assets: `assets` of
   underlying becomes `(assets − toUpgrade)` external principal + `toUpgrade`
   super-token reserve, **both counted in NAV**. So `totalAssets` rises by
@@ -155,8 +159,9 @@ sequenceDiagram
   **not** revert, unlike the async ERC-7540 sibling).
 - `maxDeposit` / `maxMint` are additionally capped by the external vault's own
   deposit limit (with the FM as holder).
-- A positive `_decimalsOffset()` override (**proposed**) supplies OZ virtual
-  shares to resist the first-deposit inflation attack (see `design.md §Security`).
+- A positive `_decimalsOffset()` override (hardcoded `12`, `StableYieldSyncVault.sol`)
+  supplies OZ virtual shares to resist the first-deposit inflation attack (see
+  `design.md §Security`).
 - Shares are transferable ERC-20. The vault's `_update` hook calls
   `FundManager.onShareTransfer(from, to, value)` on shareholder-to-shareholder
   transfers (skipping mint/burn legs); FM moves a proportional slice of GDA
@@ -177,7 +182,14 @@ sequenceDiagram
    `_rebalanceYieldAssets()` always clears the global deficit from the
    external position (eating deeper into the external position if the surplus
    is exhausted, surfacing the loss directly in NAV). The only stall state is
-   terminal impairment (`maxWithdraw(FM) == 0`); the `_recalibrateFlow()` guard
-   prevents the deposit from reverting in that limit.
-5. **Units track shareholding.** A holder's GDA units are proportional to their
-   share balance.
+   terminal impairment (`maxWithdraw(FM) == 0`); the unconditional
+   `_recalibrateFlow()` is never reached there because the vault-level pause
+   (`_isExternallyPaused()`) forces `maxDeposit == 0`, so `onDeposit` cannot run
+   while impaired (there is no in-hook recalibrate guard — design.md §Revision
+   2026-05-27).
+5. **Units track contributed principal (not shares).** A holder's GDA units
+   increase by `_toUnit(assets) = assets / RAW_PER_UNIT` — proportional to
+   underlying contributed, not to shares minted. Under the floating share
+   `units / shares` is intentionally NOT a global constant (design.md Invariant
+   6 / invariants.md C.1): the streamed component tracks nominal principal, while
+   the residual `external − promised` is delivered as share appreciation.
