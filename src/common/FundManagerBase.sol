@@ -5,6 +5,7 @@ import { IFundManagerBase } from "src/interfaces/common/IFundManagerBase.sol";
 
 import { AccessControl } from "@openzeppelin-v5/contracts/access/AccessControl.sol";
 import { IERC20 } from "@openzeppelin-v5/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin-v5/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "@openzeppelin-v5/contracts/utils/ReentrancyGuard.sol";
 import {
     PoolConfig,
@@ -28,6 +29,7 @@ import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/in
 abstract contract FundManagerBase is IFundManagerBase, AccessControl, ReentrancyGuard {
 
     using Math for uint256;
+    using SafeERC20 for IERC20;
     using SuperTokenV1Library for ISuperToken;
 
     //      ____                          __        __    __        _____ __        __
@@ -134,7 +136,7 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
         TREASURY = _treasury;
 
         // Grant underlying asset unlimited approval to the vault
-        UNDERLYING_ASSET.approve(msg.sender, type(uint256).max);
+        UNDERLYING_ASSET.forceApprove(msg.sender, type(uint256).max);
 
         // Verify super-token wraps the correct underlying
         if (ISuperToken(_yieldAsset).getUnderlyingToken() != _asset) revert ASSET_MISMATCH();
@@ -294,7 +296,7 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     //  /___/_/ /_/\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     function _upgrade(uint256 underlyingAmount) internal {
-        UNDERLYING_ASSET.approve(address(YIELD_ASSET), underlyingAmount);
+        UNDERLYING_ASSET.forceApprove(address(YIELD_ASSET), underlyingAmount);
         YIELD_ASSET.upgrade(underlyingAmount * SCALING_FACTOR);
     }
 
