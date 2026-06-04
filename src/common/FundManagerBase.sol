@@ -182,7 +182,7 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     //  /_____/_/|_|\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /// @inheritdoc IFundManagerBase
-    function ensureYieldFlowDuration() external onlyRole(FUND_OPERATOR_ROLE) {
+    function ensureYieldFlowDuration() external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
         // Rebalance underlying vs. yield assets
         _rebalanceYieldAssets();
 
@@ -194,7 +194,7 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     }
 
     /// @inheritdoc IFundManagerBase
-    function setStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) {
+    function setStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
         /// FIXME : enforce minimum era duration
 
         uint256 oldRate = stableYieldRate;
