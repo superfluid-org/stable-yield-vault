@@ -1,12 +1,56 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; **revised 2026-06-04 — (Finding 1) `onWithdraw` realizes any resting raw underlying (donation) before the external vault, closing a withdraw-DoS + value-stranding F.2 break; (Finding 2) `onShareTransfer` skips rather than reverts on zero units, so `Ceil`-zeroed dust shares stay transferable; (Finding 3 + share-burn lead) `_isExternallyPaused()` gates on `totalSupply() > 0` instead of `EXTERNAL_VAULT.balanceOf(FM) > 0`, so a dust external-share donation can't false-pause the bootstrap and a total-loss share-burn pauses consistently**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; **revised 2026-06-04 — (Finding 1) `onWithdraw` realizes any resting raw underlying (donation) before the external vault, closing a withdraw-DoS + value-stranding F.2 break; (Finding 2) `onShareTransfer` skips rather than reverts on zero units, so `Ceil`-zeroed dust shares stay transferable; (Finding 3 + share-burn lead) `_isExternallyPaused()` gates on `totalSupply() > 0` instead of `EXTERNAL_VAULT.balanceOf(FM) > 0`, so a dust external-share donation can't false-pause the bootstrap and a total-loss share-burn pauses consistently; (Lead 4) constructor + both operator setters enforce `rate × duration ≤ YEAR × BP_DENOMINATOR` — the pre-fund can never exceed the streamed notional, which also retroactively closes the Finding 3 false-pause residual**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
 **stable** yield is streamed to depositors via the same Superfluid GDA engine the
 async vault uses. The external vault replaces the async vault's manual off-chain
 "working assets" leg.
+
+---
+
+## ⚠️ Revision 2026-06-04 — `rate × duration` sanity bound (audit Lead 4; closes the Finding 3 residual)
+
+The stream is **pre-funded from each deposit**: a deposit of `assets` must set aside
+`assets × rate/BP × duration/YEAR` to guarantee the promised flow for the horizon.
+If `rate × duration > YEAR × BP_DENOMINATOR` that reserve requirement exceeds the
+deposit itself (`need > assets`), so the pre-fund clamps at `assets` and the
+guarantee is silently under-funded — and *every* deposit is then fully consumed by
+the pre-fund, leaving nothing for the external position. There was **no on-chain
+bound** preventing the operator/admin from configuring this.
+
+**Fix.** A parameter-sanity guard, enforced at all three points where either factor
+changes (constructor + `setStableYieldRate` + `setGuaranteedFlowDuration`):
+
+```solidity
+if (rate * duration > YEAR * _BP_DENOMINATOR) revert INVALID_YIELD_DURATION_COMBINATION();
+```
+
+This is just `(rate/BP) × (duration/YEAR) ≤ 1` cross-multiplied — i.e. **the
+pre-funded yield over the guarantee window never exceeds 100% of the streamed
+notional**, so a single deposit can always afford to pre-fund its own promised
+horizon. It is a *funding-feasibility* bound, not an economic-sustainability one
+(it does not assert the external actually *earns* the rate — over/under-performance
+is still handled by the floating share). The bound is extremely loose at realistic
+horizons (≈5,214% APR ceiling at a 7-day horizon; exactly 100% APR at a 1-year
+horizon) — it only ever rejects absurd configs.
+
+Placed in the **shared `FundManagerBase`** (applies to both families) because the
+"don't promise to pre-fund more than the deposit" sanity holds regardless of family.
+For async this converts the asset-dependent runtime revert (`INSUFFICIENT_UNUTILIZED_ASSETS`)
+into a config-time one for the over-long-horizon case; the in-bound runtime path is
+still covered by `test_setStableYieldRate_revertsIfInvariantWouldBeViolated`.
+
+**Closes the Finding 3 residual.** The one accepted tradeoff of the Finding 3 fix
+(a false-pause when `supply > 0` while the external position is genuinely ~0) was
+*only* reachable in this exact `rate × duration > YEAR × BP` regime — where every
+deposit is fully consumed by the pre-fund and nothing reaches the external. The
+guard makes that regime unreachable, so the residual is now eliminated, not merely
+accepted. Pinned by `test_constructor_revertsOnUnsustainableRateDuration`,
+`test_setStableYieldRate_revertsOnUnsustainableCombination`,
+`test_setGuaranteedFlowDuration_revertsOnUnsustainableCombination` (sync) and
+`test_setGuaranteedFlowDuration_revertsOnUnsustainableCombination` (async).
 
 ---
 
@@ -130,12 +174,14 @@ function _isExternallyPaused() internal view returns (bool) {
 - **Both total-loss variants** (PPS→0 with shares kept, or shares burned) now pause
   consistently (share-burn lead closed).
 
-**Tradeoff.** `supply > 0 && maxWithdraw(FM) == 0` with the external position
-*genuinely* ~0 (all NAV in the reserve) would now false-pause. Under any sane
+**Tradeoff (now closed).** `supply > 0 && maxWithdraw(FM) == 0` with the external
+position *genuinely* ~0 (all NAV in the reserve) would false-pause. Under any sane
 config this is unreachable — deposits route ~everything to the external (the
-pre-fund is bp-scale) — so it occurs only under the pathological `rate ×
-guaranteedFlowDuration` misconfig that already bricks deposits (see §Security).
-Pinned by `test_bootstrap_notBrickedByDustExternalShareDonation`,
+pre-fund is bp-scale). The *only* way to reach external≈0-with-supply was the
+`rate × guaranteedFlowDuration > YEAR × BP` regime, where every deposit is fully
+consumed by the pre-fund. The Lead 4 guard (Revision 2026-06-04 — `rate × duration`
+sanity bound) makes that regime unreachable, so this residual is **eliminated, not
+merely accepted**. Pinned by `test_bootstrap_notBrickedByDustExternalShareDonation`,
 `test_bootstrap_notPausedWhenEmpty`, `test_terminalImpairment_viaTotalLoss`.
 
 ---
@@ -960,14 +1006,18 @@ stalling.
   monitoring should track `convertToAssets(1 share)` trending below the entry
   price rather than `getTotalFlowRate() == 0`; the only "stream stopped" state is
   terminal external failure (`maxWithdraw(FM) == 0`).
-- **Pre-funding can exceed the deposit (pathological config).** If
-  `rate × guaranteedFlowDuration / YEAR` approaches 1, a deposit's own
-  incremental reserve requirement can approach/exceed `assets`. The pre-fund
-  is capped by `assets`; the residual is sourced by the uncapped
-  `_rebalanceYieldAssets()` (from the external surplus first, then deeper into
-  the external position if the surplus is exhausted — the loss reflects directly
-  in NAV). The operator must keep `stableYieldRate × guaranteedFlowDuration`
-  sane (no on-chain cap — same trust model as async).
+- **Pre-funding can exceed the deposit (pathological config) — now bounded
+  on-chain (Lead 4, Revision 2026-06-04).** A deposit's incremental reserve
+  requirement is `assets × rate/BP × duration/YEAR`; as that fraction approaches
+  1 the pre-fund (capped at `assets`) can no longer cover it. The constructor and
+  both operator setters now enforce `rate × duration ≤ YEAR × BP_DENOMINATOR`
+  (`INVALID_YIELD_DURATION_COMBINATION`), so the fraction is bounded at ≤ 1 — the
+  pre-fund can always be met from the deposit itself, and the silent-under-funding
+  / external-starved regime is unreachable. For `rate × duration` strictly below
+  the bound, any residual is still sourced by the uncapped `_rebalanceYieldAssets()`
+  (external surplus first, then deeper into the position if exhausted — the loss
+  reflects directly in NAV). The bound is funding-feasibility only; it does not
+  assert the external earns the rate (the floating share handles that).
 - **A new deposit can subsidise a pre-existing reserve backlog.** The pre-fund
   + uncapped `_rebalanceYieldAssets()` clears the *global*
   `evaluateYieldAssetsDeficit()` (the GDA buffer requirement is global — a
