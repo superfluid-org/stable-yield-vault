@@ -999,6 +999,28 @@ stalling.
   on every user activity, OZ virtual shares, rounding favours the vault,
   `nonReentrant`. The operator must call `ensureYieldFlowDuration()` between
   user activity to keep the share-price drift bounded.
+- **NAV is a live spot read of the external vault — deployment requirement (audit
+  Lead 9).** `totalManagedAssets()` reads `EXTERNAL_VAULT.maxWithdraw(FM)` live,
+  with no TWAP/clamp, so the sync vault's share price tracks the external's own
+  valuation within a single block. If the external's share price is manipulable
+  intra-block, an attacker can sandwich a victim's deposit/withdraw (push the
+  external NAV down → victim mints extra shares / withdraws short → restore it).
+  This is inherent to the floating share — the `min(trackedPrincipal, …)` clamp
+  that would have dampened it was deliberately removed (2026-05-26), and adding a
+  TWAP/clamp would reintroduce exactly that. There is therefore **no code fix**;
+  instead it is a hard **deployment requirement**:
+
+  > The external ERC-4626 **must have a monotonic, non-manipulable share price** —
+  > interest-accrual priced (Aave aTokens, Morpho, Compound-style), **not** spot-/
+  > AMM-/oracle-priced and **not** donation-inflatable in `totalAssets()`. Pairing
+  > the vault with a spot-priced external re-opens a NAV-manipulation sandwich on
+  > every deposit/withdraw.
+
+  Exploitability is entirely a function of the (out-of-scope) external: with a
+  monotonic accrual-priced external it is unreachable; with a spot-priced one it is
+  live. The per-op rebalance, OZ virtual shares, vault-favourable rounding, and
+  `nonReentrant` reduce but do not eliminate it for a manipulable external — hence
+  the requirement, not a mitigation.
 - **Impairment is signalled by share price, not by liveness.** With the
   uncapped self-funded replenisher, external under-earn does *not* stall the
   stream — it shows up as a downward move of the (unclamped) NAV / share price as
