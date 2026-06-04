@@ -1,6 +1,6 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; **revised 2026-06-04 — `onWithdraw` realizes any resting raw underlying (donation) before the external vault; closes audit Finding 1 (raw-underlying donation = withdraw-DoS + value stranding, F.2 break)**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; **revised 2026-06-04 — (Finding 1) `onWithdraw` realizes any resting raw underlying (donation) before the external vault, closing a withdraw-DoS + value-stranding F.2 break; (Finding 2) `onShareTransfer` skips rather than reverts on zero units, so `Ceil`-zeroed dust shares stay transferable**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
@@ -64,6 +64,29 @@ rests. The 2026-06-02 exact-`underlyingNeeded` rebalance is what keeps a resting
 raw balance safe: no path sweeps `balanceOf(FM)`, so the donation is never
 prematurely deployed or double-counted. Pinned by
 `test_redeem_notBrickedByRawUnderlyingDonation` (`StableYieldSyncVault.t.sol`).
+
+---
+
+## ⚠️ Revision 2026-06-04 — `onShareTransfer` skips (not reverts) on zero units (audit Finding 2)
+
+The shared `FundManagerBase.onShareTransfer` reverted with `BAD_SHARE_TRANSFER`
+when `senderUnits == 0`, but the `Ceil`-rounded unit decrease in
+`SyncFundManager.onWithdraw` (and the symmetric `AsyncFundManager.onRequestRedeem`)
+can zero a holder's GDA units while a **dust share residual** remains: a near-full
+redeem rounds `delta = ceil(holderUnits · shares / totalShares)` up to the holder's
+entire unit balance, leaving shares with zero units. Any later `transfer` of that
+residual then hit the revert — the dust shares were permanently **non-transferable**
+(still redeemable, so no fund loss; a dust transfer-DoS).
+
+**Fix.** `onShareTransfer` now **skips** (early-`return`) on `senderUnits == 0`
+instead of reverting — symmetric with the zero-units skip already in
+`onWithdraw`/`onRequestRedeem`. With zero units there is nothing to move (`delta`
+would be 0 anyway), so the skip is a pure no-op that only removes the spurious
+revert. The `BAD_SHARE_TRANSFER` error was removed from `IFundManagerBase` (no
+longer thrown). Pinned by `test_residualSharesTransferableAfterUnitZeroingRedeem`
+and `test_onShareTransfer_skipsOnZeroUnits`. (The fix lands in the shared base, so
+the async family — where a sub-unit holder is otherwise blocked from both
+`requestRedeem` *and* transfer — benefits identically.)
 
 ---
 

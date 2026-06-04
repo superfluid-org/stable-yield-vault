@@ -128,7 +128,7 @@ All requests in a given epoch settle at the same `assetsPerShare`, frozen in `_s
 
 ### C.1 — Share transfers re-balance GDA pool units
 
-Shares are transferable. The vault's `_update` override calls `FundManager.onShareTransfer(from, to, value)` on any shareholder-to-shareholder transfer (mint, burn, and the vault-custody legs of `requestRedeem`/claim are excluded). The FM moves a proportional slice of the sender's GDA pool units to the receiver (`delta = senderUnits * shares / vault.balanceOf(sender)`, rounded up) so the yield stream follows the shares. A transfer from an address with zero pool units reverts with `BAD_SHARE_TRANSFER`.
+Shares are transferable. The vault's `_update` override calls `FundManager.onShareTransfer(from, to, value)` on any shareholder-to-shareholder transfer (mint, burn, and the vault-custody legs of `requestRedeem`/claim are excluded). The FM moves a proportional slice of the sender's GDA pool units to the receiver (`delta = senderUnits * shares / vault.balanceOf(sender)`, rounded up) so the yield stream follows the shares. A transfer from an address with zero pool units is a **no-op** for the units (the `onShareTransfer` hook early-returns) so the shares still move — this keeps a dust position whose units were `Ceil`-zeroed by a near-full redeem transferable (changed 2026-06-04, sync-vault audit Finding 2; the hook lives in the shared `FundManagerBase`).
 
 **Where.** `StableYieldAsyncVault.sol:464–471` (vault hook), `AsyncFundManager.sol:277–285` (FM unit transfer).
 

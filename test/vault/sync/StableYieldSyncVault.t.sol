@@ -536,6 +536,38 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_fundManager.YIELD_POOL().getUnits(BOB), 0, "units followed the transfer");
     }
 
+    /// @dev Regression for audit Finding 2: the `Ceil`-rounded unit decrease in `onWithdraw` can
+    ///      zero a holder's GDA units while leaving a dust share residual (a near-full redeem
+    ///      rounds `delta` up to the holder's entire unit balance). Before the fix, the shared
+    ///      `onShareTransfer` reverted with `BAD_SHARE_TRANSFER` on the now-zero-units sender,
+    ///      making that residual permanently non-transferable (still redeemable — a dust transfer
+    ///      DoS, no fund loss). The fix skips the (no-op) unit move on zero units, so the residual
+    ///      stays transferable.
+    function test_residualSharesTransferableAfterUnitZeroingRedeem() public {
+        // 1 USDC → 1e6 units, 1e18 shares (offset 12). Smallest position where a near-full redeem
+        // Ceil-rounds the unit decrease up to the full 1e6, zeroing units ahead of the last shares.
+        _deposit(ALICE, 1e6);
+        assertEq(_fundManager.YIELD_POOL().getUnits(ALICE), 1e6, "precondition: ALICE has units");
+
+        // Redeem the maximum (NAV sits a hair below the 1e6 deposit due to the GDA buffer lockup,
+        // so maxRedeem < total shares — leaving a residual). delta = ceil(1e6 * maxR / 1e18) = 1e6.
+        uint256 maxR = _vault.maxRedeem(ALICE);
+        vm.prank(ALICE);
+        _vault.redeem(maxR, ALICE, ALICE);
+
+        uint256 residual = _vault.balanceOf(ALICE);
+        assertGt(residual, 0, "dust share residual remains");
+        assertEq(_fundManager.YIELD_POOL().getUnits(ALICE), 0, "units Ceil-zeroed ahead of the residual");
+
+        // The residual must remain transferable (pre-fix: reverts BAD_SHARE_TRANSFER).
+        vm.prank(ALICE);
+        _vault.transfer(BOB, residual);
+
+        assertEq(_vault.balanceOf(ALICE), 0, "residual moved out");
+        assertEq(_vault.balanceOf(BOB), residual, "BOB received the residual shares");
+        assertEq(_fundManager.YIELD_POOL().getUnits(BOB), 0, "no units moved (sender had none)");
+    }
+
     /// @dev With the clamp gone a super-token donation to the FM is no longer absorbed: it
     ///      raises NAV and the share price for EXISTING holders. This is an irrational gift, not
     ///      an attack — the donor mints no shares and cannot extract the donation. (The genuine

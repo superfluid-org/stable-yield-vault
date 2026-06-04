@@ -157,7 +157,6 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
         }
 
         uint256 fromExternal = redeemingAssets - fromYieldAssets;
-        
         // Spend the underlying donation first, capped at the remaining external slice.
         if (fromDonation > fromExternal) fromDonation = fromExternal;
         fromExternal -= fromDonation;

@@ -79,16 +79,20 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         _fundManager.onWithdraw(ALICE, 0, 0, 0, ALICE, 1e6);
     }
 
-    /// @dev The shared `onShareTransfer` reverts when the sender holds zero pool units
-    ///      (`FundManagerBase.sol:238`). With 6-dec USDC every funded holder has units, so this is
-    ///      only reachable by a direct vault-role call from a unit-less sender.
-    function test_onShareTransfer_revertsOnZeroUnits() public {
+    /// @dev The shared `onShareTransfer` skips (no-op) when the sender holds zero pool units rather
+    ///      than reverting (audit Finding 2 fix). A zero-units sender has nothing to move (`delta`
+    ///      would be 0), and reverting would brick transfers of a dust share position whose units
+    ///      were `Ceil`-zeroed by a near-full redeem. The end-to-end reachable path is pinned by
+    ///      `test_residualSharesTransferableAfterUnitZeroingRedeem` in the vault suite.
+    function test_onShareTransfer_skipsOnZeroUnits() public {
         // ALICE never deposited → zero units.
         assertEq(_fundManager.YIELD_POOL().getUnits(ALICE), 0, "precondition: ALICE has no units");
 
         vm.prank(address(_vault));
-        vm.expectRevert(IFundManagerBase.BAD_SHARE_TRANSFER.selector);
-        _fundManager.onShareTransfer(ALICE, BOB, 1);
+        _fundManager.onShareTransfer(ALICE, BOB, 1); // must not revert
+
+        assertEq(_fundManager.YIELD_POOL().getUnits(ALICE), 0, "sender units unchanged");
+        assertEq(_fundManager.YIELD_POOL().getUnits(BOB), 0, "receiver gets no units (sender had none)");
     }
 
     //    _    ___                 ______                 __  _

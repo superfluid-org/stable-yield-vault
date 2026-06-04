@@ -235,7 +235,8 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     /// @inheritdoc IFundManagerBase
     function onShareTransfer(address sender, address receiver, uint256 shares) external onlyRole(VAULT_ROLE) {
         uint128 senderUnits = YIELD_POOL.getUnits(sender);
-        if (senderUnits == 0) revert BAD_SHARE_TRANSFER();
+        // A dust position can hold shares but zero units due to the units/shares conversion rounding
+        if (senderUnits == 0) return;
 
         uint128 delta = uint128(uint256(senderUnits).mulDiv(shares, VAULT.balanceOf(sender), Math.Rounding.Ceil));
 

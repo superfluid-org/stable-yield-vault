@@ -41,11 +41,6 @@ interface IFundManagerBase {
     // /_____/_/  /_/   \____/_/  /____/
 
     /**
-     * @notice Thrown when the vault's share transfer hook is called with incoherent share arguments.
-     */
-    error BAD_SHARE_TRANSFER();
-
-    /**
      * @notice Thrown when a duration is set below MIN_GUARANTEED_FLOW_DURATION.
      */
     error DURATION_BELOW_FLOOR();
