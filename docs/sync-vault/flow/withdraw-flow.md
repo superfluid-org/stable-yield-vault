@@ -207,11 +207,12 @@ sourcing leaves for the reduced unit count.
   impairment** (it is downgraded super-token, not external-vault shares); only the
   external remainder carries the external loss. F.2 holds end-to-end here (R-shares
   keeps `fromExternal ≤ ext.maxWithdraw(FM)`).
-- **Terminal impairment** (`EXTERNAL_VAULT.maxWithdraw(FM) == 0` while the FM
-  holds a position). The vault is **fully paused** (`_isExternallyPaused()` forces
-  all four `max*` to 0), so a request can't land here; the Superfluid stream keeps
+- **Terminal impairment** (`EXTERNAL_VAULT.maxWithdraw(FM) == 0` while shares are
+  outstanding). The vault is **fully paused** (`_isExternallyPaused()` forces all
+  four `max*` to 0), so a request can't land here; the Superfluid stream keeps
   paying existing holders from the reserve until it is naturally liquidated. See
-  `design.md §Revision 2026-05-27` and invariants.md D.2.
+  `design.md §Revision 2026-05-27` (gate revised 2026-06-04 to key on
+  `totalSupply()`) and invariants.md D.2.
 
 ## ERC-4626 compliance
 

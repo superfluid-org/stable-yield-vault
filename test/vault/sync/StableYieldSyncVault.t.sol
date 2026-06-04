@@ -467,17 +467,47 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
     /// @dev The pause must NOT trigger on the empty-vault bootstrap. A fresh FM holds no external
     ///      position, so `maxExternalVaultWithdraw() == 0` even though it is perfectly healthy —
-    ///      the position gate in `_isExternallyPaused()` keeps the first deposit from being bricked.
+    ///      the `totalSupply() == 0` gate in `_isExternallyPaused()` keeps the first deposit from
+    ///      being bricked (there are no depositors to protect).
     function test_bootstrap_notPausedWhenEmpty(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
 
         // Empty vault: external maxWithdraw is 0 (nothing deployed) but this is NOT impairment.
         assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "empty: external maxWithdraw == 0");
+        assertEq(_vault.totalSupply(), 0, "bootstrap: no shares");
         assertGt(_vault.maxDeposit(ALICE), 0, "deposit NOT paused on the empty bootstrap");
 
         // The first deposit succeeds and mints shares.
         uint256 shares = _deposit(ALICE, amount);
         assertGt(shares, 0, "first deposit mints shares despite empty external position");
+    }
+
+    /// @dev Regression for audit Finding 3: the pause was gated on `EXTERNAL_VAULT.balanceOf(FM) > 0`,
+    ///      which a dust external-*share* donation can spoof — dust shares floor to
+    ///      `maxWithdraw(FM) == 0` (here via a sub-1 external PPS; equivalently, for a decimals-offset
+    ///      external, at any PPS), so `balanceOf(FM) > 0 && maxWithdraw(FM) == 0` flipped all four
+    ///      `max*` to 0 and bricked the bootstrap. The `totalSupply() == 0` gate removes the lever:
+    ///      with no depositors there is nothing to protect, so the donation cannot pause the vault.
+    function test_bootstrap_notBrickedByDustExternalShareDonation(uint256 amount) public {
+        amount = bound(amount, 1e6, ONE_BILLION * 1e6);
+
+        // Push the external into a sub-1 PPS state, then donate a single dust share to the FM so the
+        // FM holds external shares worth 0 recoverable assets — the exact state the old gate paused on.
+        _dealUSDC(address(this), 2e6);
+        _usdc.approve(address(_external), type(uint256).max);
+        _external.deposit(2e6, address(this));
+        _external.simulateLoss(2e6 - 1); // totalAssets → 1, totalSupply → 2e6 ⇒ convertToAssets(1) == 0
+        _external.transfer(address(_fundManager), 1);
+
+        // The old pause trigger is satisfied …
+        assertGt(_external.balanceOf(address(_fundManager)), 0, "FM holds donated dust external shares");
+        assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "dust shares recover 0 assets (old pause trigger)");
+        // … but with no supply the vault is NOT paused.
+        assertEq(_vault.totalSupply(), 0, "still bootstrap");
+        assertGt(_vault.maxDeposit(ALICE), 0, "bootstrap NOT bricked by the dust donation (Finding 3)");
+
+        uint256 shares = _deposit(ALICE, amount);
+        assertGt(shares, 0, "first deposit succeeds despite the dust donation");
     }
 
     /// @dev Boundary: the pause triggers only at `maxWithdraw(FM) == 0`. A *partial* external
@@ -506,8 +536,10 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     }
 
     /// @dev The pause also triggers on a genuine total loss (external underlying drained to 0), not
-    ///      only on a liquidity freeze: `maxWithdraw(FM)` then reads 0 because the position is worth
-    ///      nothing, while the FM still holds (now worthless) external shares.
+    ///      only on a liquidity freeze: with shares outstanding (`supply > 0`), `maxWithdraw(FM) == 0`
+    ///      is sufficient — the gate no longer inspects the FM's external share balance, so a total
+    ///      loss pauses whether the external keeps the now-worthless shares or burns them (the latter
+    ///      is the share-burn lead the old `balanceOf(FM) > 0` gate failed to catch).
     function test_terminalImpairment_viaTotalLoss() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
 

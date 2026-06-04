@@ -211,15 +211,37 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
      *      `ERC4626ExceededMax*`). The vault simply waits for the external position to unfreeze;
      *      meanwhile the Superfluid stream keeps paying existing holders out of the reserve until
      *      it is naturally liquidated. `maxWithdraw(FM) == 0` does not distinguish a permanent loss
-     *      from a temporary liquidity freeze — both are treated as a pause;
+     *      from a temporary liquidity freeze — both are treated as a pause.
      *
-     *      The pause is gated on the FM actually *holding* an external position: an empty external
-     *      balance also reads `maxWithdraw(FM) == 0` but is the healthy bootstrap state (no principal
-     *      deployed yet), not impairment — pausing it would brick the first deposit.
+     *      The pause exists to protect *existing depositors*: it preserves the reserve for the
+     *      stream and refuses to route new money into an unwithdrawable external. So it is gated on
+     *      `totalSupply() > 0` (there are shares to protect) rather than on the FM's external share
+     *      balance. This matters in three ways (audit Finding 3 + the share-burn lead, 2026-06-04):
+     *
+     *      - **Bootstrap** (`supply == 0`): never paused — there is nobody to protect and pausing
+     *        would brick the first deposit. Provably nothing meaningful is at stake: `supply == 0`
+     *        is only reachable from a fresh vault or after a full exit (which drains the recoverable
+     *        NAV down to rounding dust — an impaired external would have capped `maxRedeem` and left
+     *        shares outstanding, so substantial value cannot rest behind zero supply).
+     *      - **Dust-share donation** (Finding 3): a `balanceOf(FM) > 0` gate was spoofable — anyone
+     *        could transfer dust external shares (which floor to `maxWithdraw(FM) == 0`) to force a
+     *        false pause, most damagingly bricking the bootstrap. Gating on supply removes the lever:
+     *        before the first deposit supply is 0, and once `supply > 0` the FM holds a real external
+     *        position, so a dust donation only *raises* `maxWithdraw` — it cannot zero it.
+     *      - **Total-loss share-burn** (the report's lead): an external that burns the FM's shares to
+     *        0 on a socialized loss reads `balanceOf(FM) == 0`, so the old gate failed to pause and
+     *        holders could race to drain the reserve. The supply gate pauses both total-loss variants
+     *        (PPS→0 with shares kept, or shares burned) consistently.
+     *
+     *      Tradeoff: `supply > 0 && maxWithdraw(FM) == 0` with the external position *genuinely* ~0
+     *      (all NAV in the reserve) would now false-pause. Under any sane config that is unreachable
+     *      — deposits route ~everything to the external (the pre-fund is bp-scale) — so it only
+     *      occurs under the pathological `rate × guaranteedFlowDuration` misconfig that already
+     *      bricks deposits (flagged in `docs/sync-vault/design.md §Security`).
      */
     function _isExternallyPaused() internal view returns (bool) {
-        return FUND_MANAGER.maxExternalVaultWithdraw() == 0
-            && FUND_MANAGER.EXTERNAL_VAULT().balanceOf(address(FUND_MANAGER)) > 0;
+        if (totalSupply() == 0) return false;
+        return FUND_MANAGER.maxExternalVaultWithdraw() == 0;
     }
 
     //      ____      __                        __   ______                 __  _

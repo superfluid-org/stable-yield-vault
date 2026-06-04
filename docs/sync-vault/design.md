@@ -1,6 +1,6 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; **revised 2026-06-04 — (Finding 1) `onWithdraw` realizes any resting raw underlying (donation) before the external vault, closing a withdraw-DoS + value-stranding F.2 break; (Finding 2) `onShareTransfer` skips rather than reverts on zero units, so `Ceil`-zeroed dust shares stay transferable**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; **revised 2026-06-04 — (Finding 1) `onWithdraw` realizes any resting raw underlying (donation) before the external vault, closing a withdraw-DoS + value-stranding F.2 break; (Finding 2) `onShareTransfer` skips rather than reverts on zero units, so `Ceil`-zeroed dust shares stay transferable; (Finding 3 + share-burn lead) `_isExternallyPaused()` gates on `totalSupply() > 0` instead of `EXTERNAL_VAULT.balanceOf(FM) > 0`, so a dust external-share donation can't false-pause the bootstrap and a total-loss share-burn pauses consistently**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
@@ -87,6 +87,56 @@ longer thrown). Pinned by `test_residualSharesTransferableAfterUnitZeroingRedeem
 and `test_onShareTransfer_skipsOnZeroUnits`. (The fix lands in the shared base, so
 the async family — where a sub-unit holder is otherwise blocked from both
 `requestRedeem` *and* transfer — benefits identically.)
+
+---
+
+## ⚠️ Revision 2026-06-04 — `_isExternallyPaused()` gates on `totalSupply()`, not external share balance (audit Finding 3 + share-burn lead)
+
+The terminal-impairment full pause (Revision 2026-05-27) was gated on
+`maxExternalVaultWithdraw() == 0 && EXTERNAL_VAULT.balanceOf(FM) > 0`. The
+`balanceOf(FM) > 0` clause — meant only to tell the healthy empty bootstrap apart
+from a frozen real position — was the wrong proxy on **both** ends:
+
+- **Finding 3 (dust-share donation false-pause).** Anyone can transfer dust
+  external *shares* to the FM. Dust shares floor to `maxWithdraw(FM) == 0` (for a
+  decimals-offset external at any PPS, or any external once PPS < 1), so
+  `balanceOf(FM) > 0 && maxWithdraw(FM) == 0` flips all four `max*` to 0 — most
+  damagingly **bricking the bootstrap deposit**. Recoverable (donate more shares
+  to lift `maxWithdraw`), so griefing, not a permanent lock.
+- **Share-burn lead (the mirror image).** An external that burns the FM's shares
+  to 0 on a socialized total loss reads `balanceOf(FM) == 0`, so the gate *failed
+  to pause* and holders could race to drain the reserve — defeating D.2.
+
+Same clause, opposite failures: dust spoofs it up, a share-burning external zeroes
+it down.
+
+**Fix.** Gate on the pause's actual purpose — *are there depositors to protect?*:
+
+```solidity
+function _isExternallyPaused() internal view returns (bool) {
+    if (totalSupply() == 0) return false;           // bootstrap: nobody to protect
+    return FUND_MANAGER.maxExternalVaultWithdraw() == 0;
+}
+```
+
+- **Bootstrap** (`supply == 0`) is never paused, so a dust donation can't brick the
+  first deposit (Finding 3 closed). This is safe because `supply == 0` provably
+  carries no meaningful value: it is reachable only from a fresh vault or a full
+  exit, and a full exit drains the recoverable NAV down to rounding dust (an
+  impaired external caps `maxRedeem` and leaves shares outstanding, so substantial
+  value can't rest behind zero supply). Once `supply > 0` the FM holds a real
+  external position, so a dust donation only *raises* `maxWithdraw` — it cannot
+  zero it.
+- **Both total-loss variants** (PPS→0 with shares kept, or shares burned) now pause
+  consistently (share-burn lead closed).
+
+**Tradeoff.** `supply > 0 && maxWithdraw(FM) == 0` with the external position
+*genuinely* ~0 (all NAV in the reserve) would now false-pause. Under any sane
+config this is unreachable — deposits route ~everything to the external (the
+pre-fund is bp-scale) — so it occurs only under the pathological `rate ×
+guaranteedFlowDuration` misconfig that already bricks deposits (see §Security).
+Pinned by `test_bootstrap_notBrickedByDustExternalShareDonation`,
+`test_bootstrap_notPausedWhenEmpty`, `test_terminalImpairment_viaTotalLoss`.
 
 ---
 
@@ -268,7 +318,10 @@ In that state the vault is **fully paused**: `maxDeposit = maxMint = maxWithdraw
 = maxRedeem = 0` (`StableYieldSyncVault._isExternallyPaused()`), so OZ reverts
 every entrypoint with `ERC4626ExceededMax*`. The empty-position bootstrap
 (`maxWithdraw(FM) == 0` only because nothing is deployed yet) is excluded so the
-first deposit still works.
+first deposit still works. _(Gate revised 2026-06-04: the "holds an external
+position" test is now `totalSupply() > 0`, not `EXTERNAL_VAULT.balanceOf(FM) > 0`
+— the latter was spoofable by a dust external-share donation and blind to a
+share-burning total loss. See Revision 2026-06-04.)_
 
 | Aspect | Decision (2026-05-27) | Rationale |
 |---|---|---|
@@ -669,15 +722,17 @@ attack-cost multiplier, 18-dec shares for the 6-dec USDC deployment (see §Secur
   shrinks this appropriately, making `max*` 4626-honest end-to-end: F.2
   (`request ≤ max* ⇒ never reverts`) holds against a compliant external in any
   loss state.
-- **Terminal-impairment full pause (Revision 2026-05-27).** When
-  `FUND_MANAGER.maxExternalVaultWithdraw() == 0` *and the FM holds an external
-  position* (`_isExternallyPaused()`), all four `max*` return `0`, so OZ reverts
-  every deposit/mint/withdraw/redeem with `ERC4626ExceededMax*`. The
-  empty-position bootstrap (`maxWithdraw(FM) == 0` because nothing is deployed
-  yet) is excluded so the first deposit is not bricked. This is the in-engine
-  liveness story for terminal impairment — there are deliberately **no**
-  `_recalibrateFlow()` guards (the hooks can't run while paused). See
-  Revision 2026-05-27.
+- **Terminal-impairment full pause (Revision 2026-05-27; gate revised 2026-06-04).**
+  When `totalSupply() > 0` *and* `FUND_MANAGER.maxExternalVaultWithdraw() == 0`
+  (`_isExternallyPaused()`), all four `max*` return `0`, so OZ reverts every
+  deposit/mint/withdraw/redeem with `ERC4626ExceededMax*`. The bootstrap
+  (`supply == 0`, `maxWithdraw(FM) == 0` because nothing is deployed yet) is
+  excluded so the first deposit is not bricked. The gate keys on `totalSupply()`
+  rather than `EXTERNAL_VAULT.balanceOf(FM)` — the latter was spoofable by a dust
+  external-share donation (Finding 3) and blind to a total-loss share-burn (the
+  lead); see Revision 2026-06-04. This is the in-engine liveness story for terminal
+  impairment — there are deliberately **no** `_recalibrateFlow()` guards (the hooks
+  can't run while paused). See Revision 2026-05-27.
 - `_update` → `FUND_MANAGER.onShareTransfer(from, to, value)` on
   shareholder↔shareholder transfers (unchanged rule).
 - `previewDeposit/Mint/Redeem/Withdraw` work synchronously (OZ default — no
