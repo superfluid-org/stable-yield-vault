@@ -265,7 +265,6 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_vault.convertToAssets(1e18), pxBefore, "share price appreciates with external surplus");
     }
 
-
     function test_loss_reflectsImmediatelyInSharePrice(uint256 amount, uint256 gain, uint256 loss) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
@@ -537,7 +536,6 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_fundManager.YIELD_POOL().getUnits(BOB), 0, "units followed the transfer");
     }
 
-
     /// @dev With the clamp gone a super-token donation to the FM is no longer absorbed: it
     ///      raises NAV and the share price for EXISTING holders. This is an irrational gift, not
     ///      an attack — the donor mints no shares and cannot extract the donation. (The genuine
@@ -614,6 +612,43 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
         assertGt(bobShares, 0, "Bob's deposit mints shares (no longer bricked)");
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds 0 raw underlying after deposit (Inv. 7)");
+    }
+
+    /// @dev Regression for audit Finding 1: a raw-underlying donation to the FM is counted in NAV
+    ///      (`totalManagedAssets` sums `UNDERLYING_ASSET.balanceOf(FM)`) and so lifts the advertised
+    ///      `max*`. Before the fix, `onWithdraw` sourced the external slice as
+    ///      `redeemingAssets - fromYieldAssets` without ever spending the resting raw balance, so a
+    ///      full redeem computed `fromExternal = E + D > ext.maxWithdraw(FM) = E` and the external
+    ///      withdraw reverted — bricking large/full redemptions (F.2 break) and permanently stranding
+    ///      the donation `D`. The fix realizes the resting raw first (capped at the external slice),
+    ///      keeping `fromExternal ≤ ext.maxWithdraw(FM)` and routing the donation to the holder (the
+    ///      documented "irrational gift", now actually delivered rather than stranded).
+    function test_redeem_notBrickedByRawUnderlyingDonation() public {
+        uint256 shares = _deposit(ALICE, DEFAULT_DEPOSIT);
+        uint256 navBefore = _fundManager.totalManagedAssets(); // < deposit: GDA stream buffer is locked out
+
+        // Griefer transfers raw USDC straight to the FM (cost = the donation; pure griefing).
+        uint256 donation = 500 * 1e6;
+        _dealUSDC(address(_fundManager), donation);
+
+        // The raw term lifts NAV (and hence the advertised max*) by exactly the donation.
+        uint256 navAfter = _fundManager.totalManagedAssets();
+        assertEq(navAfter, navBefore + donation, "raw donation counted in NAV");
+
+        // Sole holder redeems everything within maxRedeem: must NOT revert (F.2). Pre-fix this
+        // reverted in EXTERNAL_VAULT.withdraw (fromExternal = E + D > ext.maxWithdraw(FM) = E).
+        uint256 maxR = _vault.maxRedeem(ALICE);
+        assertEq(maxR, shares, "all shares redeemable (request == max*)");
+
+        uint256 aliceBefore = _usdc.balanceOf(ALICE);
+        vm.prank(ALICE);
+        uint256 assetsOut = _vault.redeem(shares, ALICE, ALICE);
+
+        // The donation accrued to the holder (sole holder realizes ~full NAV, incl. the donation),
+        // and nothing is left resting in the FM as raw — it was realized, not stranded.
+        assertEq(_usdc.balanceOf(ALICE) - aliceBefore, assetsOut, "receiver got the full payout");
+        assertApproxEqAbs(assetsOut, navAfter, 2, "holder realizes ~full NAV including the donation");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "donation fully realized; no raw stranded in FM");
     }
 
     /// @dev First-deposit inflation resistance (the clamp's replacement under the floating share).

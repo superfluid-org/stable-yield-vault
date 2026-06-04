@@ -138,8 +138,18 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             YIELD_POOL.decreaseMemberUnits(holder, delta);
         }
 
-        // Pay the withdrawal from the reserve and the external vault. The yield reserve slice is
-        // proportional to the amount of shares being redeemed
+        // Pay the withdrawal from (in priority) any resting raw underlying, the yield reserve, then
+        // the external vault. The yield reserve slice is proportional to the shares being redeemed.
+        //
+        // Resting raw underlying is only ever a donation (Inv. 7 — principal never rests as raw): it
+        // is counted in NAV (`totalManagedAssets`), so the redeemer is entitled to their pro-rata
+        // slice of it. Realizing it here, ahead of the external vault, (i) keeps F.2 intact — a
+        // donation can no longer inflate `fromExternal` past `ext.maxWithdraw(FM)` — and (ii) stops
+        // the donation from being permanently stranded (it accrues to holders, the documented
+        // "irrational gift"). Measured *before* `_downgrade` so it captures only the pre-existing
+        // resting balance, not the reserve slice about to be downgraded into this same balance.
+        uint256 fromDonation = UNDERLYING_ASSET.balanceOf(address(this));
+
         uint256 fromYieldAssets = scaledYieldAssetsBalance().mulDiv(shares, supplyBeforeBurn, Math.Rounding.Ceil);
         if (fromYieldAssets > redeemingAssets) fromYieldAssets = redeemingAssets;
         if (fromYieldAssets > 0) {
@@ -147,12 +157,21 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
         }
 
         uint256 fromExternal = redeemingAssets - fromYieldAssets;
+        
+        // Spend the underlying donation first, capped at the remaining external slice.
+        if (fromDonation > fromExternal) fromDonation = fromExternal;
+        fromExternal -= fromDonation;
+
         if (fromExternal > 0) {
             // Pure pass-through: reverts only if the external vault is illiquid (accepted).
             EXTERNAL_VAULT.withdraw(fromExternal, receiver, address(this));
         }
-        if (fromYieldAssets > 0) {
-            UNDERLYING_ASSET.safeTransfer(receiver, fromYieldAssets);
+
+        // Both the downgraded yield asset slice and the underlying donation now rest as
+        // underlying in the FM
+        uint256 directPayout = fromYieldAssets + fromDonation;
+        if (directPayout > 0) {
+            UNDERLYING_ASSET.safeTransfer(receiver, directPayout);
         }
 
         // Rebalance the yield reserve and recalibrate the yield stream
@@ -231,20 +250,11 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             uint256 excessYield = uint256(-deficit);
             uint256 underlyingNeeded = excessYield / SCALING_FACTOR;
 
-            // Sub-atom surplus (`excessYield < SCALING_FACTOR`): nothing to trim — `_downgrade`
-            // would be a no-op (Superfluid rounds to a SF multiple) and `external.deposit(0, ...)`
-            // is an unnecessary call (and unsafe with some non-compliant 4626s).
+            // Discard dust excess (excessYield < SCALING_FACTOR)
             if (underlyingNeeded == 0) return;
 
-            // Best-effort: only trim if the external will accept the redeposit. Otherwise leave
-            // the excess as above-target super-token slack in the reserve; the next rebalance
-            // retries (idempotent — deficit < 0 reappears identically next call).
+            // Only trim if the external vault accepts the redeposit
             if (EXTERNAL_VAULT.maxDeposit(address(this)) >= underlyingNeeded) {
-                // Downgrade and redeposit the EXACT amount, not `balanceOf(this)`. The FM may
-                // be holding in-flight raw underlying (e.g. a user's just-arrived deposit), and
-                // sweeping it here would prematurely deposit it to external and then revert the
-                // outer call when the explicit `EXTERNAL_VAULT.deposit(toExternal, ...)` finds
-                // the FM empty.
                 _downgrade(underlyingNeeded * SCALING_FACTOR);
                 UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), underlyingNeeded);
                 EXTERNAL_VAULT.deposit(underlyingNeeded, address(this));
