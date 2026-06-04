@@ -61,6 +61,11 @@ interface IFundManagerBase {
      */
     error ZERO_ADDRESS();
 
+    /**
+     * @notice Thrown when the combination of yield rate and duration is invalid.
+     */
+    error INVALID_YIELD_DURATION_COMBINATION();
+
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //    / __/ | |/_/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/

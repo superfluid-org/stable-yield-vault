@@ -95,6 +95,39 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         assertEq(_fundManager.YIELD_POOL().getUnits(BOB), 0, "receiver gets no units (sender had none)");
     }
 
+    /// @dev Lead 4 fix: the shared base bounds `rate * duration <= YEAR * BP_DENOMINATOR` (the
+    ///      pre-fund for the guarantee horizon never exceeds 100% of the streamed notional). The
+    ///      operator cannot set a rate that, combined with the current duration, breaches it; the
+    ///      boundary itself is allowed.
+    function test_setStableYieldRate_revertsOnUnsustainableCombination() public {
+        uint256 maxRate = (_fundManager.YEAR() * 10_000) / _fundManager.guaranteedFlowDuration();
+
+        vm.startPrank(FUND_OPERATOR);
+        vm.expectRevert(IFundManagerBase.INVALID_YIELD_DURATION_COMBINATION.selector);
+        _fundManager.setStableYieldRate(maxRate + 1);
+
+        // Exactly at the bound is allowed (empty vault ⇒ 0 units ⇒ rebalance/recalibrate are no-ops).
+        _fundManager.setStableYieldRate(maxRate);
+        vm.stopPrank();
+
+        assertEq(_fundManager.stableYieldRate(), maxRate, "rate set to the sustainability boundary");
+    }
+
+    /// @dev Lead 4 fix, duration side: the admin cannot set a duration that, combined with the
+    ///      current rate, breaches `rate * duration <= YEAR * BP_DENOMINATOR`; the boundary is allowed.
+    function test_setGuaranteedFlowDuration_revertsOnUnsustainableCombination() public {
+        uint256 maxDuration = (_fundManager.YEAR() * 10_000) / _fundManager.stableYieldRate();
+
+        vm.startPrank(FUND_ADMIN);
+        vm.expectRevert(IFundManagerBase.INVALID_YIELD_DURATION_COMBINATION.selector);
+        _fundManager.setGuaranteedFlowDuration(maxDuration + 1);
+
+        _fundManager.setGuaranteedFlowDuration(maxDuration); // boundary allowed
+        vm.stopPrank();
+
+        assertEq(_fundManager.guaranteedFlowDuration(), maxDuration, "duration set to the sustainability boundary");
+    }
+
     //    _    ___                 ______                 __  _
     //   | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
     //   | | / / / _ \ | /| / /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/

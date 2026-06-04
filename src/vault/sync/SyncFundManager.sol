@@ -249,7 +249,7 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             uint256 excessYield = uint256(-deficit);
             uint256 underlyingNeeded = excessYield / SCALING_FACTOR;
 
-            // Discard dust excess (excessYield < SCALING_FACTOR)
+            // Ignore if the excess is dust (in case excessYield < SCALING_FACTOR)
             if (underlyingNeeded == 0) return;
 
             // Only trim if the external vault accepts the redeposit

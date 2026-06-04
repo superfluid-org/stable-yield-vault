@@ -349,7 +349,12 @@ contract AsyncFundManagerTest is AsyncVaultTestBase {
         _fundManager.setGuaranteedFlowDuration(belowFloorDuration);
     }
 
-    function test_setGuaranteedFlowDuration_cannotRebalanceYieldAssets() public {
+    /// @dev A guarantee horizon so long that pre-funding it would exceed 100% of the streamed
+    ///      notional (`rate * duration > YEAR * BP_DENOMINATOR`) is rejected at config time by the
+    ///      shared `FundManagerBase` sanity guard — before the async rebalance is even reached. The
+    ///      async runtime `INSUFFICIENT_UNUTILIZED_ASSETS` path (an unfundable horizon *within* the
+    ///      bound) is still covered by `test_setStableYieldRate_revertsIfInvariantWouldBeViolated`.
+    function test_setGuaranteedFlowDuration_revertsOnUnsustainableCombination() public {
         _seedYieldBuffer();
         _requestDeposit(ALICE, DEFAULT_DEPOSIT);
         vm.prank(FUND_OPERATOR);
@@ -357,9 +362,9 @@ contract AsyncFundManagerTest is AsyncVaultTestBase {
         vm.prank(FUND_OPERATOR);
         _fundManager.settleEpoch();
 
-        // Raising the horizon to 1000 years would require far more yield buffer than we hold
+        // 1000-year horizon at the 10% rate ⇒ rate * duration ≫ YEAR * BP_DENOMINATOR.
         vm.prank(FUND_ADMIN);
-        vm.expectRevert(IAsyncFundManager.INSUFFICIENT_UNUTILIZED_ASSETS.selector);
+        vm.expectRevert(IFundManagerBase.INVALID_YIELD_DURATION_COMBINATION.selector);
         _fundManager.setGuaranteedFlowDuration(365 days * 1000);
     }
 

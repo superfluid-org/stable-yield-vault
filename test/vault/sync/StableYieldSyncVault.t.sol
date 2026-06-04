@@ -59,6 +59,25 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(address(_fundManager.EXTERNAL_VAULT()), address(_external), "FM owns EXTERNAL_VAULT");
     }
 
+    /// @dev Lead 4 fix: the shared base constructor rejects an initial `rate * duration` that exceeds
+    ///      `YEAR * BP_DENOMINATOR` (would pre-fund > 100% of the streamed notional). 100% rate for
+    ///      2 years breaches it; the FM constructor reverts and propagates through the vault ctor.
+    function test_constructor_revertsOnUnsustainableRateDuration() public {
+        vm.expectRevert(IFundManagerBase.INVALID_YIELD_DURATION_COMBINATION.selector);
+        new StableYieldSyncVault(
+            TREASURY,
+            address(_usdc),
+            address(_usdcx),
+            address(_external),
+            FUND_OPERATOR,
+            FUND_ADMIN,
+            10_000, // 100% annual rate
+            730 days, // 2 years > 1-year max at 100% ⇒ rate * duration > YEAR * BP_DENOMINATOR
+            SHARE_NAME,
+            SHARE_SYMBOL
+        );
+    }
+
     function test_constructor_revertsOnExternalAssetMismatch() public {
         // External vault over a *different* asset.
         MockERC4626 wrongExternal = new MockERC4626(IERC20(address(_usdcx)), "Wrong", "WRG");

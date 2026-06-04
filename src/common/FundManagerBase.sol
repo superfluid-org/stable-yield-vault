@@ -125,6 +125,9 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
         uint256 _initialGuaranteedFlowDuration
     ) {
         if (_treasury == address(0)) revert ZERO_ADDRESS();
+        if (_initialStableYieldRate * _initialGuaranteedFlowDuration > YEAR * _BP_DENOMINATOR) {
+            revert INVALID_YIELD_DURATION_COMBINATION();
+        }
 
         UNDERLYING_ASSET = IERC20(_asset);
         VAULT = IERC20(msg.sender);
@@ -197,6 +200,11 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     function setStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
         /// FIXME : enforce minimum era duration
 
+        // Ensure the new rate and the current guaranteed flow duration are a valid combination
+        if (newRate * guaranteedFlowDuration > YEAR * _BP_DENOMINATOR) {
+            revert INVALID_YIELD_DURATION_COMBINATION();
+        }
+
         uint256 oldRate = stableYieldRate;
         stableYieldRate = newRate;
 
@@ -213,6 +221,12 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     /// @inheritdoc IFundManagerBase
     function setGuaranteedFlowDuration(uint256 newDuration) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         if (newDuration < MIN_GUARANTEED_FLOW_DURATION) revert DURATION_BELOW_FLOOR();
+
+        // Ensure the new rate and the current guaranteed flow duration are a valid combination
+        if (newDuration * stableYieldRate > YEAR * _BP_DENOMINATOR) {
+            revert INVALID_YIELD_DURATION_COMBINATION();
+        }
+
         uint256 oldDuration = guaranteedFlowDuration;
 
         // Update the guaranteed flow duration
