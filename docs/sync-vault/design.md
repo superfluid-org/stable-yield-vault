@@ -1,12 +1,69 @@
 # Stable Yield Sync Vault — Design
 
-Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; implementation in progress)
+Status: **locked** (brainstormed 2026-05-18; **revised 2026-05-19 — async-symmetric pivot**; **revised 2026-05-21 — self-funded stream pivot**; **revised 2026-05-22 — unified rebalance primitive, `harvest()` dropped**; **revised 2026-05-26 — NAV clamp / `trackedPrincipal` dropped, floating share**; **revised 2026-05-27 — terminal-impairment full pause; guarded-recalibrate dropped**; **revised 2026-05-28 — `_rebalanceYieldAssets()` trim made best-effort (deficit < 0 branch gated on external `maxDeposit`)**; **revised 2026-05-29 — `onWithdraw` reserve sourcing made shares-proportional; Decision 5 stayers'-horizon softened from "by construction" to "best-effort (D.1)"; "partial impairment" terminology dropped in favour of loss vs. terminal impairment**; **revised 2026-06-02 — `_rebalanceYieldAssets()` trim redeposits exactly `underlyingNeeded` instead of sweeping `balanceOf(FM)`; closes a deposit-bricking griefing surface via super-token donation**; **revised 2026-06-04 — `onWithdraw` realizes any resting raw underlying (donation) before the external vault; closes audit Finding 1 (raw-underlying donation = withdraw-DoS + value stranding, F.2 break)**; implementation in progress)
 
 A synchronous ERC-4626 sibling of `StableYieldAsyncVault`. Users deposit/withdraw
 instantly; principal is routed into an external ERC-4626 (Morpho, Beefy, …); a
 **stable** yield is streamed to depositors via the same Superfluid GDA engine the
 async vault uses. The external vault replaces the async vault's manual off-chain
 "working assets" leg.
+
+---
+
+## ⚠️ Revision 2026-06-04 — `onWithdraw` realizes resting raw underlying first (audit Finding 1: raw-donation withdraw-DoS)
+
+The AI audit (`audit/ai-audit-findings.md`, Finding 1, confidence 85, converged
+across 4 of 8 agents) surfaced a real F.2 break that the 2026-06-02 fix did not
+cover. `totalManagedAssets()` sums `UNDERLYING_ASSET.balanceOf(FM)`, so a raw
+underlying transfer to the FM raises NAV and every advertised `max*`. But the
+old `onWithdraw` sourced its payout **only** from the reserve slice
+(`fromYieldAssets`) and `EXTERNAL_VAULT.withdraw` (`fromExternal = redeemingAssets
+− fromYieldAssets`) — no path ever spent a resting raw balance. So a holder
+redeeming up to `maxRedeem` computed `fromExternal = E + D > EXTERNAL_VAULT
+.maxWithdraw(FM) = E` and the external withdraw reverted.
+
+**Trace** (sole holder, external recoverable `E`, reserve `Y`, donation `D`):
+
+```
+NAV = E + Y + D ;  maxWithdraw = E + Y + D
+redeem(all):  redeemingAssets = E + Y + D
+              fromYieldAssets = Y
+              fromExternal    = E + D   →  EXTERNAL_VAULT.withdraw(E + D) reverts   (only E)
+```
+
+This bricked large/full redemptions (F.2: `request ≤ max* ⇒ never reverts`) and
+permanently **stranded** `D` (no path consumed it), directly contradicting the
+documented claim that raw-underlying donations are harmless "irrational gifts".
+
+**Fix.** `onWithdraw` now realizes resting raw underlying **before** the external
+vault. The resting balance is measured at the top of the hook (Inv. 7: it is only
+ever a donation — principal never rests as raw, and no in-flight raw exists yet at
+withdraw entry), then spent first, capped at the external slice:
+
+```
+fromRaw = balanceOf(FM)            // pre-downgrade: the resting donation only
+…downgrade reserve slice…
+fromExternal = redeemingAssets − fromYieldAssets
+fromRaw = min(fromRaw, fromExternal)             // cap at remaining need
+fromExternal −= fromRaw                           // ≤ E now (F.2 restored)
+EXTERNAL_VAULT.withdraw(fromExternal, …)
+transfer(fromYieldAssets + fromRaw, receiver)     // both rest as raw at the FM
+```
+
+**Why F.2 holds** (with `f = shares/supply`): `fromExternal = f·(E+D) − min(D,
+f·(E+D))`, which is `0` when `f·(E+D) ≤ D`, else `f·E − (1−f)·D ≤ f·E ≤ E`. The
+floor on `redeemingAssets` and ceil on `fromYieldAssets` only push it lower. The
+chosen fix was the audit's *alternative* (realize the raw) rather than its primary
+(exclude raw from NAV): realizing it delivers the donation to holders — the
+documented "irrational gift" — instead of stranding it. `totalManagedAssets()` is
+unchanged (the raw term is now genuinely realizable).
+
+**Inv. 7 nuance.** A donated raw balance now *may* rest in the FM across calls
+(until consumed by withdrawals). It is **not principal** — principal still never
+rests. The 2026-06-02 exact-`underlyingNeeded` rebalance is what keeps a resting
+raw balance safe: no path sweeps `balanceOf(FM)`, so the donation is never
+prematurely deployed or double-counted. Pinned by
+`test_redeem_notBrickedByRawUnderlyingDonation` (`StableYieldSyncVault.t.sol`).
 
 ---
 
@@ -509,13 +566,18 @@ inherited `ensureYieldFlowDuration()` (`FUND_OPERATOR_ROLE`).
      on both legs can leave. `fromReserve ≤ scaledYieldAssetsBalance()` is
      guaranteed because `shares ≤ supplyBeforeBurn`.
      `if (fromReserve > 0) _downgrade(fromReserve · SCALING_FACTOR)`.
-  3. `fromExternal = redeemingAssets − fromReserve`;
-     `if (fromExternal > 0) EXTERNAL_VAULT.withdraw(fromExternal, receiver, this)`.
-     For a compliant external this is bounded by `f · ext.maxWithdraw + f · raw
-     ≤ ext.maxWithdraw` (raw = 0 at rest by Inv. 7), so F.2 holds end-to-end;
-     reverts only if the external vault is non-compliant (`maxWithdraw`
-     over-reports). Then `safeTransfer(receiver, fromReserve)` so the receiver
-     gets exactly `redeemingAssets`.
+  3. `fromExternal = redeemingAssets − fromReserve`, then any **resting raw
+     underlying** (a donation — Revision 2026-06-04) is spent first, capped at
+     this slice (`fromRaw = min(balanceOf(FM), fromExternal)`; measured pre-
+     downgrade so it excludes the reserve slice), leaving
+     `fromExternal −= fromRaw` for `EXTERNAL_VAULT.withdraw(fromExternal, receiver,
+     this)`. For a compliant external the external slice is bounded by `f ·
+     ext.maxWithdraw + f · raw − fromRaw ≤ ext.maxWithdraw` (the `f · raw` donation
+     slice is sourced from `fromRaw`, not the external vault), so F.2 holds
+     end-to-end even with a resting raw donation; reverts only if the external
+     vault is non-compliant (`maxWithdraw` over-reports). Then
+     `safeTransfer(receiver, fromReserve + fromRaw)` so the receiver gets exactly
+     `redeemingAssets`.
   4. `_rebalanceYieldAssets()` — **post-payout cleanup** (2026-05-22, Q1=B;
      gated 2026-05-28; surface restated 2026-05-29). Shares-proportional
      sourcing leaves a deficit when `f > f_u` (the holder had lower-than-average
@@ -764,26 +826,35 @@ stalling.
 7. **FM is the sole custodian.** All vault-controlled assets (external-vault
    shares, super-token reserve, transient unutilized underlying) live in the FM;
    the vault's underlying/super-token balances are 0 at rest. **Custody hazard
-   invariant:** principal never rests in the FM as raw underlying across calls —
+   invariant:** *principal* never rests in the FM as raw underlying across calls —
    it is deployed into the external vault or upgraded into the reserve within
    the same call, otherwise the base rebalance logic would sweep it into the
-   reserve and silently consume principal.
+   reserve and silently consume principal. A *donated* raw balance (not principal)
+   may rest across calls; it is counted in NAV and realized first on the next
+   `onWithdraw` (Revision 2026-06-04). This is safe precisely because no path
+   sweeps `balanceOf(FM)` — the 2026-06-02 exact-`underlyingNeeded` rebalance
+   never deploys or double-counts the resting donation.
 
 ## Security considerations
 
 - **Donations under a floating share (clamp dropped 2026-05-26; deposit-brick
-  surface closed 2026-06-02).** NAV is the raw sum of external `maxWithdraw` +
-  super-token reserve + raw underlying, with no clamp. A super-token or
-  raw-underlying transfer to the FM therefore *does* raise NAV and the share
-  price — but it raises it for **existing holders**, so it is an irrational
-  gift, not a profitable attack (the donor strictly loses). *Historically
-  (before the 2026-06-02 trim fix), the donation also opened a deposit-bricking
-  DoS surface: the rebalance trim swept the FM's full underlying balance back
-  into the external vault, which during `onDeposit` included the user's
-  just-arrived raw underlying, reverting the outer deposit. That surface is
-  closed — the trim now redeposits exactly `underlyingNeeded`. Pinned by
-  `test_deposit_notBrickedAfterSuperTokenDonation` and
-  `test_deposit_notBrickedAfterRateDropWithClosedExternal`.* The one genuinely
+  surface closed 2026-06-02; withdraw-brick surface closed 2026-06-04).** NAV is
+  the raw sum of external `maxWithdraw` + super-token reserve + raw underlying,
+  with no clamp. A super-token or raw-underlying transfer to the FM therefore
+  *does* raise NAV and the share price — but it raises it for **existing
+  holders**, so it is an irrational gift, not a profitable attack (the donor
+  strictly loses). *Historically the donation opened two now-closed DoS surfaces:*
+  (1) *a deposit-brick (before 2026-06-02): the rebalance trim swept the FM's full
+  underlying balance, which during `onDeposit` included the user's just-arrived
+  raw underlying, reverting the outer deposit — closed by the exact-`underlyingNeeded`
+  redeposit. Pinned by `test_deposit_notBrickedAfterSuperTokenDonation` and
+  `test_deposit_notBrickedAfterRateDropWithClosedExternal`.* (2) *a withdraw-brick
+  + value stranding (before 2026-06-04, audit Finding 1): a raw-underlying donation
+  raised NAV and `max*`, but `onWithdraw` never spent the resting raw balance, so a
+  full/large redeem computed `fromExternal = E + D > ext.maxWithdraw(FM)` and
+  reverted (F.2 break), permanently stranding `D`. Closed by realizing resting raw
+  ahead of the external vault (Revision 2026-06-04); the donation now reaches
+  holders. Pinned by `test_redeem_notBrickedByRawUnderlyingDonation`.* The one genuinely
   exploitable surface remaining is the classic ERC-4626 **first-deposit
   inflation attack** (front-run the first depositor, donate to inflate price
   per share, the victim's deposit rounds to 0 shares). Mitigation replacing the
