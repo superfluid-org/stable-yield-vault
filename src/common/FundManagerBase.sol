@@ -200,8 +200,6 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
 
     /// @inheritdoc IFundManagerBase
     function setStableYieldRate(uint256 newRate) external onlyRole(FUND_OPERATOR_ROLE) nonReentrant {
-        /// FIXME : enforce minimum era duration
-
         // Ensure the new rate and the current guaranteed flow duration are a valid combination
         if (newRate * guaranteedFlowDuration > YEAR * _BP_DENOMINATOR) {
             revert INVALID_YIELD_DURATION_COMBINATION();
@@ -249,7 +247,11 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
 
     /// @inheritdoc IFundManagerBase
-    function onShareTransfer(address sender, address receiver, uint256 shares) external onlyRole(VAULT_ROLE) {
+    function onShareTransfer(address sender, address receiver, uint256 shares)
+        external
+        onlyRole(VAULT_ROLE)
+        nonReentrant
+    {
         uint128 senderUnits = YIELD_POOL.getUnits(sender);
         // A dust position can hold shares but zero units due to the units/shares conversion rounding
         if (senderUnits == 0) return;
@@ -278,8 +280,6 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
 
     /// @inheritdoc IFundManagerBase
     function evaluateYieldAssetsDeficit() public view returns (int256 deficit) {
-        /// FIXME : add buffer to the required balance
-
         int96 targetYieldFlowRate = _targetFlowRate();
         int96 targetFeeFlowRate = targetYieldFlowRate * int96(int256(FEE_BPS)) / int96(int256(_BP_DENOMINATOR));
 
