@@ -1,61 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { ERC1820RegistryCompiled } from
-    "@superfluid-finance/ethereum-contracts/contracts/libs/ERC1820RegistryCompiled.sol";
-import { SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
-import { SuperfluidFrameworkDeployer } from
-    "@superfluid-finance/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeployer.t.sol";
-import {
-    CFAv1ForwarderDeployerLibrary,
-    GDAv1ForwarderDeployerLibrary,
-    ProxyDeployerLibrary,
-    SuperTokenDeployerLibrary,
-    SuperTokenFactoryDeployerLibrary,
-    SuperfluidCFAv1DeployerLibrary,
-    SuperfluidGDAv1DeployerLibrary,
-    SuperfluidGovDeployerLibrary,
-    SuperfluidHostDeployerLibrary,
-    SuperfluidIDAv1DeployerLibrary,
-    SuperfluidPeripheryDeployerLibrary,
-    SuperfluidPoolLogicDeployerLibrary,
-    SuperfluidPoolNFTLogicDeployerLibrary,
-    TokenDeployerLibrary
-} from "@superfluid-finance/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol";
-import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
-
-import { SuperfluidPoolDeployerLibrary } from
-    "@superfluid-finance/ethereum-contracts/contracts/agreements/gdav1/SuperfluidPoolDeployerLibrary.sol";
-import { ISuperfluidPool } from
-    "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
-import { SlotsBitmapLibrary } from "@superfluid-finance/ethereum-contracts/contracts/libs/SlotsBitmapLibrary.sol";
+import { EchidnaVaultHarnessBase, ISuperfluidPool } from "./base/EchidnaVaultHarnessBase.sol";
 
 import { IStableYieldAsyncVault } from "src/interfaces/vault/async/IStableYieldAsyncVault.sol";
 import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
 import { StableYieldAsyncVault } from "src/vault/async/StableYieldAsyncVault.sol";
 
-interface IHevm {
-
-    function etch(address who, bytes calldata code) external;
-    function prank(address) external;
-    function warp(uint256) external;
-
-}
-
 /// @title Echidna fuzzing harness for the StableYieldAsyncVault + FundManager pair.
-/// @dev   Deploys the full Superfluid framework in the constructor and exposes clamped action
-///        handlers for each mutating entrypoint so Echidna's fuzzer spends time on logic, not
-///        revert paths. Tier A invariants (asset accounting) are checked after every handler.
-contract EchidnaStableYieldVault {
+/// @dev   Inherits the shared Superfluid bootstrap from `EchidnaVaultHarnessBase`, deploys the async
+///        vault + FundManager in its constructor, and exposes clamped action handlers for each
+///        mutating entrypoint so Echidna's fuzzer spends time on logic, not revert paths. Tier A
+///        invariants (asset accounting) are checked after every handler.
+contract EchidnaStableYieldAsyncVault is EchidnaVaultHarnessBase {
 
-    IHevm private constant HEVM = IHevm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
-
-    uint256 private constant ACTOR_INITIAL_USDC = 1_000_000 * 1e6; // 1M USDC each
-    uint256 private constant OPERATOR_INITIAL_USDC = 100_000_000 * 1e6; // 100M operator treasury
     uint256 private constant STRATEGY_RESERVE_INITIAL = 100_000_000 * 1e6; // 100M strategy yield pool
-    uint256 private constant INITIAL_RATE = 1000; // 10% APR (basis points)
-    uint256 private constant INITIAL_FLOW_DURATION = 7 days;
-    uint256 private constant MAX_RATE = 5000; // cap fuzzed rate at 50%
     uint256 private constant MAX_WARP = 30 days;
 
     /// @dev Closed-loop strategy reserve. Holds a finite USDC pool that funds simulated
@@ -64,16 +23,8 @@ contract EchidnaStableYieldVault {
     ///      strategy reserve, FM, vault, actors, sink} is conserved across the run.
     address private constant STRATEGY_RESERVE = address(uint160(uint256(keccak256("ECHIDNA_STRATEGY_RESERVE"))));
 
-    SuperfluidFrameworkDeployer.Framework private _sf;
-    SuperfluidFrameworkDeployer private _deployer;
-    TestToken private _usdc;
-    SuperToken private _usdcx;
-
     AsyncFundManager private _fundManager;
     StableYieldAsyncVault private _vault;
-
-    address[3] private _actors;
-    address private _treasury;
 
     /// @dev Highest epoch number observed across all handler calls; must never decrease.
     uint256 private _ghostMaxEpoch;
@@ -125,23 +76,7 @@ contract EchidnaStableYieldVault {
     uint256 private _ghostTotalSupply;
 
     constructor() {
-        _actors[0] = address(uint160(uint256(keccak256("ECHIDNA_ALICE"))));
-        _actors[1] = address(uint160(uint256(keccak256("ECHIDNA_BOB"))));
-        _actors[2] = address(uint160(uint256(keccak256("ECHIDNA_CAROL"))));
-
-        _treasury = address(uint160(uint256(keccak256("ECHIDNA_TREASURY"))));
-
-        HEVM.etch(ERC1820RegistryCompiled.at, ERC1820RegistryCompiled.bin);
-        _plantSuperfluidLibraries();
-
-        _deployer = new SuperfluidFrameworkDeployer();
-        _deployer.deployTestFramework();
-        _sf = _deployer.getFramework();
-
-        (TestToken usdc_, SuperToken usdcx_) =
-            _deployer.deployWrapperSuperToken("USDC", "USDC", 6, type(uint256).max, address(0));
-        _usdc = usdc_;
-        _usdcx = usdcx_;
+        _bootstrapSuperfluid("ECHIDNA_ALICE", "ECHIDNA_BOB", "ECHIDNA_CAROL", "ECHIDNA_TREASURY");
 
         _vault = new StableYieldAsyncVault(
             _treasury,
@@ -156,25 +91,19 @@ contract EchidnaStableYieldVault {
         );
         _fundManager = AsyncFundManager(address(_vault.FUND_MANAGER()));
 
+        _approveActorsTo(address(_vault));
+
         // Operator treasury — used to optionally seed FM via `operator_give` during fuzzing.
         // The FM itself starts EMPTY: at zero share supply the system has no NAV, and
         // pre-seeding would establish a fictitious starting balance with no real-world
         // counterpart (and would mask first-depositor / bootstrap-rate behaviour).
-        _usdc.mint(address(this), OPERATOR_INITIAL_USDC);
-        _usdc.approve(address(_fundManager), type(uint256).max);
+        _seedOperatorTreasury(address(_fundManager));
 
         // Pre-fund the strategy reserve. This is the closed-loop pool that funds simulated
         // gains and absorbs simulated losses (see operator_simulate_gain / _simulate_loss).
         _usdc.mint(STRATEGY_RESERVE, STRATEGY_RESERVE_INITIAL);
         HEVM.prank(STRATEGY_RESERVE);
         _usdc.approve(address(this), type(uint256).max);
-
-        for (uint256 i = 0; i < _actors.length; i++) {
-            address actor = _actors[i];
-            _usdc.mint(actor, ACTOR_INITIAL_USDC);
-            HEVM.prank(actor);
-            _usdc.approve(address(_vault), type(uint256).max);
-        }
 
         _ghostMaxEpoch = _vault.currentEpoch();
         // FM is empty at construction, so NAV is zero. The first close+settle with
@@ -185,10 +114,7 @@ contract EchidnaStableYieldVault {
         // D.7 — pool config: units non-transferable, distribution-from-any-address disabled,
         //       admin is the FundManager. These are set in FundManager's constructor and not
         //       mutable, so a one-time check is sufficient.
-        ISuperfluidPool pool = _fundManager.YIELD_POOL();
-        require(pool.admin() == address(_fundManager), "D.7 admin");
-        require(!pool.transferabilityForUnitsOwner(), "D.7 transferability");
-        require(!pool.distributionFromAnyAddress(), "D.7 distribution");
+        _assertPoolConfig(_fundManager.YIELD_POOL(), address(_fundManager));
     }
 
     //      ____                        _ __     ___        __  _
@@ -993,55 +919,6 @@ contract EchidnaStableYieldVault {
 
         // Rate-direction invariant (operator-PnL cluster, gated)
         _checkRateDirection();
-    }
-
-    //      __  __     __                   ______                 __  _
-    //     / / / /__  / /___  ___  _____   / ____/_  ______  _____/ /_(_)___  ____  _____
-    //    / /_/ / _ \/ / __ \/ _ \/ ___/  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
-    //   / __  /  __/ / /_/ /  __/ /     / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
-    //  /_/ /_/\___/_/ .___/\___/_/     /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
-    //              /_/
-
-    /// @dev Foundry's runtime auto-deploys external libraries; Echidna does not.
-    ///      Each library address below is pinned in foundry.toml's [profile.echidna]
-    ///      and in echidna.yaml's --compile-libraries; here we deploy each one and
-    ///      etch its runtime bytecode at the pinned address so the framework's
-    ///      DELEGATECALLs land on real code.
-    function _plantSuperfluidLibraries() internal {
-        _plant(type(SlotsBitmapLibrary).creationCode, address(uint160(0xA01)));
-        _plant(type(SuperfluidPoolDeployerLibrary).creationCode, address(uint160(0xA02)));
-        _plant(type(SuperfluidGovDeployerLibrary).creationCode, address(uint160(0xA03)));
-        _plant(type(SuperfluidHostDeployerLibrary).creationCode, address(uint160(0xA04)));
-        _plant(type(SuperfluidCFAv1DeployerLibrary).creationCode, address(uint160(0xA05)));
-        _plant(type(SuperfluidIDAv1DeployerLibrary).creationCode, address(uint160(0xA06)));
-        _plant(type(SuperfluidPoolLogicDeployerLibrary).creationCode, address(uint160(0xA07)));
-        _plant(type(SuperfluidGDAv1DeployerLibrary).creationCode, address(uint160(0xA08)));
-        _plant(type(CFAv1ForwarderDeployerLibrary).creationCode, address(uint160(0xA09)));
-        _plant(type(GDAv1ForwarderDeployerLibrary).creationCode, address(uint160(0xA0A)));
-        _plant(type(SuperTokenDeployerLibrary).creationCode, address(uint160(0xA0B)));
-        _plant(type(SuperfluidPoolNFTLogicDeployerLibrary).creationCode, address(uint160(0xA0C)));
-        _plant(type(ProxyDeployerLibrary).creationCode, address(uint160(0xA0D)));
-        _plant(type(TokenDeployerLibrary).creationCode, address(uint160(0xA0E)));
-        _plant(type(SuperTokenFactoryDeployerLibrary).creationCode, address(uint160(0xA0F)));
-        _plant(type(SuperfluidPeripheryDeployerLibrary).creationCode, address(uint160(0xA10)));
-    }
-
-    function _plant(bytes memory creationCode, address pinned) internal {
-        address deployed;
-        assembly {
-            deployed := create(0, add(creationCode, 0x20), mload(creationCode))
-        }
-        require(deployed != address(0), "lib deploy failed");
-        HEVM.etch(pinned, deployed.code);
-    }
-
-    function _actor(uint8 idx) internal view returns (address) {
-        return _actors[idx % _actors.length];
-    }
-
-    function _bound(uint256 v, uint256 maxV) internal pure returns (uint256) {
-        if (maxV == 0) return 0;
-        return v % (maxV + 1);
     }
 
 }

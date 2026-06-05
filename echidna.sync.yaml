@@ -2,7 +2,7 @@ testMode: assertion
 testLimit: 50000
 seqLen: 100
 shrinkLimit: 5000
-corpusDir: echidna-corpus-sync
+corpusDir: echidna-corpus/sync
 coverage: true
 prefix: echidna_
 deployer: "0x30000"

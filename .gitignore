@@ -5,7 +5,6 @@ out/
 # Echidna
 crytic-export/
 echidna-corpus/
-echidna-corpus-sync/
 echidna-coverage/
 
 # Ignores development broadcast logs

@@ -3,103 +3,41 @@ pragma solidity ^0.8.34;
 
 import { MockERC4626 } from "../mocks/MockERC4626.sol";
 
-import { ERC1820RegistryCompiled } from
-    "@superfluid-finance/ethereum-contracts/contracts/libs/ERC1820RegistryCompiled.sol";
-import { SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
-import { SuperfluidFrameworkDeployer } from
-    "@superfluid-finance/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeployer.t.sol";
-import {
-    CFAv1ForwarderDeployerLibrary,
-    GDAv1ForwarderDeployerLibrary,
-    ProxyDeployerLibrary,
-    SuperTokenDeployerLibrary,
-    SuperTokenFactoryDeployerLibrary,
-    SuperfluidCFAv1DeployerLibrary,
-    SuperfluidGDAv1DeployerLibrary,
-    SuperfluidGovDeployerLibrary,
-    SuperfluidHostDeployerLibrary,
-    SuperfluidIDAv1DeployerLibrary,
-    SuperfluidPeripheryDeployerLibrary,
-    SuperfluidPoolLogicDeployerLibrary,
-    SuperfluidPoolNFTLogicDeployerLibrary,
-    TokenDeployerLibrary
-} from "@superfluid-finance/ethereum-contracts/contracts/utils/SuperfluidFrameworkDeploymentSteps.t.sol";
-import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
-
-import { SuperfluidPoolDeployerLibrary } from
-    "@superfluid-finance/ethereum-contracts/contracts/agreements/gdav1/SuperfluidPoolDeployerLibrary.sol";
-import { ISuperfluidPool } from
-    "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
-import { SlotsBitmapLibrary } from "@superfluid-finance/ethereum-contracts/contracts/libs/SlotsBitmapLibrary.sol";
+import { EchidnaVaultHarnessBase, ISuperfluidPool } from "./base/EchidnaVaultHarnessBase.sol";
 
 import { IERC20 } from "@openzeppelin-v5/contracts/token/ERC20/IERC20.sol";
 
 import { StableYieldSyncVault } from "src/vault/sync/StableYieldSyncVault.sol";
 import { SyncFundManager } from "src/vault/sync/SyncFundManager.sol";
 
-interface IHevm {
-
-    function etch(address who, bytes calldata code) external;
-    function prank(address) external;
-    function warp(uint256) external;
-
-}
-
 /// @title Echidna fuzzing harness for the synchronous StableYieldSyncVault + SyncFundManager pair.
-/// @dev   Deploys the full Superfluid framework + a configurable external ERC-4626 in the
-///        constructor and exposes clamped handlers for every mutating entrypoint. Invariants
-///        from `docs/sync-vault/design.md §Invariants` are checked after every handler.
-contract EchidnaStableYieldSyncVault {
+/// @dev   Inherits the shared Superfluid bootstrap from `EchidnaVaultHarnessBase`, deploys the sync
+///        vault + SyncFundManager + a configurable external ERC-4626 in its constructor, and exposes
+///        clamped handlers for every mutating entrypoint. Invariants from
+///        `docs/sync-vault/design.md §Invariants` are checked after every handler.
+contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
-    IHevm private constant HEVM = IHevm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
-
-    uint256 private constant ACTOR_INITIAL_USDC = 1_000_000 * 1e6; // 1M USDC each
-    uint256 private constant OPERATOR_INITIAL_USDC = 100_000_000 * 1e6; // operator injection treasury
     uint256 private constant EXTERNAL_RESERVE_INITIAL = 100_000_000 * 1e6; // funds simulated external yield
-    uint256 private constant INITIAL_RATE = 1000; // 10% APR (bps)
-    uint256 private constant INITIAL_FLOW_DURATION = 7 days;
-    uint256 private constant MAX_RATE = 5000; // cap fuzzed rate at 50%
     // Operator-diligence assumption (design D.1): the operator calls `ensureYieldFlowDuration()`
     // within every `guaranteedFlowDuration` window, so the reserve never over-drains to insolvency.
     // We model it by (a) the `keepAlive` modifier replenishing before every op, and (b) bounding
     // every time advance below the `MIN_GUARANTEED_FLOW_DURATION` (= 1 day) floor — both the explicit
-    // `warp_seconds` cap here AND echidna's inter-call `maxTimeDelay` (see `echidna.yaml`). A single
+    // `warp_seconds` cap here AND echidna's inter-call `maxTimeDelay` (see `echidna.sync.yaml`). A single
     // warp (≤ 6h) plus the following inter-call delay (≤ 6h) stays well under the 1-day horizon.
     uint256 private constant MAX_WARP = 6 hours;
 
     /// @dev Closed-loop pool funding simulated external gains / absorbing simulated losses.
     address private constant EXTERNAL_RESERVE = address(uint160(uint256(keccak256("ECHIDNA_SYNC_EXT_RESERVE"))));
 
-    SuperfluidFrameworkDeployer private _deployer;
-    TestToken private _usdc;
-    SuperToken private _usdcx;
-
     MockERC4626 private _external;
     SyncFundManager private _fundManager;
     StableYieldSyncVault private _vault;
-
-    address[3] private _actors;
-    address private _treasury;
 
     /// @dev Mirror of `totalSupply`, updated only by mint/burn handlers.
     uint256 private _ghostSupply;
 
     constructor() {
-        _actors[0] = address(uint160(uint256(keccak256("ECHIDNA_SYNC_ALICE"))));
-        _actors[1] = address(uint160(uint256(keccak256("ECHIDNA_SYNC_BOB"))));
-        _actors[2] = address(uint160(uint256(keccak256("ECHIDNA_SYNC_CAROL"))));
-        _treasury = address(uint160(uint256(keccak256("ECHIDNA_SYNC_TREASURY"))));
-
-        HEVM.etch(ERC1820RegistryCompiled.at, ERC1820RegistryCompiled.bin);
-        _plantSuperfluidLibraries();
-
-        _deployer = new SuperfluidFrameworkDeployer();
-        _deployer.deployTestFramework();
-
-        (TestToken usdc_, SuperToken usdcx_) =
-            _deployer.deployWrapperSuperToken("USDC", "USDC", 6, type(uint256).max, address(0));
-        _usdc = usdc_;
-        _usdcx = usdcx_;
+        _bootstrapSuperfluid("ECHIDNA_SYNC_ALICE", "ECHIDNA_SYNC_BOB", "ECHIDNA_SYNC_CAROL", "ECHIDNA_SYNC_TREASURY");
 
         _external = new MockERC4626(IERC20(address(_usdc)), "Mock External USDC Vault", "mxUSDC");
 
@@ -117,27 +55,18 @@ contract EchidnaStableYieldSyncVault {
         );
         _fundManager = SyncFundManager(address(_vault.FUND_MANAGER()));
 
+        _approveActorsTo(address(_vault));
+
         // Operator injection treasury.
-        _usdc.mint(address(this), OPERATOR_INITIAL_USDC);
-        _usdc.approve(address(_fundManager), type(uint256).max);
+        _seedOperatorTreasury(address(_fundManager));
 
         // Closed-loop external-yield reserve.
         _usdc.mint(EXTERNAL_RESERVE, EXTERNAL_RESERVE_INITIAL);
         HEVM.prank(EXTERNAL_RESERVE);
         _usdc.approve(address(this), type(uint256).max);
 
-        for (uint256 i = 0; i < _actors.length; i++) {
-            address actor = _actors[i];
-            _usdc.mint(actor, ACTOR_INITIAL_USDC);
-            HEVM.prank(actor);
-            _usdc.approve(address(_vault), type(uint256).max);
-        }
-
         // D.7-equivalent: pool config is immutable, one-time check.
-        ISuperfluidPool pool = _fundManager.YIELD_POOL();
-        require(pool.admin() == address(_fundManager), "pool admin");
-        require(!pool.transferabilityForUnitsOwner(), "pool transferability");
-        require(!pool.distributionFromAnyAddress(), "pool distribution");
+        _assertPoolConfig(_fundManager.YIELD_POOL(), address(_fundManager));
     }
 
     /// @dev Models the operator-diligence assumption (design D.1): a keeper runs
@@ -427,47 +356,6 @@ contract EchidnaStableYieldSyncVault {
     //   / // ___/ / /_/ /  __/ /
     //  /_//_/  /_/ .___/\___/_/
     //           /_/
-
-    function _plantSuperfluidLibraries() internal {
-        _plant(type(SlotsBitmapLibrary).creationCode, address(uint160(0xA01)));
-        _plant(type(SuperfluidPoolDeployerLibrary).creationCode, address(uint160(0xA02)));
-        _plant(type(SuperfluidGovDeployerLibrary).creationCode, address(uint160(0xA03)));
-        _plant(type(SuperfluidHostDeployerLibrary).creationCode, address(uint160(0xA04)));
-        _plant(type(SuperfluidCFAv1DeployerLibrary).creationCode, address(uint160(0xA05)));
-        _plant(type(SuperfluidIDAv1DeployerLibrary).creationCode, address(uint160(0xA06)));
-        _plant(type(SuperfluidPoolLogicDeployerLibrary).creationCode, address(uint160(0xA07)));
-        _plant(type(SuperfluidGDAv1DeployerLibrary).creationCode, address(uint160(0xA08)));
-        _plant(type(CFAv1ForwarderDeployerLibrary).creationCode, address(uint160(0xA09)));
-        _plant(type(GDAv1ForwarderDeployerLibrary).creationCode, address(uint160(0xA0A)));
-        _plant(type(SuperTokenDeployerLibrary).creationCode, address(uint160(0xA0B)));
-        _plant(type(SuperfluidPoolNFTLogicDeployerLibrary).creationCode, address(uint160(0xA0C)));
-        _plant(type(ProxyDeployerLibrary).creationCode, address(uint160(0xA0D)));
-        _plant(type(TokenDeployerLibrary).creationCode, address(uint160(0xA0E)));
-        _plant(type(SuperTokenFactoryDeployerLibrary).creationCode, address(uint160(0xA0F)));
-        _plant(type(SuperfluidPeripheryDeployerLibrary).creationCode, address(uint160(0xA10)));
-    }
-
-    function _plant(bytes memory creationCode, address pinned) internal {
-        address deployed;
-        assembly {
-            deployed := create(0, add(creationCode, 0x20), mload(creationCode))
-        }
-        require(deployed != address(0), "lib deploy failed");
-        HEVM.etch(pinned, deployed.code);
-    }
-
-    function _actor(uint8 idx) internal view returns (address) {
-        return _actors[idx % _actors.length];
-    }
-
-    function _bound(uint256 v, uint256 maxV) internal pure returns (uint256) {
-        if (maxV == 0) return 0;
-        return v % (maxV + 1);
-    }
-
-    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a < b ? a : b;
-    }
 
     /// @dev The super-token currently locked as the GDA stream buffer (Superfluid "deposit"),
     ///      expressed in underlying terms. `balanceOf` — and hence `scaledYieldAssetsBalance()` /
