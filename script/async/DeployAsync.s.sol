@@ -9,7 +9,7 @@ import { NetworkConfig } from "script/config/NetworkConfig.sol";
 import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
 
-contract Deploy is Script {
+contract DeployAsync is Script {
 
     function _startBroadcast() internal returns (address deployer) {
         vm.startBroadcast();
@@ -29,6 +29,7 @@ contract Deploy is Script {
 
         console.log("");
         console.log("===> DEPLOYMENT CONFIGURATION");
+        console.log(" --- Treasury                      :", config.treasury);
         console.log(" --- Underlying Asset              :", config.underlyingAsset);
         console.log(" --- Yield Asset                   :", config.yieldAsset);
         console.log(" --- Fund Operator                 :", config.fundOperator);
