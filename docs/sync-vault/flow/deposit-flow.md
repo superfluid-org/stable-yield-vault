@@ -90,18 +90,3 @@ sequenceDiagram
   out-of-band as the stream while the external position replenishes the reserve. After
   entry the share floats with the external vault.
 
-## ERC-4626 notes
-
-- `deposit` / `mint` are synchronous and pull underlying from the caller.
-- `previewDeposit` / `previewMint` work synchronously (OZ defaults — they do not revert).
-- `maxDeposit` / `maxMint` are additionally capped by the external vault's own deposit
-  limit (FM as holder), and are `0` under terminal impairment.
-- Shares are transferable; the vault's `_update` hook moves a proportional slice of GDA
-  units on shareholder-to-shareholder transfers.
-
-## Key properties
-
-- **NAV-neutral entry** — [B.2](../invariants.md#b2--deposits-are-nav-neutral-at-entry-echidna).
-- **No idle underlying in the FM** — [A.2](../invariants.md#a2--no-raw-underlying-at-rest-in-the-fundmanager-echidna).
-- **Stream starts at deposit** — [C.2](../invariants.md#c2--yield-stream-starts-at-deposit-and-stops-proportionally-at-withdraw-echidna).
-- **Units track contributed principal** — [C.1](../invariants.md#c1--units-track-contributed-principal-transfers-and-withdraws-move-a-share-proportional-slice-echidna).

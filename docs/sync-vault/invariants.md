@@ -8,7 +8,7 @@ entry gives:
 - **Holds when** — the conditions under which it holds (hard vs. best-effort).
 - **Breaks if** — the failure mode.
 
-Two strengths are distinguished throughout:
+Two strengths are distinguished:
 
 - **Hard** — holds after every operation regardless of operator behaviour, within the
   external vault's solvency limits.
@@ -16,40 +16,19 @@ Two strengths are distinguished throughout:
   structurally enforced; it degrades gracefully (never bricking user operations) under
   external supply constraints or terminal impairment.
 
-Each entry carries a verification tag:
+Verification tags:
 
 - `[echidna]` — fuzzed continuously by `test/echidna/EchidnaStableYieldSyncVault.sol`.
 - `[best-effort]` — a real property with legitimate carve-outs; documented, not asserted
   under fuzzing.
-- `[inherited]` — established by the shared `FundManagerBase` engine (covered by the
-  async echidna suite) or a one-time constructor check.
 
 The id scheme (letter + number) is referenced by the echidna harness and by
-[`design.md`](./design.md).
+[`design.md`](./design.md). **Ids are stable and never reused** — trimmed entries leave a
+gap (and a pointer under [Removed](#removed)) rather than renumbering the survivors.
 
 ---
 
 ## A. Custody
-
-### A.1 — Vault holds no assets `[echidna]`
-
-**State.**
-
-```
-underlyingAsset.balanceOf(vault) == 0   (always)
-yieldAsset.balanceOf(vault)      == 0   (always)
-```
-
-The vault is a pure share/accounting face. On deposit it pulls underlying from the caller
-straight to the FundManager; it never custodies underlying or super-token.
-
-**Where.** `StableYieldSyncVault._deposit` forwards to the FM; `_withdraw` hands off to
-`onWithdraw`, which pays the receiver directly.
-
-**Holds when.** Hard, always.
-
-**Breaks if.** A token is transferred to the vault manually (harmless — the vault's
-balance is not read by NAV).
 
 ### A.2 — No raw underlying at rest in the FundManager `[echidna]`
 
@@ -73,6 +52,11 @@ reserve slice and transfers it to the receiver.
 `balanceOf(FM)` while in-flight raw underlying is present (which is why the trim
 redeposits the exact amount, not the balance).
 
+> **The vault custodies nothing** `underlyingAsset.balanceOf(vault) == 0`
+> and `yieldAsset.balanceOf(vault) == 0` always — the vault forwards on deposit and
+> `onWithdraw` pays the receiver directly. Structural and unit-testable; the echidna
+> `_check()` still spot-asserts both balances cheaply, but it is not a standalone invariant.
+
 ---
 
 ## B. NAV & share accounting
@@ -86,35 +70,18 @@ convertToAssets(totalSupply()) <= totalManagedAssets()
 ```
 
 Strictly `<` with the virtual-shares offset. The total claim priced at NAV never exceeds
-recoverable value.
+recoverable value. This is the hard solvency guarantee that subsumes the softer
+"stayers are not diluted" economic property (former B.3).
 
 **Where.** OZ `ERC4626._convertToAssets` against `totalAssets()`.
 
 **Holds when.** Hard.
 
-### B.2 — Deposits are NAV-neutral at entry `[echidna]`
-
-**State.** A deposit only changes the *form* of the FM's assets (incoming underlying →
-external shares + reserve slice), both counted in NAV. The price per share immediately
-before and after is unchanged (modulo virtual-shares rounding in the vault's favour).
-
-**Where.** `onDeposit` grants units, upgrades the pre-fund slice, deploys the remainder;
-the mint happens in the vault before the hook.
-
-**Holds when.** Hard for the entry transition.
-
-### B.3 — Stayers are not diluted by another holder's op `[best-effort]`
-
-**State.** With external NAV and the reserve held fixed, a deposit or withdraw by user X
-does not meaningfully decrease `convertToAssets(balanceOf(Y))` for an untouched holder Y:
-deposits are NAV-neutral (B.2) and withdraws are floor-priced, so rounding leaves residual
-value with stayers.
-
-**Where.** OZ proportional accounting; `onWithdraw` removes exactly the pro-rata slice.
-
-**Holds when.** Best-effort / economic. A wei-exact per-op equality does not hold (virtual-
-share rounding and stream drain both move the price by sub-wei amounts), so the harness
-does not assert it; the hard solvency guarantee is B.1.
+> **Deposits are NAV-neutral at entry.** A deposit only changes the *form* of
+> the FM's assets (incoming underlying → external shares + reserve slice, both NAV-counted);
+> the price per share immediately before and after is unchanged, modulo virtual-shares
+> rounding in the vault's favour. Unit-testable per op; it underpins the no-extraction
+> round-trip property the harness fuzzes, but is not a separately-asserted invariant.
 
 ### B.4 — Withdrawal pays exactly the priced amount `[echidna]`
 
@@ -245,77 +212,9 @@ downgrading and getting stuck).
 **Breaks if.** A non-compliant external whose `deposit` reverts despite reporting
 `maxDeposit > 0` bypasses the pre-check and bricks the calling op (accepted limitation).
 
-### D.4 — Flow & fee rate relationships `[inherited]`
-
-**State.**
-
-```
-targetFlowRate   = _flowRatePerUnit · YIELD_POOL.getTotalUnits()
-_flowRatePerUnit = 1e12 · stableYieldRate / (YEAR · BP_DENOMINATOR)
-feeFlowRate      = targetFlowRate · FEE_BPS / BP_DENOMINATOR
-```
-
-The treasury retains its 1 fee-pool unit for the FM's lifetime.
-
-**Where.** `_targetFlowRate`, `_flowRatePerUnit` (constructor / `setStableYieldRate`), fee
-leg in `_recalibrateFlow`, treasury unit in the constructor (`FundManagerBase`).
-
-**Holds when.** Hard (shared engine).
-
-### D.5 — Duration floor `[inherited]`
-
-**State.** `guaranteedFlowDuration >= MIN_GUARANTEED_FLOW_DURATION` (1 day), and
-`rate · duration <= YEAR · BP_DENOMINATOR`. Enforced in the constructor and both setters.
-
-**Where.** `FundManagerBase` constructor, `setStableYieldRate`,
-`setGuaranteedFlowDuration`.
-
-**Holds when.** Hard.
-
----
-
-## E. Scaling & decimals (inherited)
-
-### E.1 — Yield asset wraps the underlying `[inherited]`
-
-**State.** `YIELD_ASSET.getUnderlyingToken() == underlyingAsset`; the constructor reverts
-`ASSET_MISMATCH` otherwise.
-
-**Where.** `FundManagerBase` constructor.
-
-### E.2 — External vault asset matches underlying `[inherited]`
-
-**State.** `EXTERNAL_VAULT.asset() == asset()`; the vault constructor reverts
-`EXTERNAL_ASSET_MISMATCH` otherwise. Not re-validated in the FM.
-
-**Where.** `StableYieldSyncVault` constructor.
-
-### E.3 — Scaling factors `[inherited]`
-
-**State.**
-
-```
-SCALING_FACTOR = 10 ** (18 − underlyingDecimals)
-RAW_PER_UNIT   = 10 ** (underlyingDecimals − 6)
-```
-
-`underlyingDecimals ∈ [6, 18]`; the constructor reverts `UNSUPPORTED_DECIMALS` otherwise.
-The hard-coded `1e12 = SCALING_FACTOR · RAW_PER_UNIT` assumes the supported range.
-
-**Where.** `FundManagerBase` constructor.
-
 ---
 
 ## F. ERC-4626 compliance
-
-### F.1 — Preview functions work synchronously `[echidna]`
-
-**State.** `previewDeposit/Mint/Redeem/Withdraw` use the OZ default and do **not** revert
-(unlike the async vault). They price off live `totalAssets()`.
-
-**Where.** Inherited OZ `ERC4626`; no override in `StableYieldSyncVault`.
-
-**Holds when.** Hard.
 
 ### F.2 — `max*` are honest, never-bricking bounds `[echidna]`
 
@@ -328,17 +227,14 @@ shares-proportional reserve sourcing in `onWithdraw`: `fromReserve = ceil(scaled
 shares / supplyBeforeBurn)` leaves `fromExternal = f · ext.maxWithdraw + f · raw ≤
 ext.maxWithdraw(FM)` for a compliant external (`f = shares / supply`).
 
-**Holds when.** Hard, modulo external-vault liquidity on the external leg. End-to-end
-against a compliant external in any loss state.
+**Holds when.** Hard, modulo external-vault liquidity on the external leg, **and while the
+FM super-token is solvent** (`availableBalance >= 0`). End-to-end against a compliant
+external in any loss state. The harness gates the no-brick assertion on solvency
+(`_assertNonNegativeYieldReserve`): under a live stream the FM never sits at
+`availableBalance < 0` because Superfluid sentinels liquidate at the zero-crossing — the
+harness models no liquidator, so a revert from an already-insolvent FM is the
+missing-sentinel artifact, not an F.2 violation (see
+`docs/sync-vault/audit/echidna-smoke-report-2026-06-05.md`).
 
 **Breaks if.** The external vault reports a `maxWithdraw` larger than it can service on
 `withdraw` (non-compliant external).
-
-### F.3 — Conversion round-trips favour the vault `[echidna]`
-
-**State.** `convertToAssets(convertToShares(a)) <= a` and
-`convertToShares(convertToAssets(s)) <= s` (OZ rounding).
-
-**Where.** Inherited OZ `ERC4626`.
-
-**Holds when.** Hard.
