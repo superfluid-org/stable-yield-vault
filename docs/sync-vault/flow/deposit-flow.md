@@ -21,7 +21,7 @@ for the properties.
 | Investor wallet | The underlying being deposited |
 | External vault (held by FM) | Deployed principal + the compounding external surplus. Recoverable via `EXTERNAL_VAULT.maxWithdraw(FM)` |
 | Reserve (FM, super-token) | The pre-fund slice that funds the GDA stream. Counted in NAV via `scaledYieldAssetsBalance()` |
-| FM (raw underlying) | Transient only — 0 at rest (custody hazard, [A.2](../invariants.md#a2--no-raw-underlying-at-rest-in-the-fundmanager-echidna)) |
+| FM (raw underlying) | Transient only — 0 at rest (custody hazard, [A.1](../invariants.md#a1--no-raw-underlying-at-rest-in-the-fundmanager-echidna)) |
 
 ## Sequence
 

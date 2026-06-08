@@ -17,7 +17,7 @@ Falsified: `redeem`, `withdraw`, `roundtrip_deposit_redeem`.
 
 | Property | Verdict |
 |---|---|
-| `redeem`, `withdraw` | **Harness artifact — invalid as a production bug** (Issue 1); **fixed in harness** via a solvency-gated F.2 assert (`_assertF2NoBrick`). Required the FM super-token to sit at `availableBalance < 0`, a state Superfluid sentinels prevent; the harness models no liquidator. |
+| `redeem`, `withdraw` | **Harness artifact — invalid as a production bug** (Issue 1); **fixed in harness** via a solvency-gated E.1 assert (`_assertNonNegativeYieldReserve`). Required the FM super-token to sit at `availableBalance < 0`, a state Superfluid sentinels prevent; the harness models no liquidator. |
 | `roundtrip_deposit_redeem` | **Low / Informational** (Issue 2). Genuine 1-wei round-trip rounding leak under a capped external; independent of the Issue 1 solvency artifact. |
 
 **Single common trigger:** every shrunk reproducer calls `external_set_liquidity_cap(tiny)` — `1`, `17`, or `2853` — before the failing exit. The mock external then reports `maxWithdraw(FM) = min(realPosition, cap) = cap` (a **compliant** ERC-4626 — `maxWithdraw` caps and `withdraw` reverts beyond it; see `test/mocks/MockERC4626.sol`). This is the **severe-but-non-terminal illiquidity** band: `ext.maxWithdraw(FM) > 0`, so the vault's terminal-impairment pause (`_isExternallyPaused()`, which triggers only at `maxWithdraw(FM) == 0`) does **not** engage, yet the external is effectively frozen.
@@ -29,13 +29,13 @@ The findings were reproduced deterministically by replaying the shrunk reproduce
 ## Issue 1 — `redeem` / `withdraw` brick — **Investigated → harness artifact (invalid as a production bug)**
 
 **Falsified properties:** `redeem`, `withdraw`.
-**Initial read:** F.2 break (Medium). **After investigation: not production-reachable — a harness modelling gap.**
+**Initial read:** E.1 break (Medium). **After investigation: not production-reachable — a harness modelling gap.**
 
-Both handlers bound the request to `max{Redeem,Withdraw}(actor)` and assert it then **never reverts** (invariant F.2, "`request ≤ max* ⇒ never bricks"`):
+Both handlers bound the request to `max{Redeem,Withdraw}(actor)` and assert it then **never reverts** (invariant E.1, "`request ≤ max* ⇒ never bricks"`):
 
 ```solidity
 try _vault.redeem(s, actor, actor) returns (uint256 assets) { ... }
-catch { assert(false); /* F.2 violated */ }
+catch { assert(false); /* E.1 violated */ }
 ```
 
 **Confirmed revert (replay of reproducer `7174…` for redeem, `504…` for withdraw):** the inner exit reverts with **`GDA_INSUFFICIENT_BALANCE()`**, caught → `assert(false)` → Panic `0x01`. The trace shows the FM super-token `availableBalance` is deeply **negative** (≈ `-1.7e18`) at the failing point.
@@ -58,13 +58,13 @@ availableBalance = -23e18               -> in-bounds redeem OK   (small toleranc
 availableBalance = -230e18              -> in-bounds redeem BRICKS (GDA_INSUFFICIENT_BALANCE)
 ```
 
-The in-bounds exit works throughout the entire solvent region and only bricks once the FM is **meaningfully insolvent** — a state production liquidates out of. **Conclusion: the captured redeem/withdraw F.2 break is a harness artifact (missing sentinel-liquidation actor), not a contract bug.** It is *not* a faithful instance of async Finding F-3 (F-3 is about the rebalance under-upgrading from a *clamped* balance on a *maintenance* op; this is about exiting from an *already-insolvent* account that production never reaches).
+The in-bounds exit works throughout the entire solvent region and only bricks once the FM is **meaningfully insolvent** — a state production liquidates out of. **Conclusion: the captured redeem/withdraw E.1 break is a harness artifact (missing sentinel-liquidation actor), not a contract bug.** It is *not* a faithful instance of async Finding F-3 (F-3 is about the rebalance under-upgrading from a *clamped* balance on a *maintenance* op; this is about exiting from an *already-insolvent* account that production never reaches).
 
 **Adjacent, genuinely-untested concern (track separately, not demonstrated here).** A *different* path the harness never exercises (because it never liquidates): reserve fully drains → sentinel liquidates the stream (flow = 0) → external is *still* illiquid → a holder redeems → the closing `_recalibrateFlow()` must now **restart** the flow (0 → positive), needing a fresh buffer the ~0 reserve can't fund → could revert at `availableBalance ≥ 0`. This is a flow **increase** (restart), not the decrease the harness hit, so it is a real possibility — but narrow and arguably not the vault's fault: with the external frozen, `totalManagedAssets ≈ maxWithdraw(FM) = cap`, so `maxRedeem` is already ~dust and the principal is trapped *in the external* regardless of the vault. Worst case is "a dust redeem reverts instead of paying dust." If we want certainty, it needs its **own** test that models the sentinel liquidation and then attempts the restart-redeem; it should not inherit this Issue's (now-invalid) evidence.
 
 **Disposition.**
 - **Issue 1 is invalid as a contract bug — no contract change.** The echidna evidence does not justify one.
-- **FIXED in the harness (option b, landed).** `EchidnaStableYieldSyncVault._assertF2NoBrick()` now gates the `redeem`/`withdraw`/`roundtrip` F.2 `assert(false)` on FM solvency: it reads `_usdcx.realtimeBalanceOfNow(FM).availableBalance` in the `catch` (failed op rolled back ⇒ the FM's going-in solvency) and only asserts F.2 when `availableBalance >= 0`. A revert from an already-insolvent FM (the missing-sentinel artifact) is tolerated; a revert while solvent is still a hard F.2 violation. Pinned by `test/vault/sync/EchidnaHarnessF2SolvencyGate.t.sol` — the two shrunk reproducers (`7174…` redeem, `504…` withdraw) replayed through the harness no longer Panic, and a solvent in-bounds exit still succeeds. (Option a — a full sentinel-liquidation actor — was considered heavier and would also have to resolve the restart path below; deferred.)
+- **FIXED in the harness (option b, landed).** `EchidnaStableYieldSyncVault._assertNonNegativeYieldReserve()` now gates the `redeem`/`withdraw`/`roundtrip` E.1 `assert(false)` on FM solvency: it reads `_usdcx.realtimeBalanceOfNow(FM).availableBalance` in the `catch` (failed op rolled back ⇒ the FM's going-in solvency) and only asserts E.1 when `availableBalance >= 0`. A revert from an already-insolvent FM (the missing-sentinel artifact) is tolerated; a revert while solvent is still a hard E.1 violation. Verified by replaying the two shrunk reproducers (`7174…` redeem, `504…` withdraw) through the harness — they no longer Panic — and confirming a solvent in-bounds exit still succeeds (the diagnostic test was not retained). (Option a — a full sentinel-liquidation actor — was considered heavier and would also have to resolve the restart path below; deferred.)
 - **Separate, still-open follow-up (not blocking):** the post-liquidation flow-restart path above. Decide via its own test (model the sentinel, then attempt the restart-redeem) whether a solvency-aware exit recalibrate (skip / `setStableYieldRate(0)`-style close when the reserve can't fund the restart) or a widened pause threshold (engage below the stream requirement, not only at `maxWithdraw(FM) == 0`) is warranted.
 
 ---
@@ -111,7 +111,7 @@ h.roundtrip_deposit_redeem(0, 118);   // returns 119 -> assert(assetsOut <= amt)
 
 11/14 invariants hold across 50k tx. All 3 falsifications share one trigger — a **compliant external whose withdrawal liquidity is throttled near zero but not to zero** (`external_set_liquidity_cap(tiny)`) — but they resolve very differently:
 
-- **redeem / withdraw → harness artifact (invalid); fixed in harness.** The brick requires the FM super-token at `availableBalance < 0`, which Superfluid sentinels prevent (they liquidate the stream at the zero-crossing). The harness models no liquidator, so it explores a state production never sustains. Empirically (boundary probe) the in-bounds exit works throughout the entire solvent region and only bricks once `availableBalance` is well below 0. **No contract change is justified.** Fixed in the harness via a solvency-gated F.2 assert (`_assertF2NoBrick`, pinned by `test/vault/sync/EchidnaHarnessF2SolvencyGate.t.sol`). A *separate, untested* path — post-liquidation flow-restart under a still-illiquid external — remains a possible (narrow) follow-up, to be decided by its own test, not by this run.
+- **redeem / withdraw → harness artifact (invalid); fixed in harness.** The brick requires the FM super-token at `availableBalance < 0`, which Superfluid sentinels prevent (they liquidate the stream at the zero-crossing). The harness models no liquidator, so it explores a state production never sustains. Empirically (boundary probe) the in-bounds exit works throughout the entire solvent region and only bricks once `availableBalance` is well below 0. **No contract change is justified.** Fixed in the harness via a solvency-gated E.1 assert (`_assertNonNegativeYieldReserve`). A *separate, untested* path — post-liquidation flow-restart under a still-illiquid external — remains a possible (narrow) follow-up, to be decided by its own test, not by this run.
 - **roundtrip → Low/Info (real).** Collapsed NAV (deposited principal invisible above the cap) lets a deposit→redeem round-trip extract 1 wei. Production-reachable but economically irrational.
 
 None of the three is introduced by the harness refactor/rename.

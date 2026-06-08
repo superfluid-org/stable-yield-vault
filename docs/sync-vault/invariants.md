@@ -23,14 +23,13 @@ Verification tags:
   under fuzzing.
 
 The id scheme (letter + number) is referenced by the echidna harness and by
-[`design.md`](./design.md). **Ids are stable and never reused** — trimmed entries leave a
-gap (and a pointer under [Removed](#removed)) rather than renumbering the survivors.
+[`design.md`](./design.md). It is numbered as a dense sequence with no gaps.
 
 ---
 
 ## A. Custody
 
-### A.2 — No raw underlying at rest in the FundManager `[echidna]`
+### A.1 — No raw underlying at rest in the FundManager `[echidna]`
 
 **State.**
 
@@ -71,7 +70,8 @@ convertToAssets(totalSupply()) <= totalManagedAssets()
 
 Strictly `<` with the virtual-shares offset. The total claim priced at NAV never exceeds
 recoverable value. This is the hard solvency guarantee that subsumes the softer
-"stayers are not diluted" economic property (former B.3).
+"stayers are not diluted" economic property (a sub-wei, best-effort property — virtual-share
+rounding and stream drain move the price by sub-wei amounts — so it is not separately listed).
 
 **Where.** OZ `ERC4626._convertToAssets` against `totalAssets()`.
 
@@ -83,7 +83,7 @@ recoverable value. This is the hard solvency guarantee that subsumes the softer
 > rounding in the vault's favour. Unit-testable per op; it underpins the no-extraction
 > round-trip property the harness fuzzes, but is not a separately-asserted invariant.
 
-### B.4 — Withdrawal pays exactly the priced amount `[echidna]`
+### B.2 — Withdrawal pays exactly the priced amount `[echidna]`
 
 **State.**
 
@@ -97,7 +97,7 @@ supplyBeforeBurn)` clamped at `redeemingAssets`; resting raw underlying spent fi
 external vault funds the remainder.
 
 **Holds when.** Hard, when the call does not revert. The external leg is bounded by
-`EXTERNAL_VAULT.maxWithdraw(FM)` for a compliant external (F.2), so a request within
+`EXTERNAL_VAULT.maxWithdraw(FM)` for a compliant external (E.1), so a request within
 `max*` lands.
 
 **Breaks if.** The reserve slice is computed against the wrong divisor, or `_downgrade`
@@ -197,7 +197,7 @@ best-effort (some operator setters may revert — accepted).
 
 **State.** When the external vault accepts deposits, the post-payout
 `_rebalanceYieldAssets()` trims any residual freed excess back into the external vault, so
-the reserve is at target and the FM is flat in underlying (A.2). When the external signals
+the reserve is at target and the FM is flat in underlying (A.1). When the external signals
 deposits closed (`EXTERNAL_VAULT.maxDeposit(FM) < underlyingNeeded`), the trim is skipped
 and the excess stays as above-target reserve slack until deposits reopen.
 
@@ -206,7 +206,7 @@ and the excess stays as above-target reserve slack until deposits reopen.
 
 **Holds when.** Best-effort. Above-target slack is safe (it funds the stream for longer,
 does not over-issue shares, does not transfer value between holders), and the next
-rebalance retries. A.2 holds hard throughout (the whole branch is skipped rather than
+rebalance retries. A.1 holds hard throughout (the whole branch is skipped rather than
 downgrading and getting stuck).
 
 **Breaks if.** A non-compliant external whose `deposit` reverts despite reporting
@@ -214,9 +214,9 @@ downgrading and getting stuck).
 
 ---
 
-## F. ERC-4626 compliance
+## E. ERC-4626 compliance
 
-### F.2 — `max*` are honest, never-bricking bounds `[echidna]`
+### E.1 — `max*` are honest, never-bricking bounds `[echidna]`
 
 **State.** `maxDeposit/maxMint` are capped by `EXTERNAL_VAULT.maxDeposit(FM)`;
 `maxWithdraw/maxRedeem` by `totalManagedAssets()` (the NAV is the global upper bound a
@@ -233,7 +233,7 @@ external in any loss state. The harness gates the no-brick assertion on solvency
 (`_assertNonNegativeYieldReserve`): under a live stream the FM never sits at
 `availableBalance < 0` because Superfluid sentinels liquidate at the zero-crossing — the
 harness models no liquidator, so a revert from an already-insolvent FM is the
-missing-sentinel artifact, not an F.2 violation (see
+missing-sentinel artifact, not an E.1 violation (see
 `docs/sync-vault/audit/echidna-smoke-report-2026-06-05.md`).
 
 **Breaks if.** The external vault reports a `maxWithdraw` larger than it can service on

@@ -127,7 +127,7 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         uint256 balBefore = _usdc.balanceOf(actor);
         HEVM.prank(actor);
-        // F.2: a request within `maxWithdraw` must NEVER brick *while the FM is solvent*. Shares-
+        // E.1: a request within `maxWithdraw` must NEVER brick *while the FM is solvent*. Shares-
         // proportional reserve sourcing bounds the external leg at `ext.maxWithdraw(FM)`, and the
         // closing `_recalibrateFlow()` only *lowers* the flow rate (releases GDA buffer). The only
         // way an in-bounds exit reverts is from an FM driven to `availableBalance < 0` — a state
@@ -135,9 +135,9 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         // `_assertNonNegativeYieldReserve`). The external mock is compliant.
         try _vault.withdraw(amt, actor, actor) returns (uint256 burned) {
             _ghostSupply -= burned;
-            assert(_usdc.balanceOf(actor) - balBefore == amt); // B.4: pays exactly
+            assert(_usdc.balanceOf(actor) - balBefore == amt); // B.2: pays exactly
         } catch {
-            _assertNonNegativeYieldReserve(); // F.2 holds while solvent; tolerate the no-sentinel artifact
+            _assertNonNegativeYieldReserve(); // E.1 holds while solvent; tolerate the no-sentinel artifact
         }
 
         _check();
@@ -150,12 +150,12 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         uint256 balBefore = _usdc.balanceOf(actor);
         HEVM.prank(actor);
-        // F.2: a request within `maxRedeem` must NEVER brick while solvent (see `withdraw`).
+        // E.1: a request within `maxRedeem` must NEVER brick while solvent (see `withdraw`).
         try _vault.redeem(s, actor, actor) returns (uint256 assets) {
             _ghostSupply -= s;
-            assert(_usdc.balanceOf(actor) - balBefore == assets); // B.4: pays exactly
+            assert(_usdc.balanceOf(actor) - balBefore == assets); // B.2: pays exactly
         } catch {
-            _assertNonNegativeYieldReserve(); // F.2 holds while solvent; tolerate the no-sentinel artifact
+            _assertNonNegativeYieldReserve(); // E.1 holds while solvent; tolerate the no-sentinel artifact
         }
 
         _check();
@@ -183,7 +183,7 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
                     assert(assetsOut <= amt); // no value extracted on a round-trip
                     assert(_usdc.balanceOf(actor) <= balBefore); // net non-positive
                 } catch {
-                    _assertNonNegativeYieldReserve(); // F.2: an in-bounds redeem must land while solvent
+                    _assertNonNegativeYieldReserve(); // E.1: an in-bounds redeem must land while solvent
                 }
             }
         } catch { }
@@ -295,12 +295,12 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         // share is impaired below par (floor rounding keeps convertToAssets(supply) <= NAV).
         assert(_vault.convertToAssets(_vault.totalSupply()) <= _fundManager.totalManagedAssets());
 
-        // A.2 / Custody hazard (invariants.md A.2): neither the vault nor the FM holds idle
+        // A.1 / Custody hazard (invariants.md A.1): neither the vault nor the FM holds idle
         // underlying at rest — principal is always deployed to external or upgraded within a call.
         assert(_usdc.balanceOf(address(_vault)) == 0);
         assert(_usdc.balanceOf(address(_fundManager)) == 0);
 
-        // Custody (invariants.md A.2, "the vault custodies nothing"): the vault never holds the
+        // Custody (invariants.md A.1, "the vault custodies nothing"): the vault never holds the
         // super-token either — the reserve lives entirely in the FM.
         assert(_usdcx.balanceOf(address(_vault)) == 0);
 
@@ -332,21 +332,21 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
     ///      `ensureYieldFlowDuration()` (operator-only; `address(this)` holds the role) before every
     ///      op, so the reserve is topped up and never sits insolvent when a user op's
     ///      `_recalibrateFlow()` fires. Combined with the sub-horizon time-advance cap, this is what
-    ///      makes the F.2 no-brick guarantee on withdraw/redeem hold. Allowed to revert (terminal
+    ///      makes the E.1 no-brick guarantee on withdraw/redeem hold. Allowed to revert (terminal
     ///      impairment) — swallowed, since the keeper can't help there either.
     modifier keepAlive() {
         try _fundManager.ensureYieldFlowDuration() { } catch { }
         _;
     }
 
-    /// @dev F.2 ("a request within `max*` never bricks") holds only while the FM super-token is
+    /// @dev E.1 ("a request within `max*` never bricks") holds only while the FM super-token is
     ///      *solvent* — `availableBalance >= 0`. Under an adversarial external liquidity cap the
     ///      reserve can be driven below zero, but that state is NOT production-reachable for a live
     ///      stream: Superfluid sentinels liquidate the GDA distribution at the zero-crossing, so the
     ///      FM never sits at `availableBalance < 0`. This harness models no liquidator, so the fuzzer
     ///      can walk into that region; an exit reverting there is the missing-sentinel artifact, not
-    ///      an F.2 violation. Measured in the `catch` (failed op rolled back) ⇒ reads the FM's
-    ///      going-in solvency. Assert F.2 only when the FM was solvent; tolerate the brick otherwise.
+    ///      an E.1 violation. Measured in the `catch` (failed op rolled back) ⇒ reads the FM's
+    ///      going-in solvency. Assert E.1 only when the FM was solvent; tolerate the brick otherwise.
     function _assertNonNegativeYieldReserve() internal view {
         (int256 availableBalance,,,) = _usdcx.realtimeBalanceOfNow(address(_fundManager));
         if (availableBalance >= 0) assert(false); // solvent FM ⇒ an in-bounds exit must never brick

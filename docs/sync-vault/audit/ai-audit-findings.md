@@ -18,12 +18,12 @@ _Generated 2026-06-03 · branch `feat/sync-vault` · scope limited to the sync-v
 
 ## Findings
 
-[85] **1. Raw underlying counted in NAV but never paid out — permissionless withdraw-DoS + permanent value stranding (F.2 break)**
+[85] **1. Raw underlying counted in NAV but never paid out — permissionless withdraw-DoS + permanent value stranding (E.1 break)**
 
 `SyncFundManager.onWithdraw / totalManagedAssets` · Confidence: 85
 
 **Description**
-`totalManagedAssets()` sums `UNDERLYING_ASSET.balanceOf(FM)` (`SyncFundManager.sol:170-171`) and so inflates `maxWithdraw`/`maxRedeem`, but `onWithdraw` sources payouts **only** from the reserve (`fromYieldAssets`) and `EXTERNAL_VAULT.withdraw` (`fromExternal`, line 151) — no code path ever spends a resting raw balance. Anyone can `transfer` raw USDC directly to the FM (cost = the donation): NAV and the advertised `max*` rise by `D`, then a holder redeeming up to `maxRedeem` computes `fromExternal = redeemingAssets − fromYieldAssets > EXTERNAL_VAULT.maxWithdraw(FM)` and the external withdraw reverts — bricking large/full redemptions and permanently stranding `D`. This breaks invariant **F.2** ("request ≤ `max*` ⇒ never reverts") and directly contradicts the documented assumption that raw-underlying donations are harmless "irrational gifts" (`CLAUDE.md` / `design.md §Security`).
+`totalManagedAssets()` sums `UNDERLYING_ASSET.balanceOf(FM)` (`SyncFundManager.sol:170-171`) and so inflates `maxWithdraw`/`maxRedeem`, but `onWithdraw` sources payouts **only** from the reserve (`fromYieldAssets`) and `EXTERNAL_VAULT.withdraw` (`fromExternal`, line 151) — no code path ever spends a resting raw balance. Anyone can `transfer` raw USDC directly to the FM (cost = the donation): NAV and the advertised `max*` rise by `D`, then a holder redeeming up to `maxRedeem` computes `fromExternal = redeemingAssets − fromYieldAssets > EXTERNAL_VAULT.maxWithdraw(FM)` and the external withdraw reverts — bricking large/full redemptions and permanently stranding `D`. This breaks invariant **E.1** ("request ≤ `max*` ⇒ never reverts") and directly contradicts the documented assumption that raw-underlying donations are harmless "irrational gifts" (`CLAUDE.md` / `design.md §Security`).
 
 **Concrete trace** (sole holder owning all supply `S`; external recoverable `E`, reserve `Y`, donation `D`; at-rest raw = 0 per Inv. 7):
 
@@ -36,7 +36,7 @@ redeem(S):
   redeemingAssets = E + Y + D
   fromYieldAssets = ceil(Y · S/S)  = Y                (clamped at redeemingAssets)
   fromExternal    = (E+Y+D) − Y    = E + D
-  EXTERNAL_VAULT.withdraw(E + D)  reverts  (only E is withdrawable)   ← F.2 broken
+  EXTERNAL_VAULT.withdraw(E + D)  reverts  (only E is withdrawable)   ← E.1 broken
 ```
 
 The donated `D` is never consumed by any path (`_upgrade`/`EXTERNAL_VAULT.deposit` use the *incoming* `assets`; `_rebalanceYieldAssets` deficit>0 pulls only from external, deficit<0 downgrades only super-token), so it rests forever, inflating the share price with phantom value and capping the realizable top of every holder's exit at fraction `E/(E+D)`.
@@ -51,7 +51,7 @@ The donated `D` is never consumed by any path (`_upgrade`/`EXTERNAL_VAULT.deposi
 -        + UNDERLYING_ASSET.balanceOf(address(this));
 +    // Inv. 7: raw underlying never rests in the FM across calls (onDeposit/onWithdraw fully
 +    // clear it within the call), so an at-rest raw balance only ever reflects a donation the
-+    // payout path cannot realize. Excluding it keeps NAV honest and preserves F.2.
++    // payout path cannot realize. Excluding it keeps NAV honest and preserves E.1.
 +    return EXTERNAL_VAULT.maxWithdraw(address(this)) + scaledYieldAssetsBalance();
  }
 ```
@@ -102,7 +102,7 @@ _Below threshold — description only, no fix block. A robust remedy would gate 
 
 | # | Confidence | Title |
 |---|---|---|
-| 1 | [85] | Raw underlying in NAV but unpayable → withdraw-DoS + value stranding (F.2 break) |
+| 1 | [85] | Raw underlying in NAV but unpayable → withdraw-DoS + value stranding (E.1 break) |
 | 2 | [75] | `onShareTransfer` reverts on zero units where `onWithdraw` skips → dust shares non-transferable |
 | 3 | [72] | Dust external-vault-share donation forces false `_isExternallyPaused` → bricks bootstrap deposits |
 
@@ -114,7 +114,7 @@ _Vulnerability trails with concrete code smells where the full exploit path coul
 
 - **Missing `nonReentrant` on operator setters** — `FundManagerBase.setStableYieldRate` / `ensureYieldFlowDuration` — Code smells: both invoke `_rebalanceYieldAssets()` (external `EXTERNAL_VAULT.withdraw/deposit`) without the `nonReentrant` that the sibling `setGuaranteedFlowDuration` carries (line 214). Trigger requires the trusted operator + a malicious external vault re-entering mid-rebalance (e.g. into `vault.transfer` → `onShareTransfer` while units/reserve are half-updated) — operator-gated, so demoted; add the guard for consistency.
 - **Ceil-rounded reserve slice over-draws the stream reserve** — `SyncFundManager.onWithdraw` — Code smells: `fromYieldAssets = scaledYieldAssetsBalance().mulDiv(shares, supplyBeforeBurn, Ceil)` (line 142) takes an over-proportional reserve bite on every redeem; under a deposit-capped-but-liquid external the post-payout rebalance can't refill, so stayers' forward-solvency horizon degrades. Cumulative magnitude vs. operator `ensureYieldFlowDuration` cadence unverified.
-- **Deposit-side `max*` may revert (F.2 on deposit)** — `SyncFundManager.onDeposit` — Code smells: unconditional `EXTERNAL_VAULT.deposit(toExternal)` (line 109) when the vault-level `maxDeposit` only bounds the *total* deposit; a deposit-capped (not impaired) external could reject the post-pre-fund remainder even though `assets ≤ maxDeposit` passed.
+- **Deposit-side `max*` may revert (E.1 on deposit)** — `SyncFundManager.onDeposit` — Code smells: unconditional `EXTERNAL_VAULT.deposit(toExternal)` (line 109) when the vault-level `maxDeposit` only bounds the *total* deposit; a deposit-capped (not impaired) external could reject the post-pre-fund remainder even though `assets ≤ maxDeposit` passed.
 - **Pathological `rate × guaranteedFlowDuration` bricks every deposit** — `SyncFundManager.onDeposit` — Code smells: `toUpgrade = min(need, assets)` clamps the pre-fund but `_recalibrateFlow()` runs unconditionally (line 112); when `rate · duration > YEAR · BP` the reserve stays below the GDA buffer and `distributeFlow` reverts. No on-chain bound enforces `rate · duration ≤ YEAR · BP` (operator-misconfig reachable; flagged in `CLAUDE.md` as a known tradeoff).
 - **Pause fails to engage on total-loss share-burn** — `StableYieldSyncVault._isExternallyPaused` — Code smells: gated on `balanceOf(FM) > 0`; an external 4626 that burns the FM's shares to 0 on a socialized total loss reads `maxWithdraw == 0 && balanceOf == 0` → not paused, so holders race to drain the reserve via `withdraw`/`redeem` against `totalManagedAssets`, defeating D.2. Hinges on the external's loss accounting.
 - **Silent `int96`/`uint96` flow-rate truncation** — `FundManagerBase._targetFlowRate` / `evaluateYieldAssetsDeficit` / `setStableYieldRate` — Code smells: `_flowRatePerUnit * int96(int128(getTotalUnits()))` (line 301) and the unbounded operator `newRate` cast (line 205) wrap silently; thresholds (~1e14+ USDC of units, or an extreme rate) are far beyond realistic TVL, so latent-robustness only.

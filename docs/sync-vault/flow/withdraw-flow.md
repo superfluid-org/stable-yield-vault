@@ -77,7 +77,7 @@ sequenceDiagram
      dust position with 0 units is skipped, not reverted.
    - **Source the payout** for `redeemingAssets`, in priority order:
      - **Resting raw underlying** (`fromDonation`, measured before any downgrade): only
-       ever a donation (A.2). It is counted in NAV, so the redeemer is entitled to their
+       ever a donation (A.1). It is counted in NAV, so the redeemer is entitled to their
        slice; spending it first keeps the external leg bounded and stops the donation being
        stranded. Capped at the external slice.
      - **Reserve slice** (shares-proportional):
@@ -87,7 +87,7 @@ sequenceDiagram
      - **External remainder:** `fromExternal = redeemingAssets − fromReserve − fromDonation`,
        drawn via `EXTERNAL_VAULT.withdraw(fromExternal, receiver, FM)`. For a compliant
        external this is `≤ EXTERNAL_VAULT.maxWithdraw(FM)`, so a request within `max*` never
-       bricks (F.2); it reverts only if the external over-reports `maxWithdraw`.
+       bricks (E.1); it reverts only if the external over-reports `maxWithdraw`.
 
      The receiver ends with exactly `redeemingAssets`; the FM holds 0 underlying.
    - **Rebalance.** `_rebalanceYieldAssets()` restores the reserve to target for the
@@ -138,7 +138,7 @@ reserve target (best-effort).
 
 ## Key properties
 
-- **Pays exactly the priced amount** — [B.4](../invariants.md#b4--withdrawal-pays-exactly-the-priced-amount-echidna).
-- **`max*` never bricks under loss** — [F.2](../invariants.md#f2--max-are-honest-never-bricking-bounds-echidna).
-- **No idle underlying in the FM** — [A.2](../invariants.md#a2--no-raw-underlying-at-rest-in-the-fundmanager-echidna).
+- **Pays exactly the priced amount** — [B.2](../invariants.md#b2--withdrawal-pays-exactly-the-priced-amount-echidna).
+- **`max*` never bricks under loss** — [E.1](../invariants.md#e1--max-are-honest-never-bricking-bounds-echidna).
+- **No idle underlying in the FM** — [A.1](../invariants.md#a1--no-raw-underlying-at-rest-in-the-fundmanager-echidna).
 - **Dust position does not brick withdraw** — [C.3](../invariants.md#c3--dust-position-shares-but-zero-units-does-not-brick-withdraw-echidna).
