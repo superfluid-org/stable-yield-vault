@@ -111,7 +111,7 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
             if (amt >= _fundManager.RAW_PER_UNIT()) {
                 assert(pool.getUnits(actor) > unitsBefore);
             }
-            _assertNotDiluted(by, yBefore, bufBefore); // B.4
+            _assertNotDiluted(by, yBefore, bufBefore); // B.3
         } catch { }
 
         _check();
@@ -131,7 +131,7 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         // `deposit`).
         try _vault.mint(s, actor) returns (uint256) {
             _ghostSupply += s;
-            _assertNotDiluted(by, yBefore, bufBefore); // B.4
+            _assertNotDiluted(by, yBefore, bufBefore); // B.3
         } catch { }
 
         _check();
@@ -147,13 +147,13 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         HEVM.prank(actor);
         // F.2: a request within `maxWithdraw` must NEVER brick. Shares-proportional reserve
-        // sourcing (R-shares) bounds the external leg at `ext.maxWithdraw(FM)`, and the closing
+        // sourcing bounds the external leg at `ext.maxWithdraw(FM)`, and the closing
         // `_recalibrateFlow()` only *lowers* the flow rate (releases GDA buffer, cannot revert from
         // a drained reserve). The external mock is compliant, so a revert here is a real bug.
         try _vault.withdraw(amt, actor, actor) returns (uint256 burned) {
             _ghostSupply -= burned;
-            assert(_usdc.balanceOf(actor) - balBefore == amt); // B.6: pays exactly
-            _assertNotDiluted(by, yBefore, bufBefore); // B.4
+            assert(_usdc.balanceOf(actor) - balBefore == amt); // B.4: pays exactly
+            _assertNotDiluted(by, yBefore, bufBefore); // B.3
         } catch {
             assert(false); // F.2 violated
         }
@@ -173,8 +173,8 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         // F.2: a request within `maxRedeem` must NEVER brick (see `withdraw`).
         try _vault.redeem(s, actor, actor) returns (uint256 assets) {
             _ghostSupply -= s;
-            assert(_usdc.balanceOf(actor) - balBefore == assets); // B.6: pays exactly
-            _assertNotDiluted(by, yBefore, bufBefore); // B.4
+            assert(_usdc.balanceOf(actor) - balBefore == assets); // B.4: pays exactly
+            _assertNotDiluted(by, yBefore, bufBefore); // B.3
         } catch {
             assert(false); // F.2 violated
         }
@@ -250,10 +250,9 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
     }
 
     function operator_ensure_flow() external {
-        // INV-4 (revised 2026-05-26): with the clamp gone, `ensureYieldFlowDuration` is a
-        // capital-neutral shuffle between the external position and the super-token reserve. There
-        // is no `trackedPrincipal` to pin; the reserve-inclusive NAV identity in `_check()` is the
-        // post-condition (upgrade/downgrade + external round-trip are 1:1 modulo rounding, which
+        // INV-4: `ensureYieldFlowDuration` is a capital-neutral shuffle between the external
+        // position and the super-token reserve. The reserve-inclusive NAV identity in `_check()` is
+        // the post-condition (upgrade/downgrade + external round-trip are 1:1 modulo rounding, which
         // the external position absorbs).
         try _fundManager.ensureYieldFlowDuration() { } catch { }
         _check();
@@ -304,22 +303,20 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         // Supply only changes via mint/burn in deposit/withdraw/redeem.
         assert(_vault.totalSupply() == _ghostSupply);
 
-        // INV-2 (reserve-inclusive NAV, floating share, NO clamp — revised 2026-05-26):
-        // totalAssets is the plain sum of the FM's recoverable balances (the external position,
-        // the scaled super-token reserve, and any raw underlying held by the FM). The
-        // `min(trackedPrincipal, …)` clamp / ≈1:1-peg model was dropped 2026-05-26 (see
-        // docs/sync-vault/design.md §Revision 2026-05-26); the share now floats with the external
-        // vault's performance, so there is no longer a principal ceiling to assert against.
+        // INV-2 (reserve-inclusive NAV, floating share, no clamp): totalAssets is the plain sum of
+        // the FM's recoverable balances (the external position, the scaled super-token reserve, and
+        // any raw underlying held by the FM). The share floats with the external vault's
+        // performance, so there is no principal ceiling to assert against.
         uint256 recoverable = _external.maxWithdraw(address(_fundManager)) + _fundManager.scaledYieldAssetsBalance()
             + _usdc.balanceOf(address(_fundManager));
         assert(_vault.totalAssets() == recoverable);
 
-        // INV-B.2 (no share over-issuance): the total claim priced at NAV never exceeds the
+        // INV-B.1 (no share over-issuance): the total claim priced at NAV never exceeds the
         // recoverable value. Holds with equality under the OZ virtual-shares offset even when the
         // share is impaired below par (floor rounding keeps convertToAssets(supply) <= NAV).
         assert(_vault.convertToAssets(_vault.totalSupply()) <= _fundManager.totalManagedAssets());
 
-        // A.2 / Custody hazard (design.md Inv. 7): neither the vault nor the FM holds idle
+        // A.2 / Custody hazard (invariants.md A.2): neither the vault nor the FM holds idle
         // underlying at rest — principal is always deployed to external or upgraded within a call.
         assert(_usdc.balanceOf(address(_vault)) == 0);
         assert(_usdc.balanceOf(address(_fundManager)) == 0);
@@ -328,13 +325,13 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         // entirely in the FM.
         assert(_usdcx.balanceOf(address(_vault)) == 0);
 
-        // D.2 (terminal external impairment ⇒ full pause): when the FM holds a position the
-        // external vault can no longer service (`ext.maxWithdraw(FM) == 0` while
-        // `ext.balanceOf(FM) > 0`), all four `max*` MUST be forced to 0 so OZ reverts every
-        // entrypoint cleanly (never a raw GDA revert). The empty-position bootstrap is excluded by
-        // the `balanceOf > 0` gate.
-        bool paused =
-            _external.maxWithdraw(address(_fundManager)) == 0 && _external.balanceOf(address(_fundManager)) > 0;
+        // D.2 (terminal external impairment ⇒ full pause): with shares outstanding
+        // (`totalSupply() > 0`) and the external vault unable to service withdrawals
+        // (`ext.maxWithdraw(FM) == 0`), all four `max*` MUST be forced to 0 so OZ reverts every
+        // entrypoint cleanly (never a raw GDA revert). The empty-vault bootstrap (`totalSupply() ==
+        // 0`) is excluded so the first deposit is not bricked. Mirrors
+        // `StableYieldSyncVault._isExternallyPaused()`.
+        bool paused = _vault.totalSupply() > 0 && _external.maxWithdraw(address(_fundManager)) == 0;
         if (paused) {
             assert(_vault.maxDeposit(_actors[0]) == 0);
             assert(_vault.maxMint(_actors[0]) == 0);
@@ -360,14 +357,14 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
     /// @dev The super-token currently locked as the GDA stream buffer (Superfluid "deposit"),
     ///      expressed in underlying terms. `balanceOf` — and hence `scaledYieldAssetsBalance()` /
     ///      NAV — excludes this locked deposit, so growing the flow moves this much value out of NAV
-    ///      transiently. Used to relax B.4 (see `_assertNotDiluted`).
+    ///      transiently. Used to relax B.3 (see `_assertNotDiluted`).
     function _gdaBuffer() internal view returns (uint256) {
         (, uint256 lockedDeposit,,) = _usdcx.realtimeBalanceOfNow(address(_fundManager));
         return lockedDeposit / _fundManager.SCALING_FACTOR();
     }
 
     /// @dev Pick any share-holding actor other than `acting` and snapshot its NAV-priced value plus
-    ///      the current GDA buffer. Used to check B.4 (another holder's op must not dilute an
+    ///      the current GDA buffer. Used to check B.3 (another holder's op must not dilute an
     ///      untouched holder beyond the buffer delta).
     function _bystander(address acting)
         internal
@@ -383,25 +380,25 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         return (address(0), 0, bufferBefore);
     }
 
-    /// @dev B.4 (relaxed 2026-06-03): an untouched holder's NAV-priced value must not fall by MORE
-    ///      than the increase in the NAV-excluded GDA stream buffer. Deposits are NAV-neutral and
-    ///      withdraws floor-priced (both favour stayers), so the only way a stayer ticks down within
-    ///      a single op is the Superfluid buffer: raising the flow locks more super-token as the
-    ///      stream "deposit", which NAV excludes — a bounded, recoverable mechanic, not a value
-    ///      leak. A shrinking buffer only releases value back, so the tolerance is clamped at 0 on
-    ///      that side. (No warp / external move is interleaved inside an op, so D.3 / B.5 stay
-    ///      isolated.)
+    /// @dev B.3: an untouched holder's NAV-priced value must not fall by MORE than the increase in
+    ///      the NAV-excluded GDA stream buffer. Deposits are NAV-neutral and withdraws floor-priced
+    ///      (both favour stayers), so the only way a stayer ticks down within a single op is the
+    ///      Superfluid buffer: raising the flow locks more super-token as the stream "deposit",
+    ///      which NAV excludes — a bounded, recoverable mechanic, not a value leak. A shrinking
+    ///      buffer only releases value back, so the tolerance is clamped at 0 on that side. (No warp
+    ///      / external move is interleaved inside an op, so stream-drain and external-performance
+    ///      effects stay isolated.)
     function _assertNotDiluted(address, uint256, uint256) internal pure {
-        // B.4 (disabled 2026-06-03 — pending design decision): "a stayer is never diluted by another
-        // holder's op" is NOT a hard, wei-exact per-op invariant. Two legitimate mechanics break it:
+        // B.3 is NOT a hard, wei-exact per-op invariant (disabled here, kept as a documented
+        // economic property). Two legitimate mechanics break wei-exact equality:
         //   1. GDA stream buffer — raising the flow locks super-token excluded from NAV (small,
         //      ~flowRate·liquidationPeriod, recoverable).
         //   2. External-ERC4626 share rounding — every rebalance round-trip (`EXTERNAL_VAULT.deposit`
         //      /`withdraw`, run by keepAlive's ensure AND onDeposit/onWithdraw) loses up to ~1
         //      external share to floor rounding; under a distorted external share price this is
         //      large (measured up to 0.01%+/op, far above the buffer).
-        // The robust solvency guarantee is B.2 (no over-issuance), still asserted in `_check()`.
-        // Left as a documented economic property; see invariants.md B.4.
+        // The robust solvency guarantee is B.1 (no over-issuance), still asserted in `_check()`.
+        // Left as a documented economic property; see invariants.md B.3.
         return;
     }
 

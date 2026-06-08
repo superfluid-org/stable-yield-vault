@@ -138,16 +138,8 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             YIELD_POOL.decreaseMemberUnits(holder, delta);
         }
 
-        // Pay the withdrawal from (in priority) any resting raw underlying, the yield reserve, then
+        // Pay the withdrawal from any resting raw underlying, the yield reserve, then
         // the external vault. The yield reserve slice is proportional to the shares being redeemed.
-        //
-        // Resting raw underlying is only ever a donation (Inv. 7 — principal never rests as raw): it
-        // is counted in NAV (`totalManagedAssets`), so the redeemer is entitled to their pro-rata
-        // slice of it. Realizing it here, ahead of the external vault, (i) keeps F.2 intact — a
-        // donation can no longer inflate `fromExternal` past `ext.maxWithdraw(FM)` — and (ii) stops
-        // the donation from being permanently stranded (it accrues to holders, the documented
-        // "irrational gift"). Measured *before* `_downgrade` so it captures only the pre-existing
-        // resting balance, not the reserve slice about to be downgraded into this same balance.
         uint256 fromDonation = UNDERLYING_ASSET.balanceOf(address(this));
 
         uint256 fromYieldAssets = scaledYieldAssetsBalance().mulDiv(shares, supplyBeforeBurn, Math.Rounding.Ceil);
@@ -207,29 +199,14 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
     //  /___/_/ /_/\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
     /**
-     * @dev Sync override of the abstract base hook. Brings the super-token reserve to the
-     *      forward-solvency target (`flowRate * guaranteedFlowDuration` in super-token terms) by
-     *      sourcing or sinking through the external vault. Best-effort:
+     * @dev Brings the super-token reserve to the forward-solvency target (`flowRate * guaranteedFlowDuration` in
+     *      super-token terms) by
+     *      depositing or withdrawing from the external vault.
      *
-     *      - `deficit > 0` (reserve below target): pull `min(need, EXTERNAL_VAULT.maxWithdraw(this))`
-     *        out of the external position and upgrade.
+     *      - `deficit > 0` (yield reserve below target): pull out of the external vault position and upgrade.
      *
-     *      - `deficit < 0` (reserve above target): if the external vault will accept the
-     *        redeposit (`EXTERNAL_VAULT.maxDeposit(this) >= underlyingNeeded`), downgrade the
-     *        excess super-token back to underlying and redeposit **exactly that amount**
-     *        (`underlyingNeeded`) so the buffer keeps compounding externally. Otherwise **skip the
-     *        trim entirely** — the excess stays in the reserve as above-target super-token slack
-     *        and the next rebalance retries. This preserves Inv. 7 / A.2 (no raw underlying at
-     *        rest in the FM) hard, at the cost of relaxing D.4 (reserve may sit above target while
-     *        external deposits are unavailable). Trusts ERC-4626 compliance: a non-compliant
-     *        external whose `deposit` reverts despite `maxDeposit > 0` would still brick the
-     *        calling op — accepted limitation, pinned by `test_withdraw_brickedByNonCompliantExternal`
-     *        (see design.md §Security).
-     *
-     *      Note: the trim deposits the **exact** `underlyingNeeded` rather than `balanceOf(this)`.
-     *      The latter would sweep any in-flight raw underlying held mid-call (notably the user's
-     *      just-arrived `assets` during `onDeposit`); see CVE-class regression pinned by
-     *      `test_deposit_notBrickedAfterSuperTokenDonation`.
+     *      - `deficit < 0` (yield reserve above target): if the external vault accepts the
+     *        redeposit, downgrade the excess super-token back to underlying and deposit exactly that amount.
      */
     function _rebalanceYieldAssets() internal override {
         int256 deficit = evaluateYieldAssetsDeficit();

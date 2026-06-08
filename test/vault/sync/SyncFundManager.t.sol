@@ -80,9 +80,9 @@ contract SyncFundManagerTest is SyncVaultTestBase {
     }
 
     /// @dev The shared `onShareTransfer` skips (no-op) when the sender holds zero pool units rather
-    ///      than reverting (audit Finding 2 fix). A zero-units sender has nothing to move (`delta`
-    ///      would be 0), and reverting would brick transfers of a dust share position whose units
-    ///      were `Ceil`-zeroed by a near-full redeem. The end-to-end reachable path is pinned by
+    ///      than reverting. A zero-units sender has nothing to move (`delta` would be 0), and
+    ///      reverting would brick transfers of a dust share position whose units were `Ceil`-zeroed
+    ///      by a near-full redeem. The end-to-end reachable path is covered by
     ///      `test_residualSharesTransferableAfterUnitZeroingRedeem` in the vault suite.
     function test_onShareTransfer_skipsOnZeroUnits() public {
         // ALICE never deposited → zero units.
@@ -95,10 +95,9 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         assertEq(_fundManager.YIELD_POOL().getUnits(BOB), 0, "receiver gets no units (sender had none)");
     }
 
-    /// @dev Lead 4 fix: the shared base bounds `rate * duration <= YEAR * BP_DENOMINATOR` (the
-    ///      pre-fund for the guarantee horizon never exceeds 100% of the streamed notional). The
-    ///      operator cannot set a rate that, combined with the current duration, breaches it; the
-    ///      boundary itself is allowed.
+    /// @dev The shared base bounds `rate * duration <= YEAR * BP_DENOMINATOR` (the pre-fund for the
+    ///      guarantee horizon never exceeds 100% of the streamed notional). The operator cannot set a
+    ///      rate that, combined with the current duration, breaches it; the boundary itself is allowed.
     function test_setStableYieldRate_revertsOnUnsustainableCombination() public {
         uint256 maxRate = (_fundManager.YEAR() * 10_000) / _fundManager.guaranteedFlowDuration();
 
@@ -113,8 +112,8 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         assertEq(_fundManager.stableYieldRate(), maxRate, "rate set to the sustainability boundary");
     }
 
-    /// @dev Lead 4 fix, duration side: the admin cannot set a duration that, combined with the
-    ///      current rate, breaches `rate * duration <= YEAR * BP_DENOMINATOR`; the boundary is allowed.
+    /// @dev Duration side: the admin cannot set a duration that, combined with the current rate,
+    ///      breaches `rate * duration <= YEAR * BP_DENOMINATOR`; the boundary is allowed.
     function test_setGuaranteedFlowDuration_revertsOnUnsustainableCombination() public {
         uint256 maxDuration = (_fundManager.YEAR() * 10_000) / _fundManager.stableYieldRate();
 

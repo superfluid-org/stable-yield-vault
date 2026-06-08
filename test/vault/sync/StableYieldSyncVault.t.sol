@@ -17,12 +17,12 @@ import { StableYieldSyncVault } from "src/vault/sync/StableYieldSyncVault.sol";
 
 /**
  * @title StableYieldSyncVaultTest
- * @notice Sync-vault suite for the floating-share model (revision 2026-05-26): FM is sole
- *         custodian, stream pre-funded from each deposit (no `_seedReserve` needed for the
- *         baseline), reserve-inclusive NAV with NO clamp — `totalAssets` is the plain sum of the
- *         FM's recoverable balances, so the external surplus accrues to holders as share
- *         appreciation and losses reflect immediately. Withdraw pays the reserve slice from the
- *         recalibration-freed excess; exits are OZ pro-rata. See `docs/sync-vault/design.md`.
+ * @notice Sync-vault suite for the floating-share model: the FM is the sole custodian, the
+ *         stream is pre-funded from each deposit, and NAV is the reserve-inclusive plain sum of
+ *         the FM's recoverable balances (no clamp), so the external surplus accrues to holders as
+ *         share appreciation and losses reflect immediately. Withdraw pays a shares-proportional
+ *         reserve slice plus the external vault; exits are OZ pro-rata. See
+ *         `docs/sync-vault/design.md`.
  */
 contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
@@ -59,7 +59,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(address(_fundManager.EXTERNAL_VAULT()), address(_external), "FM owns EXTERNAL_VAULT");
     }
 
-    /// @dev Lead 4 fix: the shared base constructor rejects an initial `rate * duration` that exceeds
+    /// @dev The shared base constructor rejects an initial `rate * duration` that exceeds
     ///      `YEAR * BP_DENOMINATOR` (would pre-fund > 100% of the streamed notional). 100% rate for
     ///      2 years breaches it; the FM constructor reverts and propagates through the vault ctor.
     function test_constructor_revertsOnUnsustainableRateDuration() public {
@@ -501,29 +501,30 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(shares, 0, "first deposit mints shares despite empty external position");
     }
 
-    /// @dev Regression for audit Finding 3: the pause was gated on `EXTERNAL_VAULT.balanceOf(FM) > 0`,
-    ///      which a dust external-*share* donation can spoof — dust shares floor to
+    /// @dev A dust external-*share* donation must not pause the bootstrap. Dust shares floor to
     ///      `maxWithdraw(FM) == 0` (here via a sub-1 external PPS; equivalently, for a decimals-offset
-    ///      external, at any PPS), so `balanceOf(FM) > 0 && maxWithdraw(FM) == 0` flipped all four
-    ///      `max*` to 0 and bricked the bootstrap. The `totalSupply() == 0` gate removes the lever:
-    ///      with no depositors there is nothing to protect, so the donation cannot pause the vault.
+    ///      external, at any PPS), so a gate keyed on `balanceOf(FM) > 0 && maxWithdraw(FM) == 0`
+    ///      would flip all four `max*` to 0 and brick the bootstrap. The `totalSupply() == 0` gate
+    ///      removes the lever: with no depositors there is nothing to protect, so the donation cannot
+    ///      pause the vault.
     function test_bootstrap_notBrickedByDustExternalShareDonation(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
 
         // Push the external into a sub-1 PPS state, then donate a single dust share to the FM so the
-        // FM holds external shares worth 0 recoverable assets — the exact state the old gate paused on.
+        // FM holds external shares worth 0 recoverable assets — the exact state a balance-keyed gate
+        // would pause on.
         _dealUSDC(address(this), 2e6);
         _usdc.approve(address(_external), type(uint256).max);
         _external.deposit(2e6, address(this));
         _external.simulateLoss(2e6 - 1); // totalAssets → 1, totalSupply → 2e6 ⇒ convertToAssets(1) == 0
         _external.transfer(address(_fundManager), 1);
 
-        // The old pause trigger is satisfied …
+        // A balance-keyed gate would trigger here …
         assertGt(_external.balanceOf(address(_fundManager)), 0, "FM holds donated dust external shares");
-        assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "dust shares recover 0 assets (old pause trigger)");
+        assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "dust shares recover 0 assets");
         // … but with no supply the vault is NOT paused.
         assertEq(_vault.totalSupply(), 0, "still bootstrap");
-        assertGt(_vault.maxDeposit(ALICE), 0, "bootstrap NOT bricked by the dust donation (Finding 3)");
+        assertGt(_vault.maxDeposit(ALICE), 0, "bootstrap NOT bricked by the dust donation");
 
         uint256 shares = _deposit(ALICE, amount);
         assertGt(shares, 0, "first deposit succeeds despite the dust donation");
@@ -546,8 +547,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         uint256 maxW = _vault.maxWithdraw(ALICE);
         assertGt(maxW, 0, "withdraw open under partial impairment");
 
-        // A withdrawal within the external's serviceable liquidity (≤ cap) succeeds. (Withdrawing
-        // the full `maxWithdraw` here is the separate, still-open OQ #3 over-promise — not tested.)
+        // A withdrawal within the external's serviceable liquidity (≤ cap) succeeds.
         uint256 wAssets = cap < maxW ? cap : maxW;
         vm.prank(ALICE);
         _vault.withdraw(wAssets, ALICE, ALICE);
@@ -556,9 +556,9 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
     /// @dev The pause also triggers on a genuine total loss (external underlying drained to 0), not
     ///      only on a liquidity freeze: with shares outstanding (`supply > 0`), `maxWithdraw(FM) == 0`
-    ///      is sufficient — the gate no longer inspects the FM's external share balance, so a total
-    ///      loss pauses whether the external keeps the now-worthless shares or burns them (the latter
-    ///      is the share-burn lead the old `balanceOf(FM) > 0` gate failed to catch).
+    ///      is sufficient — the gate does not inspect the FM's external share balance, so a total
+    ///      loss pauses whether the external keeps the now-worthless shares or burns them (a
+    ///      balance-keyed gate would miss the share-burn variant).
     function test_terminalImpairment_viaTotalLoss() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
 
@@ -587,13 +587,10 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_fundManager.YIELD_POOL().getUnits(BOB), 0, "units followed the transfer");
     }
 
-    /// @dev Regression for audit Finding 2: the `Ceil`-rounded unit decrease in `onWithdraw` can
-    ///      zero a holder's GDA units while leaving a dust share residual (a near-full redeem
-    ///      rounds `delta` up to the holder's entire unit balance). Before the fix, the shared
-    ///      `onShareTransfer` reverted with `BAD_SHARE_TRANSFER` on the now-zero-units sender,
-    ///      making that residual permanently non-transferable (still redeemable — a dust transfer
-    ///      DoS, no fund loss). The fix skips the (no-op) unit move on zero units, so the residual
-    ///      stays transferable.
+    /// @dev The `Ceil`-rounded unit decrease in `onWithdraw` can zero a holder's GDA units while
+    ///      leaving a dust share residual (a near-full redeem rounds `delta` up to the holder's
+    ///      entire unit balance). `onShareTransfer` skips the (no-op) unit move when the sender has
+    ///      zero units, so that residual stays transferable (it must not revert).
     function test_residualSharesTransferableAfterUnitZeroingRedeem() public {
         // 1 USDC → 1e6 units, 1e18 shares (offset 12). Smallest position where a near-full redeem
         // Ceil-rounds the unit decrease up to the full 1e6, zeroing units ahead of the last shares.
@@ -610,7 +607,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(residual, 0, "dust share residual remains");
         assertEq(_fundManager.YIELD_POOL().getUnits(ALICE), 0, "units Ceil-zeroed ahead of the residual");
 
-        // The residual must remain transferable (pre-fix: reverts BAD_SHARE_TRANSFER).
+        // The residual must remain transferable.
         vm.prank(ALICE);
         _vault.transfer(BOB, residual);
 
@@ -619,10 +616,10 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_fundManager.YIELD_POOL().getUnits(BOB), 0, "no units moved (sender had none)");
     }
 
-    /// @dev With the clamp gone a super-token donation to the FM is no longer absorbed: it
-    ///      raises NAV and the share price for EXISTING holders. This is an irrational gift, not
-    ///      an attack — the donor mints no shares and cannot extract the donation. (The genuine
-    ///      residual surface is the classic first-deposit inflation attack; see §Security.)
+    /// @dev A super-token donation to the FM is not absorbed: it raises NAV and the share price for
+    ///      EXISTING holders. This is an irrational gift, not an attack — the donor mints no shares
+    ///      and cannot extract the donation. (The genuine residual surface is the classic
+    ///      first-deposit inflation attack; see `test_firstDepositInflation_victimMintsNonZero`.)
     function test_donation_superTokenToFM_accruesToHolders() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
         uint256 sharesUnit = 1e18; // one whole 18-dec share (offset 12)
@@ -638,17 +635,15 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_vault.convertToAssets(sharesUnit), pxBefore, "share price rises for existing holders");
     }
 
-    /// @dev Regression for the deposit-brick griefing surface that existed before the 2026-06-02
-    ///      `_rebalanceYieldAssets()` trim fix. Pre-fix the trim branch read
-    ///      `UNDERLYING_ASSET.balanceOf(this)` and redeposited everything, sweeping the user's
-    ///      just-arrived `assets` (which live in the FM as raw underlying during `onDeposit`); the
-    ///      explicit `EXTERNAL_VAULT.deposit(toExternal, …)` later in `onDeposit` then reverted
-    ///      against the now-empty FM. The fix downgrades + redeposits **exactly** `underlyingNeeded`,
-    ///      leaving the user's in-flight raw untouched.
+    /// @dev A deposit must not be bricked by an above-target reserve. The `_rebalanceYieldAssets()`
+    ///      trim downgrades + redeposits **exactly** `underlyingNeeded`, not `balanceOf(this)` — the
+    ///      latter would sweep the user's just-arrived `assets` (which live in the FM as raw
+    ///      underlying during `onDeposit`), so the explicit `EXTERNAL_VAULT.deposit(toExternal, …)`
+    ///      later in `onDeposit` would revert against an empty FM.
     ///
     ///      Trigger: any persistent reserve > target state at deposit time. Cheapest is a
-    ///      super-token donation directly to the FM (donor loses the donation, every subsequent
-    ///      `deposit` would brick — a low-cost DoS).
+    ///      super-token donation directly to the FM (donor loses the donation; without the fix every
+    ///      subsequent `deposit` would brick — a low-cost DoS).
     function test_deposit_notBrickedAfterSuperTokenDonation() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
 
@@ -658,23 +653,21 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         _dealUSDCx(address(_fundManager), 500 ether);
 
         // Bob's deposit must succeed: the trim branch in onDeposit must not sweep Bob's raw
-        // underlying. Pre-fix this reverted with ERC20InsufficientBalance from the external's
-        // transferFrom on the empty FM.
+        // underlying.
         uint256 bobShares = _deposit(BOB, DEFAULT_DEPOSIT);
 
-        assertGt(bobShares, 0, "Bob's deposit mints shares (no longer bricked)");
-        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds 0 raw underlying after deposit (Inv. 7)");
-        // Bob's units track his nominal contributed principal (Inv. 6 / C.1).
+        assertGt(bobShares, 0, "Bob's deposit mints shares (not bricked)");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds 0 raw underlying after deposit (A.2)");
+        // Bob's units track his nominal contributed principal (C.1).
         assertEq(
             _fundManager.YIELD_POOL().getUnits(BOB), DEFAULT_DEPOSIT, "Bob units == _toUnit(assets) regardless of NAV"
         );
     }
 
-    /// @dev Regression for the non-malicious trigger: operator drops the rate while external
-    ///      deposits are closed (the trim is skipped by the OQ #4 best-effort gate, leaving the
+    /// @dev Non-malicious trigger of the same above-target-reserve state: the operator drops the
+    ///      rate while external deposits are closed (the best-effort trim is skipped, leaving the
     ///      reserve above the new target as super-token slack), then external reopens, then a user
-    ///      deposits. Pre-fix the deposit bricked on the now-reachable trim path. Post-fix the
-    ///      trim runs cleanly and the deposit succeeds.
+    ///      deposits. The trim, now reachable, must run cleanly and the deposit must succeed.
     function test_deposit_notBrickedAfterRateDropWithClosedExternal() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
 
@@ -688,24 +681,20 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         // External reopens. The above-target slack is now redeposit-able.
         _external.setDepositCap(type(uint256).max);
 
-        // Bob's deposit must succeed: the trim, now reachable, must not sweep Bob's raw
-        // underlying. Pre-fix this reverted at `EXTERNAL_VAULT.deposit(toExternal, …)` against
-        // the swept FM.
+        // Bob's deposit must succeed: the trim, now reachable, must not sweep Bob's raw underlying.
         uint256 bobShares = _deposit(BOB, DEFAULT_DEPOSIT);
 
-        assertGt(bobShares, 0, "Bob's deposit mints shares (no longer bricked)");
-        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds 0 raw underlying after deposit (Inv. 7)");
+        assertGt(bobShares, 0, "Bob's deposit mints shares (not bricked)");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds 0 raw underlying after deposit (A.2)");
     }
 
-    /// @dev Regression for audit Finding 1: a raw-underlying donation to the FM is counted in NAV
-    ///      (`totalManagedAssets` sums `UNDERLYING_ASSET.balanceOf(FM)`) and so lifts the advertised
-    ///      `max*`. Before the fix, `onWithdraw` sourced the external slice as
-    ///      `redeemingAssets - fromYieldAssets` without ever spending the resting raw balance, so a
-    ///      full redeem computed `fromExternal = E + D > ext.maxWithdraw(FM) = E` and the external
-    ///      withdraw reverted — bricking large/full redemptions (F.2 break) and permanently stranding
-    ///      the donation `D`. The fix realizes the resting raw first (capped at the external slice),
-    ///      keeping `fromExternal ≤ ext.maxWithdraw(FM)` and routing the donation to the holder (the
-    ///      documented "irrational gift", now actually delivered rather than stranded).
+    /// @dev A raw-underlying donation to the FM is counted in NAV (`totalManagedAssets` sums
+    ///      `UNDERLYING_ASSET.balanceOf(FM)`) and so lifts the advertised `max*`. `onWithdraw`
+    ///      realizes the resting raw first (capped at the external slice), keeping
+    ///      `fromExternal ≤ ext.maxWithdraw(FM)`. Without this, a full redeem would compute
+    ///      `fromExternal = E + D > ext.maxWithdraw(FM) = E` and the external withdraw would revert,
+    ///      bricking the redemption (F.2 break) and stranding the donation `D`. Realizing it routes
+    ///      the donation to the holder (the "irrational gift", delivered rather than stranded).
     function test_redeem_notBrickedByRawUnderlyingDonation() public {
         uint256 shares = _deposit(ALICE, DEFAULT_DEPOSIT);
         uint256 navBefore = _fundManager.totalManagedAssets(); // < deposit: GDA stream buffer is locked out
@@ -718,8 +707,8 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         uint256 navAfter = _fundManager.totalManagedAssets();
         assertEq(navAfter, navBefore + donation, "raw donation counted in NAV");
 
-        // Sole holder redeems everything within maxRedeem: must NOT revert (F.2). Pre-fix this
-        // reverted in EXTERNAL_VAULT.withdraw (fromExternal = E + D > ext.maxWithdraw(FM) = E).
+        // Sole holder redeems everything within maxRedeem: must NOT revert (F.2). Without realizing
+        // the raw, this would revert in EXTERNAL_VAULT.withdraw (fromExternal = E + D > maxWithdraw = E).
         uint256 maxR = _vault.maxRedeem(ALICE);
         assertEq(maxR, shares, "all shares redeemable (request == max*)");
 
@@ -734,7 +723,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "donation fully realized; no raw stranded in FM");
     }
 
-    /// @dev First-deposit inflation resistance (the clamp's replacement under the floating share).
+    /// @dev First-deposit inflation resistance under the floating share.
     ///      An attacker seeds the empty vault with 1 share then donates super-token to the FM to
     ///      inflate price-per-share, aiming to round the victim's deposit to 0 shares. The
     ///      `_decimalsOffset() == 12` override (10**12 virtual shares) makes this infeasible: even a
@@ -755,7 +744,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(_vault.previewDeposit(victimAmount), 0, "victim mints non-zero shares (virtual-share offset)");
     }
 
-    /// @dev Custody hazard invariant (design.md Inv. 7): the FM holds 0 underlying at rest
+    /// @dev Custody hazard invariant (invariants.md A.2): the FM holds 0 underlying at rest
     ///      after every entrypoint. Principal in transit must never linger as raw underlying,
     ///      or the rebalance trim branch would treat it as excess to redeposit.
     function test_custodyHazard_fmHoldsNoIdleUnderlying() public {
@@ -776,14 +765,13 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     ///      standard ERC-4626 channel (`maxDeposit == 0`) while still servicing withdrawals.
     ///      The `_rebalanceYieldAssets()` `deficit < 0` branch's pre-check skips the post-payout
     ///      trim, leaving the freed excess as above-target super-token slack in the reserve
-    ///      (D.4 weakened to "best-effort, gated on external maxDeposit"). Pinned by this test
-    ///      (resolution of `[VERIFY]` redeposit-revert, 2026-05-28).
+    ///      (D.3: best-effort, gated on external maxDeposit).
     function test_withdraw_notBrickedByRedepositCap(uint256 amount, uint256 wPortion) public {
         amount = bound(amount, 2e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
 
         // External: standards-compliant "deposits closed" signal (maxDeposit returns 0); withdrawals
-        // continue. The α fix's pre-check honours this.
+        // continue. The trim's pre-check honours this.
         _external.setDepositCap(0);
 
         uint256 wAssets = bound(wPortion, 1e6, _vault.maxWithdraw(ALICE));
@@ -794,8 +782,8 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     }
 
     /// @dev F.2 under loss: for any holder and any `s <= maxRedeem(holder)`, `redeem` succeeds
-    ///      and pays `previewRedeem(s)`. Loss framing — `simulateLoss` for the realistic
-    ///      external-position-impaired case (replaces the prior `setLiquidityCap` framing).
+    ///      and pays `previewRedeem(s)`. `simulateLoss` models the external position losing
+    ///      principal.
     function test_redeem_serviceableUnderLoss(uint256 amount, uint256 lossPortion, uint256 sPortion) public {
         amount = bound(amount, 2e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
@@ -818,7 +806,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
         assertEq(assets, expected, "redeem(s<=maxR) pays previewRedeem(s)");
         assertEq(_usdc.balanceOf(ALICE) - balBefore, expected, "receiver got exactly previewRedeem");
-        // Inv. 7 / A.2 preserved.
+        // A.2 preserved.
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
     }
 
@@ -843,7 +831,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
     }
 
-    /// @dev The load-bearing case from Step 2's repro: redeem `maxR` under loss.
+    /// @dev The load-bearing case: redeem `maxR` under loss.
     ///      `redeem(maxR)` must succeed and pay `previewRedeem(maxR)`. The reserve slice
     ///      `scaledReserve * maxR / supply` bridges precisely the gap between `previewRedeem(maxR)`
     ///      (= NAV-ish) and `ext.maxWithdraw(FM)` (= NAV - scaledReserve - raw). Note `maxR` may
@@ -865,16 +853,15 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         uint256 assets = _vault.redeem(maxR, ALICE, ALICE);
 
         assertEq(assets, expected, "redeem(maxR) pays previewRedeem(maxR)");
-        // Inv. 7 / A.2 preserved even at the cap.
+        // A.2 preserved even at the cap.
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
     }
 
-    /// @dev Positive characterisation of the R-shares improvement (paired with
-    ///      `test_withdraw_earlyEntrant_brickedByNonCompliantExternal`). Single-holder full exit
-    ///      under a non-compliant external: `f == f_u == 1` (sole holder), so post-payout
-    ///      deficit ~= 0 and `_rebalanceYieldAssets()` does not attempt the trim that would
-    ///      reach `EXTERNAL_VAULT.deposit`. The withdraw succeeds. Previously bricked under the
-    ///      old pre-payout-eviction code path.
+    /// @dev Positive characterisation of shares-proportional reserve sourcing (paired with the
+    ///      known-limitation test `test_withdraw_lateEntrantAfterGain_brickedByNonCompliantExternal`).
+    ///      A single-holder full exit under a non-compliant external has share fraction == unit
+    ///      fraction == 1 (sole holder), so the post-payout deficit is ~0 and `_rebalanceYieldAssets()`
+    ///      does not attempt the trim that would reach `EXTERNAL_VAULT.deposit`. The withdraw succeeds.
     function test_withdraw_singleHolderFullExit_notBrickedByNonCompliantExternal() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
         _external.setDepositReverts(true);
@@ -888,13 +875,13 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM holds no idle underlying");
     }
 
-    /// @dev KNOWN LIMITATION (R-shares restated): the best-effort trim trusts ERC-4626 compliance.
-    ///      Under R-shares the single-holder full exit no longer reaches the trim path (paired
-    ///      positive test above), but multi-holder exits where the holder has *higher* `units /
-    ///      share` than the global average do — they leave `f < f_u` and the post-payout
-    ///      `_rebalanceYieldAssets()` `deficit < 0` branch tries to redeposit. A non-compliant
-    ///      external that reverts `deposit` despite `maxDeposit > 0` bricks the withdraw.
-    ///      Accepted; design.md §Security requires standard, audited externals.
+    /// @dev KNOWN LIMITATION: the best-effort trim trusts ERC-4626 compliance. A single-holder full
+    ///      exit no longer reaches the trim path (paired positive test above), but a multi-holder
+    ///      exit where the holder has a *higher* `units / share` than the global average leaves a
+    ///      post-payout surplus, so the `_rebalanceYieldAssets()` `deficit < 0` branch tries to
+    ///      redeposit. A non-compliant external that reverts `deposit` despite `maxDeposit > 0`
+    ///      bricks the withdraw. Accepted; design.md security considerations require standard,
+    ///      audited externals.
     ///
     ///      Setup: external gains after Alice's deposit, so Bob enters at a higher
     ///      price-per-share and ends up with a *higher* `units / share` than Alice (his shares
@@ -912,11 +899,11 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         _deposit(BOB, DEFAULT_DEPOSIT);
 
         // Non-compliant external: `deposit` reverts unconditionally; `maxDeposit` still > 0 so
-        // the OQ #4 pre-check does not skip the trim. Withdrawals from external still work.
+        // the trim's pre-check does not skip it. Withdrawals from external still work.
         _external.setDepositReverts(true);
 
         // Bob partial-exits half his shares. His `units / share` exceeds the global average
-        // (Alice drags it down), so for his removal `f_u > f` → post-payout deficit < 0 (surplus)
+        // (Alice drags it down), so his removal leaves a post-payout surplus (deficit < 0)
         // → trim → `EXTERNAL_VAULT.deposit` reverts → the redeem bricks.
         uint256 half = _vault.balanceOf(BOB) / 2;
         vm.prank(BOB);

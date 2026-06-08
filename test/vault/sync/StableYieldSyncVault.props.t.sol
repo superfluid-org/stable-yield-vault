@@ -8,10 +8,8 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 /**
  * @title StableYieldSyncVaultPropsTest
  * @notice Property / multi-user tests for the sync vault, mapped to `docs/sync-vault/invariants.md`.
- *         These assert settled invariants that hold today (all former open-questions surfaces were
- *         resolved 2026-05-29 and their target-behaviour tests folded into the main suite
- *         `StableYieldSyncVault.t.sol`). Everything is fuzzed over amounts + magnitudes; multi-holder
- *         where the invariant is about cross-holder isolation.
+ *         Everything is fuzzed over amounts + magnitudes; multi-holder where the invariant is about
+ *         cross-holder isolation.
  */
 contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
 
@@ -26,7 +24,7 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
     //  / /_/ /   / __/   / /_/ /  / /|  / /_/ /| |/ /  / // /| |/ /  __/ /     (__  |__  ) /_/ / /_/  __/
     // /_____/   /____/   \____/  /_/ |_/\____/ |___/   \___/ |___/\___/_/     /____/____/\__,_/\__/\___/
 
-    /// @dev B.2 — no share over-issuance: the total claim priced at NAV never exceeds the
+    /// @dev B.1 — no share over-issuance: the total claim priced at NAV never exceeds the
     ///      recoverable value, across deposits, a withdraw, and external gain/loss.
     function test_prop_noOverIssuance(uint256 amountA, uint256 amountB, int256 pnl, uint256 wPortion) public {
         amountA = bound(amountA, 1e6, ONE_BILLION * 1e6);
@@ -47,7 +45,7 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
             _vault.withdraw(wAssets, BOB, BOB);
         }
 
-        // B.2: convertToAssets(totalSupply) <= totalManagedAssets() (strict-≤ with virtual shares).
+        // B.1: convertToAssets(totalSupply) <= totalManagedAssets() (strict-≤ with virtual shares).
         assertLe(
             _vault.convertToAssets(_vault.totalSupply()),
             _fundManager.totalManagedAssets(),
@@ -63,7 +61,7 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
     // /_____/     /_/      /____/\__/\__,_/\__, /\___/_/  /____/  /_/ /_/\____/\__/   \__,_/_/\__/\__/\__/\___/\__,_/
     //                                     /____/
 
-    /// @dev B.4 — a stayer is not diluted by another holder's deposit+withdraw, holding external
+    /// @dev B.3 — a stayer is not diluted by another holder's deposit+withdraw, holding external
     ///      NAV and the reserve fixed (no warp, no external P&L). ALICE's redeemable value must not
     ///      fall (beyond the few-bp recalibrate tick) when BOB churns.
     function test_prop_stayerNotDiluted(uint256 amountA, uint256 amountB, uint256 wPortion) public {
@@ -93,7 +91,7 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
     // /_____/   /_/          |__/|__/_/\__/_/ /_/_/_/_/   \__,_/_/ |_/  / .___/\__,_/\__, /____/  (_)
     //                                                                  /_/         /____/
 
-    /// @dev B.6 — a withdrawal pays the receiver exactly the requested underlying, including from
+    /// @dev B.4 — a withdrawal pays the receiver exactly the requested underlying, including from
     ///      an off-par (gained/impaired) state where the reserve + external legs split the payout.
     function test_prop_withdrawPaysExact(uint256 amount, int256 pnl, uint256 wPortion) public {
         amount = bound(amount, 2e6, ONE_BILLION * 1e6);
@@ -240,11 +238,11 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
         );
     }
 
-    /// @dev D.4 (weakened 2026-05-28): when the external vault won't accept the post-payout trim
-    ///      (`maxDeposit(FM) == 0`), `_rebalanceYieldAssets()` skips the `deficit < 0` branch and
-    ///      leaves the freed excess as above-target super-token slack in the reserve. The
-    ///      load-bearing property is that this slack must NOT block subsequent ops and must NOT
-    ///      violate Inv. 7 / A.2 (no raw underlying at rest). We exercise: two withdraws at
+    /// @dev D.3: when the external vault won't accept the post-payout trim (`maxDeposit(FM) == 0`),
+    ///      `_rebalanceYieldAssets()` skips the `deficit < 0` branch and leaves the freed excess as
+    ///      above-target super-token slack in the reserve. The load-bearing property is that this
+    ///      slack must NOT block subsequent ops and must NOT violate A.2 (no raw underlying at
+    ///      rest). We exercise: two withdraws at
     ///      `maxDeposit == 0`, then reopening deposits + an operator rebalance — none should
     ///      revert, all should preserve `balanceOf(FM)_underlying == 0`, and the second withdraw
     ///      must pay exact. The trim's effect on the deficit value itself is subtler (sub-
@@ -264,7 +262,7 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
         vm.prank(ALICE);
         _vault.withdraw(wAssets1, ALICE, ALICE);
         assertEq(_usdc.balanceOf(ALICE) - balBefore1, wAssets1, "first withdraw pays exact under maxDeposit==0");
-        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "Inv. 7 after first withdraw");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "A.2 after first withdraw");
 
         // A second withdraw at the same closed-deposits state must still pay exact.
         uint256 remainingMax = _vault.maxWithdraw(ALICE);
@@ -274,14 +272,14 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
             vm.prank(ALICE);
             _vault.withdraw(wAssets2, ALICE, ALICE);
             assertEq(_usdc.balanceOf(ALICE) - balBefore2, wAssets2, "second withdraw pays exact under maxDeposit==0");
-            assertEq(_usdc.balanceOf(address(_fundManager)), 0, "Inv. 7 after second withdraw");
+            assertEq(_usdc.balanceOf(address(_fundManager)), 0, "A.2 after second withdraw");
         }
 
         // Reopening external deposits + operator rebalance must not revert.
         _external.setDepositCap(type(uint256).max);
         vm.prank(FUND_OPERATOR);
         _fundManager.ensureYieldFlowDuration();
-        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "Inv. 7 after operator rebalance");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "A.2 after operator rebalance");
     }
 
     /// @dev Withdraw decreases the holder's units by `ceil(holderUnits · shares / totalSharesOwned)`.
@@ -319,8 +317,8 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
     // /_/       /____/  /_/ |_/\___/|___/\___/_/        /_____/_/  /_/\___/_/|_/____/
     //
     // F.2 — `request <= max* => never reverts` under loss with a compliant external.
-    // Pins the OQ #5 resolution (R-shares, 2026-05-29) across the multi-holder `units/share`
-    // drift regime that arises naturally with the floating share and external P&L.
+    // Covers the multi-holder `units/share` drift regime that arises naturally with the floating
+    // share and external P&L (shares-proportional reserve sourcing keeps the external leg bounded).
 
     /// @dev Two holders enter at different prices (Alice first, gain, Bob), then external
     ///      loss leaves `ext.maxWithdraw(FM) > 0` (loss, not terminal). Either holder
