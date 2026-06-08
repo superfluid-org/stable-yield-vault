@@ -6,6 +6,7 @@ import { MockERC4626 } from "test/mocks/MockERC4626.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ERC4626 } from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { ISuperfluidPool } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/ISuperfluidPool.sol";
@@ -721,6 +722,49 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(ALICE) - aliceBefore, assetsOut, "receiver got the full payout");
         assertApproxEqAbs(assetsOut, navAfter, 2, "holder realizes ~full NAV including the donation");
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "donation fully realized; no raw stranded in FM");
+    }
+
+    /// @dev Covers the `fromDonation > fromExternal` cap in `onWithdraw`: when the resting raw
+    ///      donation exceeds the external slice of *this* withdrawal, only the slice's worth is spent
+    ///      and the remainder stays resting (realized by later withdrawals). Triggered by a donation
+    ///      large relative to a *partial* redeem (the full sole-holder redeem in the test above takes
+    ///      the `<=` branch: the slice = external + donation > donation). The redeem must still
+    ///      succeed and `fromExternal` must stay 0 (the slice is fully covered by the capped donation).
+    function test_redeem_rawDonationCappedAtExternalSlice() public {
+        uint256 shares = _deposit(ALICE, DEFAULT_DEPOSIT);
+
+        // A raw donation far larger than the external slice of a small partial redeem.
+        uint256 donation = 3000 * 1e6;
+        _dealUSDC(address(_fundManager), donation);
+
+        // Redeem only 10% of the position. fromExternal (pre-cap) = redeemingAssets - fromYieldAssets
+        // ≈ 10% of (external + donation), which is well below the full `donation` resting in the FM,
+        // so the cap on line `if (fromDonation > fromExternal) fromDonation = fromExternal;` fires.
+        uint256 sharesToRedeem = shares / 10;
+        uint256 supply = _vault.totalSupply();
+        uint256 redeemingAssets = _vault.previewRedeem(sharesToRedeem);
+        uint256 fromYieldAssets = Math.min(
+            Math.mulDiv(_fundManager.scaledYieldAssetsBalance(), sharesToRedeem, supply, Math.Rounding.Ceil),
+            redeemingAssets
+        );
+        uint256 fromExternalSlice = redeemingAssets - fromYieldAssets;
+        assertGt(donation, fromExternalSlice, "donation exceeds the external slice: cap branch is exercised");
+
+        uint256 aliceBefore = _usdc.balanceOf(ALICE);
+
+        vm.prank(ALICE);
+        uint256 assetsOut = _vault.redeem(sharesToRedeem, ALICE, ALICE);
+
+        assertEq(_usdc.balanceOf(ALICE) - aliceBefore, assetsOut, "receiver got the full payout");
+        assertEq(assetsOut, redeemingAssets, "payout == previewed redeem");
+        // The cap left a remainder of the donation resting in the FM (only the external slice's worth
+        // was spent), to be realized by later withdrawals — the defining effect of the `true` branch.
+        assertApproxEqAbs(
+            _usdc.balanceOf(address(_fundManager)),
+            donation - fromExternalSlice,
+            2,
+            "uncapped donation remainder still rests in the FM"
+        );
     }
 
     /// @dev First-deposit inflation resistance under the floating share.
