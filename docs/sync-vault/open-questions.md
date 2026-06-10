@@ -43,6 +43,10 @@ reading, not liveness.
 
 The operator can change `stableYieldRate` every block. There is no minimum era boundary.
 
+### Approches : 
+- Either add guard on the setter
+- Or build an intermediary contract (that owns the FUND_OPERATOR_ROLE) and that build that custom logic that enfore the stable yield duration . 
+
 **Question.** Enforce a minimum era duration (fixed era boundaries), or keep fully
 discretionary real-time rate adjustment? (Same question as the async vault.)
 
