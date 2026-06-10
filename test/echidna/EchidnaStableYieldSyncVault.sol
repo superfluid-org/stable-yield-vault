@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.34;
 
-import { MockERC4626 } from "../mocks/MockERC4626.sol";
+import { MockMorphoVaultV2 } from "../mocks/MockMorphoVaultV2.sol";
 
 import { EchidnaVaultHarnessBase, ISuperfluidPool } from "./base/EchidnaVaultHarnessBase.sol";
 
@@ -12,8 +12,9 @@ import { SyncFundManager } from "src/vault/sync/SyncFundManager.sol";
 
 /// @title Echidna fuzzing harness for the synchronous StableYieldSyncVault + SyncFundManager pair.
 /// @dev   Inherits the shared Superfluid bootstrap from `EchidnaVaultHarnessBase`, deploys the sync
-///        vault + SyncFundManager + a configurable external ERC-4626 in its constructor, and exposes
-///        clamped handlers for every mutating entrypoint. Invariants from
+///        vault + SyncFundManager + a configurable `MockMorphoVaultV2` external (Morpho V2
+///        semantics: `max*` hardcoded 0, gate views, unadvertised liquidity) in its constructor,
+///        and exposes clamped handlers for every mutating entrypoint. Invariants from
 ///        `docs/sync-vault/invariants.md` are checked after every handler.
 contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
@@ -29,7 +30,7 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
     /// @dev Closed-loop pool funding simulated external gains / absorbing simulated losses.
     address private constant EXTERNAL_RESERVE = address(uint160(uint256(keccak256("ECHIDNA_SYNC_EXT_RESERVE"))));
 
-    MockERC4626 private _external;
+    MockMorphoVaultV2 private _external;
     SyncFundManager private _fundManager;
     StableYieldSyncVault private _vault;
 
@@ -39,7 +40,7 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
     constructor() {
         _bootstrapSuperfluid("ECHIDNA_SYNC_ALICE", "ECHIDNA_SYNC_BOB", "ECHIDNA_SYNC_CAROL", "ECHIDNA_SYNC_TREASURY");
 
-        _external = new MockERC4626(IERC20(address(_usdc)), "Mock External USDC Vault", "mxUSDC");
+        _external = new MockMorphoVaultV2(IERC20(address(_usdc)), "Mock External USDC Vault", "mxUSDC");
 
         _vault = new StableYieldSyncVault(
             _treasury,
@@ -127,17 +128,19 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         uint256 balBefore = _usdc.balanceOf(actor);
         HEVM.prank(actor);
-        // E.1: a request within `maxWithdraw` must NEVER brick *while the FM is solvent*. Shares-
-        // proportional reserve sourcing bounds the external leg at `ext.maxWithdraw(FM)`, and the
-        // closing `_recalibrateFlow()` only *lowers* the flow rate (releases GDA buffer). The only
-        // way an in-bounds exit reverts is from an FM driven to `availableBalance < 0` — a state
-        // production prevents via sentinel liquidation, which this harness does not model (see
-        // `_assertNonNegativeYieldReserve`). The external mock is compliant.
+        // E.1: a request within `maxWithdraw` must NEVER brick *while the FM is solvent AND the
+        // external has instant liquidity*. Shares-proportional reserve sourcing bounds the external
+        // leg at the position's value, and the closing `_recalibrateFlow()` only *lowers* the flow
+        // rate (releases GDA buffer). Two accepted revert sources remain: (a) an FM driven to
+        // `availableBalance < 0` — production prevents it via sentinel liquidation, which this
+        // harness does not model (see `_assertNonNegativeYieldReserve`); (b) an active external
+        // liquidity cap — Morpho V2 exposes no liquidity view, so `max*` cannot pre-screen it and a
+        // within-max revert at the external leg is the documented accepted deviation.
         try _vault.withdraw(amt, actor, actor) returns (uint256 burned) {
             _ghostSupply -= burned;
             assert(_usdc.balanceOf(actor) - balBefore == amt); // B.2: pays exactly
         } catch {
-            _assertNonNegativeYieldReserve(); // E.1 holds while solvent; tolerate the no-sentinel artifact
+            if (!_externalLiquidityCapped()) _assertNonNegativeYieldReserve();
         }
 
         _check();
@@ -150,12 +153,13 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         uint256 balBefore = _usdc.balanceOf(actor);
         HEVM.prank(actor);
-        // E.1: a request within `maxRedeem` must NEVER brick while solvent (see `withdraw`).
+        // E.1: a request within `maxRedeem` must NEVER brick while solvent and externally liquid
+        // (see `withdraw` for the two accepted revert sources).
         try _vault.redeem(s, actor, actor) returns (uint256 assets) {
             _ghostSupply -= s;
             assert(_usdc.balanceOf(actor) - balBefore == assets); // B.2: pays exactly
         } catch {
-            _assertNonNegativeYieldReserve(); // E.1 holds while solvent; tolerate the no-sentinel artifact
+            if (!_externalLiquidityCapped()) _assertNonNegativeYieldReserve();
         }
 
         _check();
@@ -183,7 +187,8 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
                     assert(assetsOut <= amt); // no value extracted on a round-trip
                     assert(_usdc.balanceOf(actor) <= balBefore); // net non-positive
                 } catch {
-                    _assertNonNegativeYieldReserve(); // E.1: an in-bounds redeem must land while solvent
+                    // E.1: an in-bounds redeem must land while solvent and externally liquid.
+                    if (!_externalLiquidityCapped()) _assertNonNegativeYieldReserve();
                 }
             }
         } catch { }
@@ -261,8 +266,26 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         _check();
     }
 
+    /// @dev `cap == 0` restores unlimited liquidity so the fuzzer can leave the capped regime
+    ///      (where the E.1 no-brick assertion is suspended) and re-enter the strict one.
     function external_set_liquidity_cap(uint96 cap) external keepAlive {
-        _external.setLiquidityCap(uint256(cap));
+        _external.setLiquidityCap(cap == 0 ? type(uint256).max : uint256(cap));
+        _check();
+    }
+
+    /// @dev Flip Morpho V2's deposit-side gates for everyone (the mock gates are global). Blocked
+    ///      ⇒ the vault's `maxDeposit/maxMint` read 0 and the rebalance trim is skipped.
+    function external_set_deposit_gates(bool sendAssets, bool receiveShares) external keepAlive {
+        _external.setCanSendAssets(sendAssets);
+        _external.setCanReceiveShares(receiveShares);
+        _check();
+    }
+
+    /// @dev Flip Morpho V2's exit-side gates. Blocked while shares are outstanding ⇒ full pause
+    ///      (mirrored in `_check`).
+    function external_set_exit_gates(bool sendShares, bool receiveAssets) external keepAlive {
+        _external.setCanSendShares(sendShares);
+        _external.setCanReceiveAssets(receiveAssets);
         _check();
     }
 
@@ -283,11 +306,12 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         assert(_vault.totalSupply() == _ghostSupply);
 
         // INV-2 (reserve-inclusive NAV, floating share, no clamp): totalAssets is the plain sum of
-        // the FM's recoverable balances (the external position, the scaled super-token reserve, and
-        // any raw underlying held by the FM). The share floats with the external vault's
-        // performance, so there is no principal ceiling to assert against.
-        uint256 recoverable = _external.maxWithdraw(address(_fundManager)) + _fundManager.scaledYieldAssetsBalance()
-            + _usdc.balanceOf(address(_fundManager));
+        // the FM's recoverable balances (the external position valued via `previewRedeem(balanceOf)`
+        // — Morpho V2's `maxWithdraw` is hardcoded 0 — the scaled super-token reserve, and any raw
+        // underlying held by the FM). The share floats with the external vault's performance, so
+        // there is no principal ceiling to assert against.
+        uint256 recoverable = _external.previewRedeem(_external.balanceOf(address(_fundManager)))
+            + _fundManager.scaledYieldAssetsBalance() + _usdc.balanceOf(address(_fundManager));
         assert(_vault.totalAssets() == recoverable);
 
         // INV-B.1 (no share over-issuance): the total claim priced at NAV never exceeds the
@@ -304,13 +328,15 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         // super-token either — the reserve lives entirely in the FM.
         assert(_usdcx.balanceOf(address(_vault)) == 0);
 
-        // D.2 (terminal external impairment ⇒ full pause): with shares outstanding
-        // (`totalSupply() > 0`) and the external vault unable to service withdrawals
-        // (`ext.maxWithdraw(FM) == 0`), all four `max*` MUST be forced to 0 so OZ reverts every
-        // entrypoint cleanly (never a raw GDA revert). The empty-vault bootstrap (`totalSupply() ==
-        // 0`) is excluded so the first deposit is not bricked. Mirrors
-        // `StableYieldSyncVault._isExternallyPaused()`.
-        bool paused = _vault.totalSupply() > 0 && _external.maxWithdraw(address(_fundManager)) == 0;
+        // D.2 (external pause): with shares outstanding (`totalSupply() > 0`) and the external
+        // position worthless (`externalPositionValue() == 0` — total loss) OR the FM's exit path
+        // gate-blocked (`canWithdrawExternal() == false`), all four `max*` MUST be forced to 0 so
+        // OZ reverts every entrypoint cleanly (never a raw GDA revert). The empty-vault bootstrap
+        // (`totalSupply() == 0`) is excluded so the first deposit is not bricked. Mirrors
+        // `StableYieldSyncVault._isExternallyPaused()`. External *illiquidity* (the liquidity cap)
+        // deliberately does NOT pause — Morpho V2 has no liquidity view.
+        bool paused = _vault.totalSupply() > 0
+            && (_fundManager.externalPositionValue() == 0 || !_fundManager.canWithdrawExternal());
         if (paused) {
             assert(_vault.maxDeposit(_actors[0]) == 0);
             assert(_vault.maxMint(_actors[0]) == 0);
@@ -350,6 +376,15 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
     function _assertNonNegativeYieldReserve() internal view {
         (int256 availableBalance,,,) = _usdcx.realtimeBalanceOfNow(address(_fundManager));
         if (availableBalance >= 0) assert(false); // solvent FM ⇒ an in-bounds exit must never brick
+    }
+
+    /// @dev An active external liquidity cap suspends the E.1 no-brick assertion: Morpho V2 has no
+    ///      liquidity view, so a within-`max*` request reverting at the external leg is the
+    ///      documented accepted deviation, not a violation. (The cap can be hit by the payout's
+    ///      external slice or by a rebalance pull inside the same op, so the suspension keys on the
+    ///      cap being active rather than on the requested amount.)
+    function _externalLiquidityCapped() internal view returns (bool) {
+        return _external.liquidityCap() != type(uint256).max;
     }
 
 }

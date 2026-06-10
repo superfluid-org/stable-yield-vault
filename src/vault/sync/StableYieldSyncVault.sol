@@ -158,32 +158,34 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
 
     /**
      * @inheritdoc ERC4626
-     * @dev Additionally capped by the external vault's own deposit limit (FM as holder). Returns
-     *      `0` under terminal external impairment (see {_isExternallyPaused}): we never route a
-     *      user into a vault they cannot withdraw from.
+     * @dev The external vault (Morpho V2) has no amount-based deposit cap — eligibility is the
+     *      binary `FUND_MANAGER.canDepositExternal()` gate check. Returns `0` when the gates are
+     *      blocked or under external pause (see {_isExternallyPaused}): we never route a user
+     *      into a vault they cannot withdraw from.
      */
     function maxDeposit(address) public view override(ERC4626, IERC4626) returns (uint256) {
         if (_isExternallyPaused()) return 0;
-        return FUND_MANAGER.maxExternalDeposit();
+        return FUND_MANAGER.canDepositExternal() ? type(uint256).max : 0;
     }
 
     /**
      * @inheritdoc ERC4626
-     * @dev Additionally capped by the external vault's own deposit limit (in share terms). Returns
-     *      `0` under terminal external impairment (see {_isExternallyPaused}).
+     * @dev Same gate-based binary limit as {maxDeposit} (unlimited needs no share conversion).
      */
     function maxMint(address) public view override(ERC4626, IERC4626) returns (uint256) {
         if (_isExternallyPaused()) return 0;
-        uint256 externalMax = FUND_MANAGER.maxExternalDeposit();
-        if (externalMax == type(uint256).max) return type(uint256).max;
-        return _convertToShares(externalMax, Math.Rounding.Floor);
+        return FUND_MANAGER.canDepositExternal() ? type(uint256).max : 0;
     }
 
     /**
      * @inheritdoc ERC4626
-     * @dev Returns `0` under terminal external impairment (see {_isExternallyPaused}); the surviving
+     * @dev Returns `0` under external pause (see {_isExternallyPaused}); the surviving
      *      reserve is reserved for the yield stream, not for withdrawal. Otherwise capped by the
-     *      reserve-inclusive NAV.
+     *      reserve-inclusive NAV. NOTE: this caps by the external position's *value*, not its
+     *      instant liquidity (Morpho V2 exposes no liquidity view), so a withdrawal within this
+     *      limit can still revert on an external liquidity shortfall — a known deviation from
+     *      strict ERC-4626 `max*` honesty (Morpho's permissionless `forceDeallocate` is the
+     *      unstick path).
      */
     function maxWithdraw(address owner) public view override(ERC4626, IERC4626) returns (uint256) {
         if (_isExternallyPaused()) return 0;
@@ -194,8 +196,9 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
 
     /**
      * @inheritdoc ERC4626
-     * @dev Returns `0` under terminal external impairment (see {_isExternallyPaused}). Otherwise
-     *      capped by the reserve-inclusive NAV (in share terms).
+     * @dev Returns `0` under external pause (see {_isExternallyPaused}). Otherwise capped by the
+     *      reserve-inclusive NAV (in share terms), with the same liquidity caveat as
+     *      {maxWithdraw}.
      */
     function maxRedeem(address owner) public view override(ERC4626, IERC4626) returns (uint256) {
         if (_isExternallyPaused()) return 0;
@@ -205,44 +208,51 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
     }
 
     /**
-     * @dev Terminal external impairment ⇒ full pause. When `EXTERNAL_VAULT.maxWithdraw(FM) == 0`
-     *      the deployed principal cannot be recovered through the external vault, so all four
-     *      `max*` return `0` (OZ then reverts any deposit/mint/withdraw/redeem with
-     *      `ERC4626ExceededMax*`). The vault simply waits for the external position to unfreeze;
+     * @dev External pause ⇒ all four `max*` return `0` (OZ then reverts any
+     *      deposit/mint/withdraw/redeem with `ERC4626ExceededMax*`). Two triggers, both meaning
+     *      the deployed principal cannot currently be recovered through the external vault:
+     *
+     *      - **Terminal impairment**: `FUND_MANAGER.externalPositionValue() == 0` — the position
+     *        is worthless, via either total-loss variant (share price → 0 with shares kept, or
+     *        the FM's external shares burned on a socialized loss; both read 0 through
+     *        `previewRedeem(balanceOf)`).
+     *      - **Exit gates blocked**: `!FUND_MANAGER.canWithdrawExternal()` — Morpho V2's
+     *        `sendSharesGate`/`receiveAssetsGate` denies the FM, so the external leg of any
+     *        withdrawal would revert.
+     *
+     *      In both cases the vault simply waits for the external position to recover/unblock;
      *      meanwhile the Superfluid stream keeps paying existing holders out of the reserve until
-     *      it is naturally liquidated. `maxWithdraw(FM) == 0` does not distinguish a permanent loss
-     *      from a temporary liquidity freeze — both are treated as a pause.
+     *      it is naturally liquidated. NOT detected: a pure *liquidity* freeze — Morpho V2 has no
+     *      liquidity view (its `max*` are hardcoded 0), so a liquidity shortfall surfaces as a
+     *      revert at the external leg of the affected withdrawal instead of a pause (Morpho's
+     *      permissionless `forceDeallocate` is the unstick path).
      *
      *      The pause exists to protect *existing depositors*: it preserves the reserve for the
      *      stream and refuses to route new money into an unwithdrawable external. So it is gated on
      *      `totalSupply() > 0` (there are shares to protect) rather than on the FM's external share
-     *      balance. Gating on the FM's external share balance would be wrong in two ways:
+     *      balance:
      *
      *      - **Bootstrap** (`supply == 0`): never paused — there is nobody to protect and pausing
      *        would brick the first deposit. Provably nothing meaningful is at stake: `supply == 0`
      *        is only reachable from a fresh vault or after a full exit (which drains the recoverable
      *        NAV down to rounding dust — an impaired external would have capped `maxRedeem` and left
      *        shares outstanding, so substantial value cannot rest behind zero supply).
-     *      - **Dust-share donation**: a `balanceOf(FM) > 0` gate would be spoofable — anyone could
-     *        transfer dust external shares (which floor to `maxWithdraw(FM) == 0`) to force a false
-     *        pause, most damagingly bricking the bootstrap. Gating on supply removes the lever:
-     *        before the first deposit supply is 0, and once `supply > 0` the FM holds a real external
-     *        position, so a dust donation only *raises* `maxWithdraw` — it cannot zero it.
      *      - **Total-loss share-burn**: an external that burns the FM's shares to 0 on a socialized
      *        loss reads `balanceOf(FM) == 0`, so a balance gate would fail to pause and holders could
-     *        race to drain the reserve. The supply gate pauses both total-loss variants (price-per-
-     *        share → 0 with shares kept, or shares burned) consistently.
+     *        race to drain the reserve. The supply gate pauses both total-loss variants consistently.
+     *      - A dust external-share donation only *raises* `externalPositionValue()` — it cannot
+     *        force a false pause under either gate.
      *
-     *      Tradeoff: `supply > 0 && maxWithdraw(FM) == 0` with the external position *genuinely* ~0
-     *      (all NAV in the reserve) would false-pause. Under any sane config that is unreachable —
-     *      deposits route ~everything to the external (the pre-fund is bp-scale). It only occurs
-     *      under a pathological `rate × guaranteedFlowDuration` misconfig that already bricks
-     *      deposits (the `rate · duration ≤ YEAR · BP_DENOMINATOR` constructor/setter guard makes it
-     *      unreachable; see `docs/sync-vault/design.md` security considerations).
+     *      Tradeoff: `supply > 0 && externalPositionValue() == 0` with the external position
+     *      *genuinely* ~0 (all NAV in the reserve) would false-pause. Under any sane config that is
+     *      unreachable — deposits route ~everything to the external (the pre-fund is bp-scale). It
+     *      only occurs under a pathological `rate × guaranteedFlowDuration` misconfig that already
+     *      bricks deposits (the `rate · duration ≤ YEAR · BP_DENOMINATOR` constructor/setter guard
+     *      makes it unreachable; see `docs/sync-vault/design.md` security considerations).
      */
     function _isExternallyPaused() internal view returns (bool) {
         if (totalSupply() == 0) return false;
-        return FUND_MANAGER.maxExternalVaultWithdraw() == 0;
+        return FUND_MANAGER.externalPositionValue() == 0 || !FUND_MANAGER.canWithdrawExternal();
     }
 
     //      ____      __                        __   ______                 __  _

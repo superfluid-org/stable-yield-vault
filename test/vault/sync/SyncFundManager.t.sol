@@ -2,7 +2,7 @@
 pragma solidity ^0.8.34;
 
 import { SyncVaultTestBase } from "./SyncVaultTestBase.t.sol";
-import { MockERC4626 } from "test/mocks/MockERC4626.sol";
+import { MockMorphoVaultV2 } from "test/mocks/MockMorphoVaultV2.sol";
 
 import { ISuperToken, SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
 import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
@@ -38,7 +38,7 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         // 5-dec underlying + matching wrapper super-token + external vault over the same token.
         (TestToken lowDec, SuperToken lowDecx) =
             _deployer.deployWrapperSuperToken("LOW", "LOW", 5, type(uint256).max, address(0));
-        MockERC4626 lowExternal = new MockERC4626(IERC20(address(lowDec)), "Low External", "lx");
+        MockMorphoVaultV2 lowExternal = new MockMorphoVaultV2(IERC20(address(lowDec)), "Low External", "lx");
 
         vm.expectRevert(IFundManagerBase.UNSUPPORTED_DECIMALS.selector);
         new StableYieldSyncVault(
@@ -133,20 +133,55 @@ contract SyncFundManagerTest is SyncVaultTestBase {
     //   | |/ / /  __/ |/ |/ /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //   |___/_/\___/|__/|__/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
-    /// @dev `maxExternalDeposit` proxies the external vault's own deposit limit (uncapped here).
-    function test_maxExternalDeposit_uncapped() public view {
-        assertEq(_fundManager.maxExternalDeposit(), type(uint256).max, "external deposit uncapped");
+    /// @dev `canDepositExternal` is the AND of Morpho V2's deposit-side gate views for the FM
+    ///      (`canSendAssets(FM) && canReceiveShares(FM)`); both gates are open by default and
+    ///      blocking either one flips it.
+    function test_canDepositExternal_followsGates() public {
+        assertTrue(_fundManager.canDepositExternal(), "gates open by default");
+
+        _external.setCanSendAssets(false);
+        assertFalse(_fundManager.canDepositExternal(), "blocked send-assets gate closes deposits");
+        _external.setCanSendAssets(true);
+
+        _external.setCanReceiveShares(false);
+        assertFalse(_fundManager.canDepositExternal(), "blocked receive-shares gate closes deposits");
+        _external.setCanReceiveShares(true);
+
+        assertTrue(_fundManager.canDepositExternal(), "reopens once both gates clear");
     }
 
-    /// @dev `totalManagedAssets` is the plain reserve-inclusive sum (no clamp). After a deposit it
-    ///      is NAV-neutral (~ deposit) and equals the live recoverable balance.
+    /// @dev `canWithdrawExternal` is the AND of the exit-side gate views for the FM
+    ///      (`canSendShares(FM) && canReceiveAssets(FM)` — the FM is always the receiver of the
+    ///      external leg since withdrawals are routed FM-first).
+    function test_canWithdrawExternal_followsGates() public {
+        assertTrue(_fundManager.canWithdrawExternal(), "gates open by default");
+
+        _external.setCanSendShares(false);
+        assertFalse(_fundManager.canWithdrawExternal(), "blocked send-shares gate closes withdrawals");
+        _external.setCanSendShares(true);
+
+        _external.setCanReceiveAssets(false);
+        assertFalse(_fundManager.canWithdrawExternal(), "blocked receive-assets gate closes withdrawals");
+        _external.setCanReceiveAssets(true);
+
+        assertTrue(_fundManager.canWithdrawExternal(), "reopens once both gates clear");
+    }
+
+    /// @dev `totalManagedAssets` is the plain reserve-inclusive sum (no clamp), valuing the external
+    ///      leg via `previewRedeem(balanceOf)` (Morpho V2's `maxWithdraw` is hardcoded 0 and unusable).
+    ///      After a deposit it is NAV-neutral (~ deposit) and equals the live recoverable balance.
     function test_totalManagedAssets_tracksRecoverable(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
 
-        uint256 recoverable = _external.maxWithdraw(address(_fundManager)) + _fundManager.scaledYieldAssetsBalance()
-            + _usdc.balanceOf(address(_fundManager));
+        uint256 recoverable = _external.previewRedeem(_external.balanceOf(address(_fundManager)))
+            + _fundManager.scaledYieldAssetsBalance() + _usdc.balanceOf(address(_fundManager));
         assertEq(_fundManager.totalManagedAssets(), recoverable, "totalManagedAssets == recoverable");
+        assertEq(
+            _fundManager.externalPositionValue(),
+            _external.previewRedeem(_external.balanceOf(address(_fundManager))),
+            "externalPositionValue == previewRedeem(balanceOf)"
+        );
     }
 
 }

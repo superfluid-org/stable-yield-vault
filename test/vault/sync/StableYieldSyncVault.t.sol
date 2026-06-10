@@ -2,7 +2,7 @@
 pragma solidity ^0.8.34;
 
 import { SyncVaultTestBase } from "./SyncVaultTestBase.t.sol";
-import { MockERC4626 } from "test/mocks/MockERC4626.sol";
+import { MockMorphoVaultV2 } from "test/mocks/MockMorphoVaultV2.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ERC4626 } from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
@@ -81,7 +81,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
     function test_constructor_revertsOnExternalAssetMismatch() public {
         // External vault over a *different* asset.
-        MockERC4626 wrongExternal = new MockERC4626(IERC20(address(_usdcx)), "Wrong", "WRG");
+        MockMorphoVaultV2 wrongExternal = new MockMorphoVaultV2(IERC20(address(_usdcx)), "Wrong", "WRG");
 
         vm.expectRevert(IStableYieldSyncVault.EXTERNAL_ASSET_MISMATCH.selector);
         new StableYieldSyncVault(
@@ -202,26 +202,24 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         _vault.withdraw(DEFAULT_DEPOSIT / 2, BOB, ALICE);
     }
 
-    /// @dev `maxDeposit` proxies the external vault's deposit limit. The default MockERC4626 is
-    ///      uncapped, so it reports `type(uint256).max`; cap the external vault and it follows.
-    function test_maxDeposit_capsAtExternalDeposit(uint256 cap) public {
-        assertEq(_vault.maxDeposit(ALICE), type(uint256).max, "uncapped external => unbounded deposit");
+    /// @dev `maxDeposit`/`maxMint` are binary under Morpho V2: the external has no amount-based
+    ///      deposit cap (its own `maxDeposit` is hardcoded 0 and never consulted), so the vault
+    ///      advertises unlimited while the FM's deposit-side gates clear and 0 when either blocks.
+    function test_maxDepositMint_followExternalGates() public {
+        assertEq(_vault.maxDeposit(ALICE), type(uint256).max, "open gates => unbounded deposit");
+        assertEq(_vault.maxMint(ALICE), type(uint256).max, "open gates => unbounded mint");
 
-        cap = bound(cap, 0, ONE_BILLION * 1e6);
-        _external.setDepositCap(cap);
-        assertEq(_vault.maxDeposit(ALICE), cap, "maxDeposit follows external deposit cap");
-    }
+        _external.setCanSendAssets(false);
+        assertEq(_vault.maxDeposit(ALICE), 0, "blocked send-assets gate zeroes maxDeposit");
+        assertEq(_vault.maxMint(ALICE), 0, "blocked send-assets gate zeroes maxMint");
+        _external.setCanSendAssets(true);
 
-    /// @dev `maxMint` short-circuits to `type(uint256).max` when the external vault is uncapped,
-    ///      and otherwise converts the external deposit cap into shares (both branches).
-    function test_maxMint_uncappedAndCapped(uint256 cap) public {
-        // Uncapped branch: short-circuit (StableYieldSyncVault.sol:154).
-        assertEq(_vault.maxMint(ALICE), type(uint256).max, "uncapped external => unbounded mint");
+        _external.setCanReceiveShares(false);
+        assertEq(_vault.maxDeposit(ALICE), 0, "blocked receive-shares gate zeroes maxDeposit");
+        assertEq(_vault.maxMint(ALICE), 0, "blocked receive-shares gate zeroes maxMint");
+        _external.setCanReceiveShares(true);
 
-        // Capped branch: convert the deposit cap into shares (StableYieldSyncVault.sol:155).
-        cap = bound(cap, 1e6, ONE_BILLION * 1e6);
-        _external.setDepositCap(cap);
-        assertEq(_vault.maxMint(ALICE), _vault.convertToShares(cap), "maxMint == convertToShares(cap)");
+        assertEq(_vault.maxDeposit(ALICE), type(uint256).max, "reopens once both gates clear");
     }
 
     //     ____      __                       __  _
@@ -320,8 +318,8 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         _external.simulateLoss(extBal * lossBps / 10_000);
 
         // NAV honest: the plain sum of recoverable balances (no clamp).
-        uint256 recoverable = _external.maxWithdraw(address(_fundManager)) + _fundManager.scaledYieldAssetsBalance()
-            + _usdc.balanceOf(address(_fundManager));
+        uint256 recoverable = _external.previewRedeem(_external.balanceOf(address(_fundManager)))
+            + _fundManager.scaledYieldAssetsBalance() + _usdc.balanceOf(address(_fundManager));
         assertEq(_vault.totalAssets(), recoverable, "totalAssets == recoverable (honest impairment)");
         assertLt(_vault.totalAssets(), 2 * amount, "impaired below total deposits");
 
@@ -338,44 +336,57 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertApproxEqRel(bobValue, alicePayout, 0.01e18, "no inter-holder value transfer across impaired exit");
     }
 
-    function test_externalIlliquidity_withdrawReverts_maxReflectsIt(uint256 amount, uint256 cap) public {
+    /// @dev ACCEPTED `max*` DEVIATION: Morpho V2 exposes no liquidity view, so `maxWithdraw` caps
+    ///      by the external position's *value*, not its instant liquidity — a request within
+    ///      `maxWithdraw` can therefore revert at the external leg on a liquidity shortfall
+    ///      (Morpho's permissionless `forceDeallocate` is the unstick path). Within the available
+    ///      liquidity, withdrawals keep working.
+    function test_externalIlliquidity_withdrawWithinMaxCanRevert(uint256 amount, uint256 cap) public {
         amount = bound(amount, 4e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
 
-        // External vault can only service `cap` underlying — bounded strictly below a full exit so
-        // there is always an over-cap request that must revert. Above 1 USDC so the within-cap leg
-        // moves a non-dust amount.
-        cap = bound(cap, 1e6, amount / 2);
+        // Clear the standing GDA-buffer deficit while liquidity is still unlimited (operator
+        // diligence): the post-deposit reserve sits one stream-buffer below target, and the next
+        // rebalance pull (~buffer-sized) would itself trip the cap — masking the payout path this
+        // test isolates.
+        vm.prank(FUND_OPERATOR);
+        _fundManager.ensureYieldFlowDuration();
+
+        // External can only move `cap` underlying per call — far below a full exit.
+        cap = bound(cap, 1e6, amount / 4);
         _external.setLiquidityCap(cap);
 
-        // maxWithdraw is capped by (ext.maxWithdraw + scaledReserve): at least the external cap,
-        // at most the cap plus the pre-fund reserve slice still held.
+        // maxWithdraw does NOT see the liquidity cap: still ~ the full position value.
         uint256 maxW = _vault.maxWithdraw(ALICE);
-        assertGe(maxW, cap, "maxWithdraw >= external cap (reserve adds to it)");
-        assertLe(maxW, cap + _fundManager.scaledYieldAssetsBalance(), "maxWithdraw <= cap + scaledReserve");
+        assertGt(maxW, cap, "maxWithdraw ignores external instant liquidity (accepted overestimate)");
 
-        // A full-principal request (> maxWithdraw) reverts up-front with ERC4626ExceededMaxWithdraw.
+        // A near-full request within maxW reverts at the external leg (not an OZ max* revert).
         vm.prank(ALICE);
-        vm.expectRevert();
-        _vault.withdraw(amount, ALICE, ALICE);
+        vm.expectRevert(bytes("MockMorphoVaultV2: insufficient liquidity"));
+        _vault.withdraw(maxW, ALICE, ALICE);
 
-        // Within the cap it still works.
+        // Within the available liquidity it still works (the external leg <= the request < cap).
+        uint256 wAssets = cap / 2;
         vm.prank(ALICE);
-        uint256 burned = _vault.withdraw(cap, ALICE, ALICE);
-        assertGt(burned, 0, "capped withdrawal succeeds");
-        assertEq(_usdc.balanceOf(ALICE), cap, "received capped amount");
+        uint256 burned = _vault.withdraw(wAssets, ALICE, ALICE);
+        assertGt(burned, 0, "within-liquidity withdrawal succeeds");
+        assertEq(_usdc.balanceOf(ALICE), wAssets, "received the requested amount");
     }
 
-    function test_maxRedeem_reflectsExternalLiquidity(uint256 amount, uint256 cap) public {
+    /// @dev `maxRedeem` is capped by the reserve-inclusive NAV, NOT by the external vault's
+    ///      instant liquidity (no liquidity view on Morpho V2 — same accepted overestimate as
+    ///      `test_externalIlliquidity_withdrawWithinMaxCanRevert`).
+    function test_maxRedeem_ignoresExternalLiquidity(uint256 amount, uint256 cap) public {
         uint256 shares = _deposit(ALICE, bound(amount, 4e6, ONE_BILLION * 1e6));
         // In the healthy state the only gap between maxRedeem and balanceOf is the tiny
         // GDA-buffer-induced NAV tick — within NAV_REL_TOL.
-        assertApproxEqRel(_vault.maxRedeem(ALICE), shares, NAV_REL_TOL, "uncapped ~ balance");
+        assertApproxEqRel(_vault.maxRedeem(ALICE), shares, NAV_REL_TOL, "open state ~ balance");
+        uint256 maxRBefore = _vault.maxRedeem(ALICE);
 
-        // Cap external liquidity strictly below the recoverable value so the redeem is bound by it.
-        cap = bound(cap, 1e6, _vault.totalAssets() / 2);
+        // An external liquidity crunch does not move maxRedeem (the position value is unchanged).
+        cap = bound(cap, 0, _vault.totalAssets() / 2);
         _external.setLiquidityCap(cap);
-        assertLt(_vault.maxRedeem(ALICE), shares, "redeem capped by external liquidity");
+        assertEq(_vault.maxRedeem(ALICE), maxRBefore, "maxRedeem unchanged by external illiquidity");
     }
 
     //    _____       __
@@ -414,20 +425,22 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertLt(_vault.convertToAssets(1e18), px0, "share price ticked below par (honest impairment)");
     }
 
-    /// @dev Terminal external impairment ⇒ FULL PAUSE. When
-    ///      `EXTERNAL_VAULT.maxWithdraw(FM) == 0` the deployed principal is unrecoverable through the
-    ///      external vault, so the vault zeroes all four `max*` and OZ reverts every entrypoint: we
-    ///      never route a user into a vault they cannot exit, and existing holders keep receiving the
-    ///      stream from the reserve rather than racing to withdraw it. (This is why the per-op
-    ///      `_recalibrateFlow()` needs no impairment guard — the hooks simply never run while paused.)
+    /// @dev Terminal external impairment ⇒ FULL PAUSE. When the FM's external position is
+    ///      worthless (`externalPositionValue() == 0` — share price driven to 0 here; an external
+    ///      share burn reads identically through `previewRedeem(balanceOf)`), the deployed
+    ///      principal is unrecoverable, so the vault zeroes all four `max*` and OZ reverts every
+    ///      entrypoint: we never route a user into a vault they cannot exit, and existing holders
+    ///      keep receiving the stream from the reserve rather than racing to withdraw it. (This is
+    ///      why the per-op `_recalibrateFlow()` needs no impairment guard — the hooks simply never
+    ///      run while paused.)
     function test_terminalImpairment_pausesAllEntrypoints(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
         _fund(BOB, DEFAULT_DEPOSIT);
 
-        // External goes terminal: it can no longer service any withdrawal.
-        _external.setLiquidityCap(0);
-        assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "terminal: external maxWithdraw == 0");
+        // External goes terminal: a total loss wipes the position's value.
+        _external.simulateLoss(_usdc.balanceOf(address(_external)));
+        assertEq(_fundManager.externalPositionValue(), 0, "terminal: external position worth 0");
 
         // All four max* are zeroed.
         assertEq(_vault.maxDeposit(BOB), 0, "maxDeposit paused");
@@ -451,24 +464,29 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         vm.stopPrank();
     }
 
-    /// @dev The pause lifts when the external position unfreezes (a temporary liquidity freeze, not
-    ///      a permanent loss — `maxWithdraw(FM) == 0` does not distinguish the two, both pause).
-    ///      Deposits and withdrawals work again at the recovered NAV.
-    function test_terminalImpairment_resumesAfterUnfreeze() public {
+    /// @dev The pause's second trigger: Morpho's exit gates blocking the FM
+    ///      (`canWithdrawExternal() == false`). The position has value but the FM cannot pull it,
+    ///      so routing money in (or letting holders race the reserve) is equally wrong. Either
+    ///      exit-side gate suffices, and the pause lifts when the gate reopens (a gate block is
+    ///      curator action, not a loss — NAV is unchanged across the block).
+    function test_pause_onBlockedExitGates_resumesAfterUnblock() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
 
-        _external.setLiquidityCap(0);
-        assertEq(_vault.maxWithdraw(ALICE), 0, "paused while frozen");
+        _external.setCanSendShares(false);
+        assertEq(_vault.maxDeposit(ALICE), 0, "deposit paused under blocked send-shares gate");
+        assertEq(_vault.maxWithdraw(ALICE), 0, "withdraw paused under blocked send-shares gate");
+        _external.setCanSendShares(true);
 
-        // External unfreezes.
-        _external.setLiquidityCap(type(uint256).max);
-        assertGt(_vault.maxWithdraw(ALICE), 0, "unpaused after unfreeze");
+        _external.setCanReceiveAssets(false);
+        assertEq(_vault.maxWithdraw(ALICE), 0, "withdraw paused under blocked receive-assets gate");
+        _external.setCanReceiveAssets(true);
 
-        // A withdrawal now succeeds.
+        // Gates reopened: a withdrawal now succeeds at the unchanged NAV.
+        assertGt(_vault.maxWithdraw(ALICE), 0, "unpaused once gates clear");
         uint256 wAssets = _vault.maxWithdraw(ALICE) / 2;
         vm.prank(ALICE);
         _vault.withdraw(wAssets, ALICE, ALICE);
-        assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw works after unfreeze");
+        assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw works after the gate unblocks");
     }
 
     /// @dev The operator's bleed-stopping lever survives terminal impairment WITHOUT any guard:
@@ -478,7 +496,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     ///      understands the state.
     function test_terminalImpairment_operatorCanZeroRate() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
-        _external.setLiquidityCap(0);
+        _external.simulateLoss(_usdc.balanceOf(address(_external)));
 
         vm.prank(FUND_OPERATOR);
         _fundManager.setStableYieldRate(0);
@@ -486,14 +504,14 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     }
 
     /// @dev The pause must NOT trigger on the empty-vault bootstrap. A fresh FM holds no external
-    ///      position, so `maxExternalVaultWithdraw() == 0` even though it is perfectly healthy —
+    ///      position, so `externalPositionValue() == 0` even though it is perfectly healthy —
     ///      the `totalSupply() == 0` gate in `_isExternallyPaused()` keeps the first deposit from
     ///      being bricked (there are no depositors to protect).
     function test_bootstrap_notPausedWhenEmpty(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
 
-        // Empty vault: external maxWithdraw is 0 (nothing deployed) but this is NOT impairment.
-        assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "empty: external maxWithdraw == 0");
+        // Empty vault: the external position is worth 0 (nothing deployed) but this is NOT impairment.
+        assertEq(_fundManager.externalPositionValue(), 0, "empty: external position worth 0");
         assertEq(_vault.totalSupply(), 0, "bootstrap: no shares");
         assertGt(_vault.maxDeposit(ALICE), 0, "deposit NOT paused on the empty bootstrap");
 
@@ -503,11 +521,11 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     }
 
     /// @dev A dust external-*share* donation must not pause the bootstrap. Dust shares floor to
-    ///      `maxWithdraw(FM) == 0` (here via a sub-1 external PPS; equivalently, for a decimals-offset
-    ///      external, at any PPS), so a gate keyed on `balanceOf(FM) > 0 && maxWithdraw(FM) == 0`
-    ///      would flip all four `max*` to 0 and brick the bootstrap. The `totalSupply() == 0` gate
-    ///      removes the lever: with no depositors there is nothing to protect, so the donation cannot
-    ///      pause the vault.
+    ///      `previewRedeem(balanceOf) == 0` (here via a sub-1 external PPS; equivalently, for a
+    ///      decimals-offset external, at any PPS), so a gate keyed on `balanceOf(FM) > 0 &&
+    ///      externalPositionValue() == 0` would flip all four `max*` to 0 and brick the bootstrap.
+    ///      The `totalSupply() == 0` gate removes the lever: with no depositors there is nothing to
+    ///      protect, so the donation cannot pause the vault.
     function test_bootstrap_notBrickedByDustExternalShareDonation(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
 
@@ -522,7 +540,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
         // A balance-keyed gate would trigger here …
         assertGt(_external.balanceOf(address(_fundManager)), 0, "FM holds donated dust external shares");
-        assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "dust shares recover 0 assets");
+        assertEq(_fundManager.externalPositionValue(), 0, "dust shares recover 0 assets");
         // … but with no supply the vault is NOT paused.
         assertEq(_vault.totalSupply(), 0, "still bootstrap");
         assertGt(_vault.maxDeposit(ALICE), 0, "bootstrap NOT bricked by the dust donation");
@@ -531,45 +549,35 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertGt(shares, 0, "first deposit succeeds despite the dust donation");
     }
 
-    /// @dev Boundary: the pause triggers only at `maxWithdraw(FM) == 0`. A *partial* external
-    ///      illiquidity (cap > 0) leaves the vault open — deposits and withdrawals still work,
-    ///      subject to the usual NAV/liquidity caps.
-    function test_partialImpairment_doesNotPause(uint256 amount, uint256 capPortion) public {
+    /// @dev External *illiquidity* never pauses — Morpho V2 has no liquidity view, so the pause
+    ///      cannot key on it (the accepted blind spot: an over-liquidity request reverts at the
+    ///      external leg instead, see `test_externalIlliquidity_withdrawWithinMaxCanRevert`).
+    ///      Deposits and within-liquidity withdrawals keep working.
+    function test_externalIlliquidity_doesNotPause(uint256 amount, uint256 capPortion) public {
         amount = bound(amount, 2e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
 
-        // Cap external withdrawals to a positive fraction of the position — partial, not terminal.
+        // Clear the standing GDA-buffer deficit while liquidity is still unlimited (see
+        // `test_externalIlliquidity_withdrawWithinMaxCanRevert`), so the within-liquidity
+        // withdrawal below exercises the payout path rather than a buffer-sized rebalance pull.
+        vm.prank(FUND_OPERATOR);
+        _fundManager.ensureYieldFlowDuration();
+
+        // Cap external per-call liquidity to a positive fraction of the position.
         uint256 ta = _fundManager.totalManagedAssets();
         uint256 cap = bound(capPortion, 1e6, ta);
         _external.setLiquidityCap(cap);
 
         // Not paused: deposit and withdraw remain available.
-        assertGt(_vault.maxDeposit(ALICE), 0, "deposit open under partial impairment");
+        assertGt(_vault.maxDeposit(ALICE), 0, "deposit open under external illiquidity");
         uint256 maxW = _vault.maxWithdraw(ALICE);
-        assertGt(maxW, 0, "withdraw open under partial impairment");
+        assertGt(maxW, 0, "withdraw open under external illiquidity");
 
         // A withdrawal within the external's serviceable liquidity (≤ cap) succeeds.
         uint256 wAssets = cap < maxW ? cap : maxW;
         vm.prank(ALICE);
         _vault.withdraw(wAssets, ALICE, ALICE);
-        assertEq(_usdc.balanceOf(ALICE), wAssets, "partial-impairment withdraw within liquidity succeeds");
-    }
-
-    /// @dev The pause also triggers on a genuine total loss (external underlying drained to 0), not
-    ///      only on a liquidity freeze: with shares outstanding (`supply > 0`), `maxWithdraw(FM) == 0`
-    ///      is sufficient — the gate does not inspect the FM's external share balance, so a total
-    ///      loss pauses whether the external keeps the now-worthless shares or burns them (a
-    ///      balance-keyed gate would miss the share-burn variant).
-    function test_terminalImpairment_viaTotalLoss() public {
-        _deposit(ALICE, DEFAULT_DEPOSIT);
-
-        // Wipe the external vault's underlying — the FM's shares are now worth ~0.
-        _external.simulateLoss(_usdc.balanceOf(address(_external)));
-        assertEq(_fundManager.maxExternalVaultWithdraw(), 0, "total loss: external maxWithdraw == 0");
-
-        // Fully paused, exactly as under a liquidity freeze.
-        assertEq(_vault.maxDeposit(ALICE), 0, "deposit paused after total loss");
-        assertEq(_vault.maxWithdraw(ALICE), 0, "withdraw paused after total loss");
+        assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw within external liquidity succeeds");
     }
 
     /// @dev Share transfers are NOT gated by the pause: `_update` → `onShareTransfer` only moves GDA
@@ -577,7 +585,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     ///      paused for deposits/withdrawals.
     function test_terminalImpairment_transfersStillWork() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
-        _external.setLiquidityCap(0);
+        _external.setCanSendShares(false);
         assertEq(_vault.maxWithdraw(ALICE), 0, "paused");
 
         uint256 half = _vault.balanceOf(ALICE) / 2;
@@ -666,21 +674,22 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     }
 
     /// @dev Non-malicious trigger of the same above-target-reserve state: the operator drops the
-    ///      rate while external deposits are closed (the best-effort trim is skipped, leaving the
-    ///      reserve above the new target as super-token slack), then external reopens, then a user
-    ///      deposits. The trim, now reachable, must run cleanly and the deposit must succeed.
+    ///      rate while the external's deposit-side gate is blocked (the best-effort trim is
+    ///      skipped, leaving the reserve above the new target as super-token slack), then the gate
+    ///      reopens, then a user deposits. The trim, now reachable, must run cleanly and the
+    ///      deposit must succeed.
     function test_deposit_notBrickedAfterRateDropWithClosedExternal() public {
         _deposit(ALICE, DEFAULT_DEPOSIT);
 
-        // Close external deposits, then operator drops the rate. `setStableYieldRate` runs
-        // `_rebalanceYieldAssets()`; trim branch sees `maxDeposit == 0` and skips, leaving the
-        // reserve as above-target super-token slack.
-        _external.setDepositCap(0);
+        // Block the deposit-side gate, then operator drops the rate. `setStableYieldRate` runs
+        // `_rebalanceYieldAssets()`; the trim branch sees `canDepositExternal() == false` and
+        // skips, leaving the reserve as above-target super-token slack.
+        _external.setCanSendAssets(false);
         vm.prank(FUND_OPERATOR);
         _fundManager.setStableYieldRate(INITIAL_ERA_STABLE_YIELD_RATE / 10);
 
-        // External reopens. The above-target slack is now redeposit-able.
-        _external.setDepositCap(type(uint256).max);
+        // The gate reopens. The above-target slack is now redeposit-able.
+        _external.setCanSendAssets(true);
 
         // Bob's deposit must succeed: the trim, now reachable, must not sweep Bob's raw underlying.
         uint256 bobShares = _deposit(BOB, DEFAULT_DEPOSIT);
@@ -692,8 +701,8 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     /// @dev A raw-underlying donation to the FM is counted in NAV (`totalManagedAssets` sums
     ///      `UNDERLYING_ASSET.balanceOf(FM)`) and so lifts the advertised `max*`. `onWithdraw`
     ///      realizes the resting raw first (capped at the external slice), keeping
-    ///      `fromExternal ≤ ext.maxWithdraw(FM)`. Without this, a full redeem would compute
-    ///      `fromExternal = E + D > ext.maxWithdraw(FM) = E` and the external withdraw would revert,
+    ///      `fromExternal ≤` the external position's value. Without this, a full redeem would compute
+    ///      `fromExternal = E + D >` the position value `E` and the external withdraw would revert,
     ///      bricking the redemption (F.2 break) and stranding the donation `D`. Realizing it routes
     ///      the donation to the holder (the "irrational gift", delivered rather than stranded).
     function test_redeem_notBrickedByRawUnderlyingDonation() public {
@@ -805,24 +814,24 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "post-rebalance: 0 underlying in FM");
     }
 
-    /// @dev Withdraw is NOT bricked when the external vault signals "deposits closed" via the
-    ///      standard ERC-4626 channel (`maxDeposit == 0`) while still servicing withdrawals.
-    ///      The `_rebalanceYieldAssets()` `deficit < 0` branch's pre-check skips the post-payout
-    ///      trim, leaving the freed excess as above-target super-token slack in the reserve
-    ///      (D.3: best-effort, gated on external maxDeposit).
-    function test_withdraw_notBrickedByRedepositCap(uint256 amount, uint256 wPortion) public {
+    /// @dev Withdraw is NOT bricked when the external's deposit-side gate is blocked
+    ///      (`canDepositExternal() == false`) while withdrawals still work. The
+    ///      `_rebalanceYieldAssets()` `deficit < 0` branch's pre-check skips the post-payout trim,
+    ///      leaving the freed excess as above-target super-token slack in the reserve (D.3:
+    ///      best-effort, gated on the deposit-side gate views).
+    function test_withdraw_notBrickedByClosedDepositGate(uint256 amount, uint256 wPortion) public {
         amount = bound(amount, 2e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
 
-        // External: standards-compliant "deposits closed" signal (maxDeposit returns 0); withdrawals
-        // continue. The trim's pre-check honours this.
-        _external.setDepositCap(0);
+        // External: deposits gate-blocked for the FM; withdrawals continue. The trim's pre-check
+        // honours this.
+        _external.setCanReceiveShares(false);
 
         uint256 wAssets = bound(wPortion, 1e6, _vault.maxWithdraw(ALICE));
         vm.prank(ALICE);
         _vault.withdraw(wAssets, ALICE, ALICE);
 
-        assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw not bricked by external maxDeposit == 0");
+        assertEq(_usdc.balanceOf(ALICE), wAssets, "withdraw not bricked by a closed deposit gate");
     }
 
     /// @dev F.2 under loss: for any holder and any `s <= maxRedeem(holder)`, `redeem` succeeds
@@ -832,8 +841,8 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         amount = bound(amount, 2e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
 
-        // External loses a fraction of its principal; strictly < extBal so `maxWithdraw(FM) > 0`
-        // (loss regime, not the D.2 terminal-impairment pause).
+        // External loses a fraction of its principal; strictly < extBal so the FM's position keeps
+        // a positive value (loss regime, not the D.2 terminal-impairment pause).
         uint256 extBal = _usdc.balanceOf(address(_external));
         uint256 loss = bound(lossPortion, 1, extBal - 1);
         _external.simulateLoss(loss);
@@ -878,7 +887,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     /// @dev The load-bearing case: redeem `maxR` under loss.
     ///      `redeem(maxR)` must succeed and pay `previewRedeem(maxR)`. The reserve slice
     ///      `scaledReserve * maxR / supply` bridges precisely the gap between `previewRedeem(maxR)`
-    ///      (= NAV-ish) and `ext.maxWithdraw(FM)` (= NAV - scaledReserve - raw). Note `maxR` may
+    ///      (= NAV-ish) and the external position value (= NAV - scaledReserve - raw). Note `maxR` may
     ///      be a hair below `balanceOf` under loss because the NAV-share cap binds, so this is
     ///      not necessarily a *full* unit exit — the assertions reflect that.
     function test_redeem_atMaxRedeemUnderLoss(uint256 amount, uint256 lossPortion) public {
@@ -942,8 +951,8 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         _external.simulateGain(DEFAULT_DEPOSIT / 2);
         _deposit(BOB, DEFAULT_DEPOSIT);
 
-        // Non-compliant external: `deposit` reverts unconditionally; `maxDeposit` still > 0 so
-        // the trim's pre-check does not skip it. Withdrawals from external still work.
+        // Non-compliant external: `deposit` reverts unconditionally while the gates still read
+        // open, so the trim's pre-check does not skip it. Withdrawals from external still work.
         _external.setDepositReverts(true);
 
         // Bob partial-exits half his shares. His `units / share` exceeds the global average
@@ -951,7 +960,7 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         // → trim → `EXTERNAL_VAULT.deposit` reverts → the redeem bricks.
         uint256 half = _vault.balanceOf(BOB) / 2;
         vm.prank(BOB);
-        vm.expectRevert(bytes("MockERC4626: deposit paused"));
+        vm.expectRevert(bytes("MockMorphoVaultV2: deposit paused"));
         _vault.redeem(half, BOB, BOB);
     }
 

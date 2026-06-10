@@ -238,24 +238,25 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
         );
     }
 
-    /// @dev D.3: when the external vault won't accept the post-payout trim (`maxDeposit(FM) == 0`),
-    ///      `_rebalanceYieldAssets()` skips the `deficit < 0` branch and leaves the freed excess as
-    ///      above-target super-token slack in the reserve. The load-bearing property is that this
-    ///      slack must NOT block subsequent ops and must NOT violate A.2 (no raw underlying at
-    ///      rest). We exercise: two withdraws at
-    ///      `maxDeposit == 0`, then reopening deposits + an operator rebalance — none should
+    /// @dev D.3: when the external vault won't accept the post-payout trim (deposit-side gate
+    ///      blocked, `canDepositExternal() == false`), `_rebalanceYieldAssets()` skips the
+    ///      `deficit < 0` branch and leaves the freed excess as above-target super-token slack in
+    ///      the reserve. The load-bearing property is that this slack must NOT block subsequent
+    ///      ops and must NOT violate A.2 (no raw underlying at rest). We exercise: two withdraws
+    ///      with the gate blocked, then reopening the gate + an operator rebalance — none should
     ///      revert, all should preserve `balanceOf(FM)_underlying == 0`, and the second withdraw
     ///      must pay exact. The trim's effect on the deficit value itself is subtler (sub-
     ///      `SCALING_FACTOR` super-token wei + Superfluid GDA buffer accounting) and not pinned
-    ///      here — see `test_withdraw_notBrickedByRedepositCap` for the single-op variant.
+    ///      here — see `test_withdraw_notBrickedByClosedDepositGate` for the single-op variant.
     function test_prop_aboveTargetReserveDoesNotBlockWithdraw(uint256 amount, uint256 wPortion1, uint256 wPortion2)
         public
     {
         amount = bound(amount, 10e6, ONE_BILLION * 1e6);
         _deposit(ALICE, amount);
 
-        // Close external deposits. First withdraw should leave above-target slack but not revert.
-        _external.setDepositCap(0);
+        // Block the external's deposit-side gate. First withdraw should leave above-target slack
+        // but not revert.
+        _external.setCanSendAssets(false);
 
         uint256 wAssets1 = bound(wPortion1, 1e6, _vault.maxWithdraw(ALICE) / 2);
         uint256 balBefore1 = _usdc.balanceOf(ALICE);
@@ -275,8 +276,8 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
             assertEq(_usdc.balanceOf(address(_fundManager)), 0, "A.2 after second withdraw");
         }
 
-        // Reopening external deposits + operator rebalance must not revert.
-        _external.setDepositCap(type(uint256).max);
+        // Reopening the deposit-side gate + operator rebalance must not revert.
+        _external.setCanSendAssets(true);
         vm.prank(FUND_OPERATOR);
         _fundManager.ensureYieldFlowDuration();
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "A.2 after operator rebalance");
@@ -321,7 +322,7 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
     // share and external P&L (shares-proportional reserve sourcing keeps the external leg bounded).
 
     /// @dev Two holders enter at different prices (Alice first, gain, Bob), then external
-    ///      loss leaves `ext.maxWithdraw(FM) > 0` (loss, not terminal). Either holder
+    ///      loss leaves the FM's external position with a positive value (loss, not terminal). Either holder
     ///      redeeming any `s <= maxRedeem(holder)` succeeds and pays `previewRedeem(s)`.
     ///      This is the multi-holder generalisation of `test_redeem_serviceableUnderLoss`,
     ///      pinning F.2 across `units / share` non-uniformity.
@@ -345,8 +346,8 @@ contract StableYieldSyncVaultPropsTest is SyncVaultTestBase {
 
         _deposit(BOB, amountB);
 
-        // Loss after both have entered. Bound strictly below `extBal` so a positive
-        // `ext.maxWithdraw(FM)` survives (loss regime, not D.2 terminal-pause).
+        // Loss after both have entered. Bound strictly below `extBal` so the FM's position keeps
+        // a positive value (loss regime, not D.2 terminal-pause).
         uint256 extBal1 = _usdc.balanceOf(address(_external));
         uint256 loss = bound(lossPortion, 1, extBal1 - 1);
         _external.simulateLoss(loss);

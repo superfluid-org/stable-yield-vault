@@ -11,7 +11,7 @@ for the properties.
 |---|---|
 | **StableYieldSyncVault** | ERC-4626 face. Pulls underlying from the caller, forwards it to the FundManager, mints shares. Holds no assets |
 | **SyncFundManager** | Sole custodian. Owns the external-vault shares and the super-token reserve. Pre-funds the reserve, deploys the remainder into the external vault, starts the stream |
-| **External ERC-4626** | Third-party vault (Morpho, Beefy, …) that custodies the principal and earns the real, compounding yield |
+| **External ERC-4626** | Morpho Vault V2 that custodies the principal and earns the real, compounding yield (`max*` hardcoded 0 — never consulted; position valued via `previewRedeem`, eligibility via gate views) |
 | **GDA Pool** | Superfluid pool owned by the FM. Streams the yield super-token to unit holders |
 
 ## Asset locations
@@ -19,7 +19,7 @@ for the properties.
 | Location | What lives there |
 |---|---|
 | Investor wallet | The underlying being deposited |
-| External vault (held by FM) | Deployed principal + the compounding external surplus. Recoverable via `EXTERNAL_VAULT.maxWithdraw(FM)` |
+| External vault (held by FM) | Deployed principal + the compounding external surplus. Valued via `EXTERNAL_VAULT.previewRedeem(balanceOf(FM))` |
 | Reserve (FM, super-token) | The pre-fund slice that funds the GDA stream. Counted in NAV via `scaledYieldAssetsBalance()` |
 | FM (raw underlying) | Transient only — 0 at rest (custody hazard, [A.1](../invariants.md#a1--no-raw-underlying-at-rest-in-the-fundmanager-echidna)) |
 
@@ -34,7 +34,7 @@ sequenceDiagram
     participant POOL as GDA Pool
 
     I->>V: deposit(assets, receiver)
-    Note right of V: nonReentrant — maxDeposit capped by EXTERNAL_VAULT.maxDeposit(FM)
+    Note right of V: nonReentrant — maxDeposit binary via FM.canDepositExternal() (gate views)
     V->>FM: safeTransferFrom underlying (caller → FM)
     V->>V: _mint(receiver, shares)
     Note right of V: shares ≈ assets (NAV-neutral entry)
@@ -49,7 +49,8 @@ sequenceDiagram
 ## Step by step
 
 1. **Vault entry.** `deposit(assets, receiver)` (or `mint`). `nonReentrant`. OZ checks
-   `assets <= maxDeposit(receiver)`, where `maxDeposit == EXTERNAL_VAULT.maxDeposit(FM)`.
+   `assets <= maxDeposit(receiver)`, which is binary: `type(uint256).max` while the FM's
+   deposit-side gates clear (`FUND_MANAGER.canDepositExternal()`), else 0.
    Shares are priced `previewDeposit(assets) = assets · (totalSupply + 10**offset) /
    (totalAssets + 1)`. Because the deposit raises external principal + reserve by exactly
    `assets`, NAV/supply is preserved and `shares ≈ assets` at entry.
@@ -63,10 +64,12 @@ sequenceDiagram
      → `1e6` units). A sub-`RAW_PER_UNIT` dust deposit maps to 0 units and is skipped.
      The reserve target now reflects the new, higher unit count.
    - **Top up the reserve.** `_rebalanceYieldAssets()` pulls
-     `min(deficit / SCALING_FACTOR + 1, EXTERNAL_VAULT.maxWithdraw(FM))` from the external
+     `min(deficit / SCALING_FACTOR + 1, externalPositionValue())` from the external
      position and upgrades it — only the *deficit*, so the external surplus stays
-     compounding. No external calls when already solvent. Capped at `maxWithdraw(FM)`, so
-     it can never brick the deposit.
+     compounding. No external calls when already solvent. The cap is the position's
+     *value* (Morpho V2 has no liquidity view), so the pull can revert on an external
+     liquidity shortfall and brick the deposit until liquidity returns (accepted;
+     `forceDeallocate` unsticks).
    - **Pre-fund the residual.** If a deficit remains, upgrade
      `min(deficit / SCALING_FACTOR + 1, assets)` of the incoming underlying into the
      reserve.

@@ -72,7 +72,9 @@ interface ISyncFundManager is IFundManagerBase {
 
     /**
      * @notice The external ERC-4626 vault holding the deployed principal (and the compounding
-     *         buffer). Immutable; its `asset()` equals the underlying.
+     *         buffer). Immutable; its `asset()` equals the underlying. Expected to be a Morpho
+     *         Vault V2: its `max*` views are hardcoded to 0 and are never consulted — deposit and
+     *         withdraw eligibility come from the {IMorphoVaultV2} gate views instead.
      */
     function EXTERNAL_VAULT() external view returns (IERC4626);
 
@@ -82,17 +84,32 @@ interface ISyncFundManager is IFundManagerBase {
     function totalManagedAssets() external view returns (uint256);
 
     /**
-     * @notice The external vault's deposit limit with the FM as holder (feeds the vault's
-     *         `maxDeposit`/`maxMint`).
+     * @notice The value of the FM's external position,
+     *         `EXTERNAL_VAULT.previewRedeem(EXTERNAL_VAULT.balanceOf(FM))`. A value of `0` while
+     *         vault shares are outstanding is the **terminal external impairment** signal: the
+     *         position is worthless (share price → 0, or the FM's external shares were burned on
+     *         a socialized loss), so the vault treats it as a full pause. Note this values the
+     *         position; it says nothing about the external vault's *instant liquidity* (Morpho V2
+     *         exposes no such view) — a withdrawal can still revert on a liquidity shortfall.
      */
-    function maxExternalDeposit() external view returns (uint256);
+    function externalPositionValue() external view returns (uint256);
 
     /**
-     * @notice The external vault's withdraw limit with the FM as holder
-     *         (`EXTERNAL_VAULT.maxWithdraw(FM)`). A value of `0` is the **terminal external
-     *         impairment** signal: the deployed principal cannot be recovered, so the vault
-     *         treats it as a full pause (the vault zeroes all four `max*` while it holds).
+     * @notice Whether the FM can currently deposit into the external vault — Morpho V2's
+     *         `canSendAssets(FM) && canReceiveShares(FM)` gate views. Feeds the vault's
+     *         `maxDeposit`/`maxMint` (the external vault has no amount-based deposit cap, so
+     *         eligibility is binary). Gates are unset by default (→ `true` without an external
+     *         call); a curator-set gate that reverts makes this view revert (accepted).
      */
-    function maxExternalVaultWithdraw() external view returns (uint256);
+    function canDepositExternal() external view returns (bool);
+
+    /**
+     * @notice Whether the FM can currently withdraw from the external vault — Morpho V2's
+     *         `canSendShares(FM) && canReceiveAssets(FM)` gate views (withdrawals are routed
+     *         FM-first, so the FM is always the receiver of the external leg). `false` while
+     *         vault shares are outstanding is treated as a full pause, like terminal impairment.
+     *         Same reverting-gate caveat as {canDepositExternal}.
+     */
+    function canWithdrawExternal() external view returns (bool);
 
 }

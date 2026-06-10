@@ -8,29 +8,30 @@ import { NetworkConfig } from "script/config/NetworkConfig.sol";
 
 import { StableYieldSyncVault } from "src/vault/sync/StableYieldSyncVault.sol";
 import { SyncFundManager } from "src/vault/sync/SyncFundManager.sol";
-import { MockERC4626 } from "test/mocks/MockERC4626.sol";
+import { MockMorphoVaultV2 } from "test/mocks/MockMorphoVaultV2.sol";
 import { StableYieldVaultTestBase } from "test/vault/base/StableYieldVaultTestBase.t.sol";
 
 /**
  * @title SyncVaultTestBase
  * @notice Shared fixture for the synchronous StableYieldSyncVault suite. Deploys a full Superfluid
  *         framework (mirroring the async `StableYieldVaultTestBase`), a USDC TestToken + USDCx
- *         wrapper, a configurable `MockERC4626` external vault, and the StableYieldSyncVault (which
- *         deploys & pins its `SyncFundManager`).
+ *         wrapper, a configurable `MockMorphoVaultV2` external vault (Morpho V2 semantics: `max*`
+ *         hardcoded to 0, gate views), and the StableYieldSyncVault (which deploys & pins its
+ *         `SyncFundManager`).
  */
 contract SyncVaultTestBase is StableYieldVaultTestBase {
 
     string internal constant SHARE_NAME = "Stable Yield Sync Vault Share";
     string internal constant SHARE_SYMBOL = "SYSVS";
 
-    MockERC4626 internal _external;
+    MockMorphoVaultV2 internal _external;
     SyncFundManager internal _fundManager;
     StableYieldSyncVault internal _vault;
 
     function setUp() public virtual override {
         super.setUp();
 
-        _external = new MockERC4626(IERC20(address(_usdc)), "Mock External USDC Vault", "mxUSDC");
+        _external = new MockMorphoVaultV2(IERC20(address(_usdc)), "Mock External USDC Vault", "mxUSDC");
 
         vm.startPrank(DEPLOYER);
         StableYieldVaultDeployer.DeploymentResult memory deploymentResult = StableYieldVaultDeployer.deploySyncVault(

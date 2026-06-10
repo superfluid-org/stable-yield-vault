@@ -1,9 +1,18 @@
 # Stable Yield Sync Vault — Design
 
 A synchronous ERC-4626 vault that pays a **stable, streamed yield**. Users deposit
-and withdraw instantly. Their principal is routed into an external ERC-4626 vault
-(Morpho, Beefy, …) where it earns the real market yield; a smooth promised yield is
-paid to them out-of-band as a Superfluid stream.
+and withdraw instantly. Their principal is routed into an external ERC-4626 vault —
+specifically a **Morpho Vault V2** — where it earns the real market yield; a smooth
+promised yield is paid to them out-of-band as a Superfluid stream.
+
+Morpho V2 is a non-conventional ERC-4626: it hardcodes all four `max*` views to 0
+(its optional "gate" contracts cannot be guaranteed revert-free, so no reliable
+maximum exists) and exposes no instant-liquidity view. The integration therefore
+never consults the external's `max*`: the position is valued via `previewRedeem`,
+deposit/withdraw eligibility comes from the gate views
+(`canSendAssets`/`canReceiveShares`/`canSendShares`/`canReceiveAssets`), and
+external illiquidity surfaces as a revert rather than a pre-screened bound (see
+[Security](#security-considerations)).
 
 It is the synchronous sibling of `StableYieldAsyncVault`. Both share one Superfluid
 streaming engine (`FundManagerBase`); this vault drops the async epoch lifecycle
@@ -54,7 +63,7 @@ and limits from FundManager views.
 ### NAV (net asset value)
 
 ```
-totalAssets = EXTERNAL_VAULT.maxWithdraw(FM)   // recoverable from the external position
+totalAssets = EXTERNAL_VAULT.previewRedeem(EXTERNAL_VAULT.balanceOf(FM))  // external position value
             + scaledYieldAssetsBalance()        // the super-token reserve, in underlying terms
             + UNDERLYING_ASSET.balanceOf(FM)     // any raw underlying held by the FM
 ```
@@ -68,9 +77,16 @@ smoothing. Consequences:
 - A loss in the external vault shows up **immediately and honestly** in the share
   price. There is no buffer to absorb it — that is the trade for giving holders the
   upside.
+- The external leg is the position's **value**, not its instant liquidity: a withdrawal
+  priced off NAV can still revert at the external leg if Morpho's idle + liquidity
+  adapter can't cover it (no liquidity view exists — see
+  [Security](#security-considerations)).
 
 NAV reads the external vault's price live, so the external vault must have a
-**monotonic, non-manipulable share price** (see [Security](#security-considerations)).
+non-manipulable share price (see [Security](#security-considerations)). Morpho V2
+qualifies: `previewRedeem` is interest-accrual priced, its upward growth is capped per
+second by the allocator's `maxRate`, and accrual happens once per transaction — so it
+cannot be spiked within a block. Losses still pass through immediately (by design).
 
 ### The stream
 
@@ -87,8 +103,9 @@ deposits the reserve is replenished from the external position on every user
 operation, and by the operator's `ensureYieldFlowDuration()` during quiet periods.
 
 The stream keeps paying at the promised rate as long as the external position has
-anything left to pull (`EXTERNAL_VAULT.maxWithdraw(FM) > 0`). It only stops at
-**terminal impairment** (`== 0`), at which point the vault pauses (see below).
+any value left to pull (`previewRedeem(balanceOf(FM)) > 0`). It only stops at
+**terminal impairment** (position value `== 0`), at which point the vault pauses
+(see below).
 
 ---
 
@@ -107,6 +124,7 @@ anything left to pull (`EXTERNAL_VAULT.maxWithdraw(FM) > 0`). It only stops at
 | 9 | **Custody** | The FundManager is the sole custodian and NAV authority; the vault holds nothing. |
 | 10 | **First-deposit inflation** | Mitigated by OZ virtual shares: `_decimalsOffset()` returns a hardcoded `12`. |
 | 11 | **Capital custody hazard** | Principal never rests in the FundManager as raw underlying across calls. |
+| 12 | **External integration surface** | Morpho Vault V2: the external's `max*` (hardcoded 0) are never consulted. NAV via `previewRedeem(balanceOf)`; deposit/withdraw eligibility via the `can*` gate views; **no liquidity view** — the vault's own `maxWithdraw/maxRedeem` overestimate under an external liquidity crunch (a within-`max*` request can revert at the external leg; accepted, `forceDeallocate` is the unstick path). |
 
 ---
 
@@ -133,32 +151,51 @@ the FundManager is meaningless in isolation.
 - **`_update`** calls `FUND_MANAGER.onShareTransfer(from, to, value)` on
   shareholder-to-shareholder transfers (skipping mint/burn legs) so the yield stream
   follows the shares.
-- **Limits.** `maxDeposit`/`maxMint` are capped by the external vault's own deposit
-  limit (`FUND_MANAGER.maxExternalDeposit()`). `maxWithdraw`/`maxRedeem` are capped by
-  the NAV (`FUND_MANAGER.totalManagedAssets()`). All four are forced to `0` under
-  terminal impairment (see below).
+- **Limits.** `maxDeposit`/`maxMint` are **binary**: `type(uint256).max` while the FM's
+  deposit-side gates clear (`FUND_MANAGER.canDepositExternal()` — Morpho V2 has no
+  amount-based deposit cap) and `0` otherwise. `maxWithdraw`/`maxRedeem` are capped by
+  the NAV (`FUND_MANAGER.totalManagedAssets()`) — the position's *value*, not Morpho's
+  instant liquidity, so they can overestimate under a liquidity crunch (accepted
+  deviation, see Security). All four are forced to `0` under the external pause (see
+  below).
 - **`deposit`/`mint`/`withdraw`/`redeem`** are `nonReentrant`. `preview*` functions
   use the OZ defaults and work synchronously — they do **not** revert (unlike the async
   vault).
 
-#### Terminal-impairment pause
+#### External pause
 
-When the external position cannot be recovered at all
-(`EXTERNAL_VAULT.maxWithdraw(FM) == 0`) **and there are shares outstanding**
-(`totalSupply() > 0`), `_isExternallyPaused()` forces all four `max*` to `0`, so OZ
-reverts every deposit/mint/withdraw/redeem with `ERC4626ExceededMax*`. The stream keeps
-paying existing holders from the reserve until it is naturally liquidated.
+With shares outstanding (`totalSupply() > 0`), `_isExternallyPaused()` forces all four
+`max*` to `0` — so OZ reverts every deposit/mint/withdraw/redeem with
+`ERC4626ExceededMax*` — on either of two triggers, both meaning the deployed principal
+cannot currently be recovered:
+
+- **Terminal impairment**: `FUND_MANAGER.externalPositionValue() == 0` — the position
+  is worthless, via either total-loss variant (share price → 0 with shares kept, or
+  the FM's external shares burned on a socialized loss; both read 0 through
+  `previewRedeem(balanceOf)`).
+- **Exit gates blocked**: `FUND_MANAGER.canWithdrawExternal() == false` — Morpho's
+  `sendSharesGate`/`receiveAssetsGate` denies the FM, so the external leg of any
+  withdrawal would revert.
+
+In both cases the stream keeps paying existing holders from the reserve until it is
+naturally liquidated, and the pause lifts when the position recovers / the gate
+reopens.
 
 The gate keys on `totalSupply() > 0` — "are there depositors to protect?" — rather than
 on the FM's external share balance:
 
 - **An empty vault is never paused**, so the first deposit always works.
-- A dust external-share donation cannot force a false pause.
+- A dust external-share donation only *raises* the position value — it cannot force a
+  false pause.
 - A total loss (whether the external's price goes to zero or it burns the FM's shares)
   pauses consistently.
 
-`maxWithdraw(FM) == 0` does not distinguish a permanent loss from a temporary freeze;
-both pause. If permanent, the remaining reserve simply streams out to holders.
+**Not detected: a pure liquidity freeze.** Morpho V2 exposes no liquidity view, so an
+external that is fully valued but instantly illiquid does **not** pause — the affected
+withdrawal reverts at the external leg instead, and Morpho's permissionless
+`forceDeallocate` is the unstick path. (Under the previous honest-`max*` design a
+freeze and a loss were indistinguishable and both paused; with Morpho V2 the loss
+variants pause and the freeze surfaces as reverts.)
 
 ### `SyncFundManager` — the capital custodian
 
@@ -191,7 +228,10 @@ directly off recoverable balances.
    - a **shares-proportional reserve slice**,
      `fromReserve = ceil(scaledYieldAssetsBalance() · shares / supplyBeforeBurn)`,
      clamped at `redeemingAssets`, downgraded from the super-token reserve;
-   - the **external vault** for the remainder.
+   - the **external vault** for the remainder — pulled **FM-first**
+     (`withdraw(fromExternal, FM, FM)`) so only the FM, never the end receiver, must
+     clear Morpho's `receiveAssetsGate`; the three legs then leave the FM as a single
+     `safeTransfer(receiver, redeemingAssets)`.
 3. `_rebalanceYieldAssets()` — restore the reserve to target for the reduced unit count.
 4. `_recalibrateFlow()` — the flow rate decreases (units went down), which releases GDA
    buffer and never reverts from a drained reserve.
@@ -204,21 +244,26 @@ is unchanged for the holders who stay.
 to the forward-solvency target by moving value through the external vault:
 
 - **Reserve below target** (`deficit > 0`): pull
-  `min(deficit / SCALING_FACTOR + 1, EXTERNAL_VAULT.maxWithdraw(FM))` out of the external
+  `min(deficit / SCALING_FACTOR + 1, externalPositionValue())` out of the external
   position and upgrade it. Only the *deficit* is pulled, so the surplus keeps
-  compounding. The pull is capped at `maxWithdraw(FM)`, so a compliant external never
-  reverts it — it can never brick the calling op.
+  compounding. The cap is the position's **value** — Morpho V2 has no liquidity view —
+  so the pull **can revert on an external liquidity shortfall**, bricking the calling
+  op until liquidity returns (accepted; `forceDeallocate` is the unstick path). Note
+  the standing post-deposit deficit is roughly one GDA stream buffer (the recalibrate
+  locks the buffer *after* the pre-fund), so the liquidity needed to keep ops alive is
+  buffer-scale, not zero.
 - **Reserve above target** (`deficit < 0`): trim the excess back into the external
   vault, **best-effort**. Sub-`SCALING_FACTOR` excess is ignored. Otherwise, only if
-  `EXTERNAL_VAULT.maxDeposit(FM) >= underlyingNeeded`, downgrade and redeposit
+  the deposit-side gates clear (`canDepositExternal()`), downgrade and redeposit
   **exactly** `underlyingNeeded` (not `balanceOf(FM)` — that would sweep any in-flight
-  raw underlying mid-call). If the external will not accept the deposit, skip the trim
-  entirely; the excess stays as above-target reserve slack and the next rebalance
-  retries.
+  raw underlying mid-call). If the gates are blocked, skip the trim entirely; the
+  excess stays as above-target reserve slack and the next rebalance retries.
 
-**Views the vault proxies:** `totalManagedAssets()` (the NAV), `maxExternalDeposit()`
-(`EXTERNAL_VAULT.maxDeposit(FM)`), `maxExternalVaultWithdraw()`
-(`EXTERNAL_VAULT.maxWithdraw(FM)`), plus the `EXTERNAL_VAULT` getter.
+**Views the vault proxies:** `totalManagedAssets()` (the NAV), `externalPositionValue()`
+(`EXTERNAL_VAULT.previewRedeem(EXTERNAL_VAULT.balanceOf(FM))` — 0 is the terminal-
+impairment signal), `canDepositExternal()` (`canSendAssets(FM) && canReceiveShares(FM)`),
+`canWithdrawExternal()` (`canSendShares(FM) && canReceiveAssets(FM)`; the FM is always
+the receiver of the external leg), plus the `EXTERNAL_VAULT` getter.
 
 ### `FundManagerBase` — the shared streaming engine
 
@@ -244,25 +289,59 @@ the yield and fee GDA pools, the operator-committed `stableYieldRate`, the
 - **`onShareTransfer`** moves a shares-proportional slice of GDA units from sender to
   receiver. A zero-unit sender is skipped (so dust shares stay transferable).
 
-### External vault
+### External vault — Morpho Vault V2
 
-The third-party ERC-4626 (Morpho, Beefy, …) that custodies the principal and earns the
-real yield. Its `asset()` must equal the underlying. It is **trusted**: its
-`maxWithdraw(FM)` feeds NAV, the rebalance source, and the withdraw principal leg.
-Integrate only standard, audited, non-rebasing 4626s.
+The third-party vault that custodies the principal and earns the real yield. Its
+`asset()` must equal the underlying. It is **trusted**: its `previewRedeem` feeds NAV,
+the rebalance source cap, and the withdraw principal leg.
+
+Morpho V2 specifics the integration relies on (vendored interface:
+`src/interfaces/vault/sync/IMorphoVaultV2.sol`):
+
+- **`max*` are hardcoded to 0** and never consulted.
+- **Gate views** (`canSendAssets`/`canReceiveShares` for the enter path,
+  `canSendShares`/`canReceiveAssets` for the exit path) are the only eligibility
+  signal. Unset gates (the default) return `true` without an external call;
+  curator-set gates are timelocked but are arbitrary contracts that MAY revert — a
+  reverting gate makes the FM's `can*External` views (and hence the vault's `max*`)
+  revert too (accepted for the PoC; see `ISyncFundManager` natspec).
+- **No liquidity view.** Withdrawals auto-deallocate from Morpho's liquidity adapter;
+  if idle + adapter can't cover, the withdraw reverts and the permissionless
+  `forceDeallocate` (≤ 2% penalty on the FM's shares) is the unstick path.
+- **`previewRedeem` is accrual-priced and manipulation-resistant** (`maxRate`-capped
+  growth, once-per-tx accrual) — it satisfies the live-spot NAV requirement.
 
 ---
 
 ## Security considerations
 
 - **NAV reads the external price live — deployment requirement.**
-  `totalManagedAssets()` reads `EXTERNAL_VAULT.maxWithdraw(FM)` with no TWAP or clamp,
-  so the share price tracks the external vault's valuation within a single block. The
-  external ERC-4626 **must have a monotonic, non-manipulable share price** —
-  interest-accrual priced (Aave, Morpho, Compound-style), **not** spot/AMM/oracle-priced
-  and **not** donation-inflatable. Pairing the vault with a spot-priced external
-  re-opens a NAV-manipulation sandwich on every deposit/withdraw. There is no code fix:
-  a clamp would reintroduce exactly the ≈1:1 behaviour the floating share removed.
+  `totalManagedAssets()` reads `EXTERNAL_VAULT.previewRedeem(balanceOf(FM))` with no
+  TWAP or clamp, so the share price tracks the external vault's valuation within a
+  single block. The external **must have a non-manipulable share price** —
+  interest-accrual priced, **not** spot/AMM/oracle-priced and **not**
+  donation-inflatable. Pairing the vault with a spot-priced external re-opens a
+  NAV-manipulation sandwich on every deposit/withdraw. There is no code fix: a clamp
+  would reintroduce exactly the ≈1:1 behaviour the floating share removed. **Morpho V2
+  satisfies this**: accrual via adapter `realAssets()`, upward growth capped per second
+  by the allocator's `maxRate`, accrual once per transaction (a donation cannot spike
+  the price intra-block; losses pass through immediately, which matches the model).
+
+- **`maxWithdraw`/`maxRedeem` overestimate under an external liquidity crunch —
+  accepted ERC-4626 deviation.** Morpho V2 has no liquidity view, so the vault's
+  `max*` cap by the position's *value*. A request within `max*` can revert at the
+  external leg on a liquidity shortfall, and the per-op rebalance's deficit pull can
+  brick deposits/withdrawals the same way until liquidity returns (the standing
+  post-deposit deficit is ~one GDA stream buffer, so the liveness threshold is
+  buffer-scale liquidity, not zero). Unstick path: Morpho's permissionless
+  `forceDeallocate` (≤ 2% penalty on the FM's shares). A pure liquidity freeze does
+  **not** pause the vault — only valuelessness or gate blocks do.
+
+- **Reverting gates.** A curator-set Morpho gate is an arbitrary contract; if it
+  reverts, the FM's `can*External` views — and therefore the vault's `max*` — revert
+  too (strict ERC-4626 wants `max*` never to revert). Accepted for the PoC: gates on
+  the target vault are unset, gate changes are curator-timelocked, and a reverting
+  gate would be blocking the underlying Morpho operations anyway.
 
 - **First-deposit inflation.** The classic ERC-4626 attack (seed the empty vault, donate
   to inflate the price per share, round the victim's deposit to zero shares). Mitigated
@@ -288,12 +367,13 @@ Integrate only standard, audited, non-rebasing 4626s.
   `convertToAssets(1 share)`, not the flow rate. The only "stream stopped" state is
   terminal impairment.
 
-- **External deposits closed.** If the external vault rejects deposits while still
-  servicing withdrawals, the rebalance trim is skipped and the reserve sits above target
-  until deposits reopen. This is safe (above-target slack just funds the stream for
-  longer). A non-compliant external whose `deposit` reverts despite reporting
-  `maxDeposit > 0` would still brick the calling op — an accepted limitation of trusting
-  the external's `maxDeposit`.
+- **External deposits closed.** If Morpho's deposit-side gates block the FM
+  (`canDepositExternal() == false`) while withdrawals still work, the vault's
+  `maxDeposit`/`maxMint` read 0 and the rebalance trim is skipped, so the reserve sits
+  above target until the gate reopens. This is safe (above-target slack just funds the
+  stream for longer). A non-compliant external whose `deposit` reverts despite open
+  gates would still brick the calling op — an accepted limitation of trusting the gate
+  views.
 
 - **Rate above sustainable yield.** The reserve replenisher draws deeper into the
   external position and the loss passes to the share price honestly. The stream only
