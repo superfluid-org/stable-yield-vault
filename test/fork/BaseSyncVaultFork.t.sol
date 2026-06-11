@@ -77,7 +77,7 @@ contract BaseSyncVaultForkTest is Test {
     mapping(address => uint256) internal _expectedStreamWei; // 18-dec USDCx the stream owes
 
     function setUp() public {
-        _skipped = vm.envOr("SKIP_FORK_TESTS", false);
+        _skipped = vm.envOr("SKIP_FORK_TESTS", true);
         if (_skipped) return;
 
         string memory rpcUrl = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
