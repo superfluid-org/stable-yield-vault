@@ -210,8 +210,14 @@ directly off recoverable balances.
 2. `_rebalanceYieldAssets()` — clear any pre-existing reserve deficit from the external
    position.
 3. Pre-fund the residual: if a deficit remains, upgrade
-   `min(deficit / SCALING_FACTOR + 1, assets)` of the incoming underlying into the
-   reserve.
+   `min(max(deficit / SCALING_FACTOR + 1, MIN_EXTERNAL_PULL), assets)` of the incoming
+   underlying into the reserve. The `MIN_EXTERNAL_PULL` (10 atoms) floor exists because
+   the production Base USDCx wrapper auto-supplies its reserves into Aave v3, which
+   reverts amounts whose scaled value rounds to zero — it also keeps the stream's GDA
+   buffer fundable on dust bootstrap deposits and repairs any sub-dust deficit a skipped
+   rebalance pull left behind. A deposit smaller than `MIN_EXTERNAL_PULL` atoms onto an
+   empty reserve skips the upgrade and reverts at the recalibrate (no buffer source) —
+   sub-dust bootstrap deposits are not viable.
 4. Deposit the remainder into the external vault. Nothing is left at rest in the FM.
 5. `_recalibrateFlow()` — start/raise the stream.
 
@@ -245,13 +251,18 @@ to the forward-solvency target by moving value through the external vault:
 
 - **Reserve below target** (`deficit > 0`): pull
   `min(deficit / SCALING_FACTOR + 1, externalPositionValue())` out of the external
-  position and upgrade it. Only the *deficit* is pulled, so the surplus keeps
-  compounding. The cap is the position's **value** — Morpho V2 has no liquidity view —
-  so the pull **can revert on an external liquidity shortfall**, bricking the calling
-  op until liquidity returns (accepted; `forceDeallocate` is the unstick path). Note
-  the standing post-deposit deficit is roughly one GDA stream buffer (the recalibrate
-  locks the buffer *after* the pre-fund), so the liquidity needed to keep ops alive is
-  buffer-scale, not zero.
+  position and upgrade it — **skipped entirely if that amount is below
+  `MIN_EXTERNAL_PULL` (10 atoms)**: the production Base USDCx wrapper auto-supplies its
+  reserves into Aave v3, which reverts supplies whose scaled value rounds to zero, so a
+  1-atom pull (any sub-atom deficit) would brick the calling op. The skipped shortfall
+  is sub-dust vs the 2-day target and self-corrects on the next rebalance (or the next
+  deposit's pre-fund, which rounds up to `MIN_EXTERNAL_PULL`). Only the *deficit* is
+  pulled, so the surplus keeps compounding. The cap is the position's **value** —
+  Morpho V2 has no liquidity view — so the pull **can revert on an external liquidity
+  shortfall**, bricking the calling op until liquidity returns (accepted;
+  `forceDeallocate` is the unstick path). Note the standing post-deposit deficit is
+  roughly one GDA stream buffer (the recalibrate locks the buffer *after* the
+  pre-fund), so the liquidity needed to keep ops alive is buffer-scale, not zero.
 - **Reserve above target** (`deficit < 0`): trim the excess back into the external
   vault, **best-effort**. Sub-`SCALING_FACTOR` excess is ignored. Otherwise, only if
   the deposit-side gates clear (`canDepositExternal()`), downgrade and redeposit

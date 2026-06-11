@@ -164,18 +164,29 @@ partial exit removes a `shares / totalSharesOwned` slice.
 yieldAssetsBalance() >= targetFlowRate · guaranteedFlowDuration   (+ fee leg)
 ```
 
-i.e. `evaluateYieldAssetsDeficit() <= 0` after every user op, unless the rebalance was
-supply-constrained by the external vault.
+i.e. `evaluateYieldAssetsDeficit() < MIN_EXTERNAL_PULL · SCALING_FACTOR` after every
+user op, unless the rebalance was supply-constrained by the external vault. The strict
+`deficit <= 0` form is weakened by the sub-dust band: pulls/upgrades below
+`MIN_EXTERNAL_PULL` (10) underlying atoms are skipped — the production Base USDCx
+wrapper auto-supplies its reserves into Aave v3, which reverts amounts whose scaled
+value rounds to zero, so a 1-atom pull would brick the calling op. The reserve may
+therefore sit up to ~10 atoms (~1e13 wei, sub-dust vs the 2-day target) below target
+between rebalances; the band self-corrects once the stream's drain exceeds it, and the
+`onDeposit` pre-fund rounds up to `MIN_EXTERNAL_PULL`, repairing it on any deposit.
 
 **Where.** `evaluateYieldAssetsDeficit` (`FundManagerBase`); replenished by the
-`deficit > 0` branch of `_rebalanceYieldAssets` and the `onDeposit` pre-fund; cured after
-payout by the post-payout `_rebalanceYieldAssets()` in `onWithdraw`; maintained between
-user activity by the operator's `ensureYieldFlowDuration()`.
+`deficit > 0` branch of `_rebalanceYieldAssets` and the `onDeposit` pre-fund (both
+gated by `MIN_EXTERNAL_PULL`); cured after payout by the post-payout
+`_rebalanceYieldAssets()` in `onWithdraw`; maintained between user activity by the
+operator's `ensureYieldFlowDuration()`.
 
 **Holds when.** Best-effort. In the terminal case, a residual `deficit > 0` implies
-`externalPositionValue() == 0` (terminal impairment). Note the standing post-op deficit
-is ~one GDA stream buffer (the recalibrate locks the buffer after the pre-fund/pull),
-cured by the next rebalance.
+`externalPositionValue() < MIN_EXTERNAL_PULL` (terminal impairment, up to the sub-dust
+band). Note the standing post-op deficit is ~one GDA stream buffer (the recalibrate
+locks the buffer after the pre-fund/pull), cured by the next rebalance. A side effect
+of the dust guard: deposits below `MIN_EXTERNAL_PULL` atoms onto an empty reserve
+cannot pre-fund the stream's GDA buffer and revert (they already reverted on Base via
+the Aave routing); the smallest viable bootstrap deposit is `MIN_EXTERNAL_PULL` atoms.
 
 **Breaks if.** Nothing structurally enforces it (same trust model as async). The operator
 must call `ensureYieldFlowDuration()` during quiet periods — there is no permissionless

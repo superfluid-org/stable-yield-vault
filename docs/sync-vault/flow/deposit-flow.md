@@ -41,7 +41,7 @@ sequenceDiagram
     V->>FM: onDeposit(receiver, assets)
     FM->>POOL: increaseMemberUnits(receiver, _toUnit(assets))
     FM->>FM: _rebalanceYieldAssets()  %% top up the reserve from the external position (deficit only)
-    FM->>FM: _upgrade(min(deficit / SCALING_FACTOR + 1, assets))  %% pre-fund the residual
+    FM->>FM: _upgrade(min(max(deficit / SCALING_FACTOR + 1, MIN_EXTERNAL_PULL), assets))  %% pre-fund the residual
     FM->>E: deposit(assets − upgraded, FM)  %% deploy the remainder as principal
     FM->>POOL: _recalibrateFlow()  %% stream starts/raises now
 ```
@@ -66,13 +66,17 @@ sequenceDiagram
    - **Top up the reserve.** `_rebalanceYieldAssets()` pulls
      `min(deficit / SCALING_FACTOR + 1, externalPositionValue())` from the external
      position and upgrades it — only the *deficit*, so the external surplus stays
-     compounding. No external calls when already solvent. The cap is the position's
-     *value* (Morpho V2 has no liquidity view), so the pull can revert on an external
-     liquidity shortfall and brick the deposit until liquidity returns (accepted;
-     `forceDeallocate` unsticks).
+     compounding, and only when the pull is at least `MIN_EXTERNAL_PULL` (10 atoms; the
+     Base USDCx wrapper routes its reserves into Aave v3, which reverts dust supplies —
+     a skipped sub-dust shortfall self-corrects). No external calls when already
+     solvent. The cap is the position's *value* (Morpho V2 has no liquidity view), so
+     the pull can revert on an external liquidity shortfall and brick the deposit until
+     liquidity returns (accepted; `forceDeallocate` unsticks).
    - **Pre-fund the residual.** If a deficit remains, upgrade
-     `min(deficit / SCALING_FACTOR + 1, assets)` of the incoming underlying into the
-     reserve.
+     `min(max(deficit / SCALING_FACTOR + 1, MIN_EXTERNAL_PULL), assets)` of the
+     incoming underlying into the reserve (the floor keeps the upgrade
+     wrapper-acceptable and the GDA buffer fundable on dust bootstrap deposits;
+     sub-`MIN_EXTERNAL_PULL` deposits onto an empty reserve are not viable).
    - **Deploy the remainder.** `EXTERNAL_VAULT.deposit(assets − upgraded, FM)`. Nothing is
      left at rest in the FM.
    - **Recalibrate.** `_recalibrateFlow()` starts/raises the stream this block, including
