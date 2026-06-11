@@ -40,6 +40,9 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
     /// @inheritdoc ISyncFundManager
     IERC4626 public immutable EXTERNAL_VAULT;
 
+    /// @inheritdoc ISyncFundManager
+    uint256 public constant MIN_EXTERNAL_PULL = 10;
+
     //     ______                 __                  __
     //    / ____/___  ____  _____/ /________  _______/ /_____  _____
     //   / /   / __ \/ __ \/ ___/ __/ ___/ / / / ___/ __/ __ \/ ___/
@@ -51,8 +54,7 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
      * @param _treasury Treasury address collecting the fees
      * @param _asset Underlying asset (e.g. USDC) address
      * @param _yieldAsset Yield asset shall be a wrapped super-token of the underlying asset
-     * @param _externalVault External ERC-4626 vault whose `asset()` is `_asset` (validated by the
-     *        paired vault before this FM is deployed; not re-validated here)
+     * @param _externalVault External ERC-4626 vault address (e.g. Morpho Vault V2)
      * @param _fundOperator Operator granted with the FUND_OPERATOR_ROLE
      * @param _fundAdmin Admin granted with the DEFAULT_ADMIN_ROLE
      * @param _initialStableYieldRate Initial era stable yield rate (in basis points, e.g. 100% <=> 1)
@@ -103,8 +105,17 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
         uint256 toUpgrade;
         if (deficit > 0) {
             uint256 need = (uint256(deficit) / SCALING_FACTOR) + 1;
+            // Round a sub-dust pre-fund up to MIN_EXTERNAL_PULL
+            if (need < MIN_EXTERNAL_PULL) need = MIN_EXTERNAL_PULL;
             toUpgrade = need < assets ? need : assets;
-            _upgrade(toUpgrade);
+            if (toUpgrade >= MIN_EXTERNAL_PULL) {
+                _upgrade(toUpgrade);
+            } else {
+                // Deposit too small to make a wrapper-acceptable upgrade: skip; the stream
+                // recalibration below reverts only if the existing reserve cannot cover the
+                // added buffer (sub-MIN_EXTERNAL_PULL bootstrap deposits are not viable).
+                toUpgrade = 0;
+            }
         }
 
         // Deploy the remainder as principal
@@ -218,7 +229,9 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
      *        and upgrade. The pull is capped by the position's *value* (`previewRedeem`), not its
      *        instant liquidity — Morpho V2 exposes no liquidity view — so it can revert on a
      *        liquidity shortfall, bricking the calling op until liquidity returns (accepted;
-     *        Morpho's permissionless `forceDeallocate` is the unstick path).
+     *        Morpho's permissionless `forceDeallocate` is the unstick path). Pulls below
+     *        {MIN_EXTERNAL_PULL} atoms are skipped: the reserve may sit up to that much below
+     *        target between rebalances (sub-dust vs the 2-day horizon).
      *
      *      - `deficit < 0` (yield reserve above target): if the deposit gates clear for the FM,
      *        downgrade the excess super-token back to underlying and deposit exactly that amount.
@@ -232,7 +245,11 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
             uint256 extValue = externalPositionValue();
             uint256 pulled = need < extValue ? need : extValue;
 
-            if (pulled > 0) {
+            // Dust guard on the pulled amount: a sub-MIN_EXTERNAL_PULL upgrade would revert
+            // on the Base USDCx wrapper's Aave routing and brick the calling op. The skipped
+            // shortfall is sub-dust vs the forward-solvency target and self-corrects on the
+            // next rebalance.
+            if (pulled >= MIN_EXTERNAL_PULL) {
                 EXTERNAL_VAULT.withdraw(pulled, address(this), address(this));
                 // Upgrade exactly what was pulled
                 _upgrade(pulled);

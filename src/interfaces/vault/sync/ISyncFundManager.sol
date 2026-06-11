@@ -79,6 +79,17 @@ interface ISyncFundManager is IFundManagerBase {
     function EXTERNAL_VAULT() external view returns (IERC4626);
 
     /**
+     * @notice Minimum underlying atoms for an external pull / reserve upgrade. The production
+     *         Base USDCx wrapper auto-supplies its reserves into Aave v3, which reverts any
+     *         supply whose scaled amount (`amount / liquidityIndex`) rounds to zero — 1 atom
+     *         today (index ~1.07), 2 atoms once the index crosses 2.0, etc. A shortfall this
+     *         small is negligible against the `guaranteedFlowDuration` target and self-corrects
+     *         on the next rebalance, so it is skipped rather than bricking the calling
+     *         operation. 10 atoms stays safe until the Aave index reaches 10 (decades).
+     */
+    function MIN_EXTERNAL_PULL() external view returns (uint256);
+
+    /**
      * @notice The yield asset inclusive NAV (the vault's `totalAssets`).
      */
     function totalManagedAssets() external view returns (uint256);

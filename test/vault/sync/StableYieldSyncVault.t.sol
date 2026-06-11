@@ -786,8 +786,9 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
     function test_firstDepositInflation_victimMintsNonZero(uint256 victimAmount) public {
         victimAmount = bound(victimAmount, 1e6, ONE_BILLION * 1e6);
 
-        // Attacker seeds the empty vault with the smallest possible position (1 share).
-        _deposit(ALICE, 1);
+        // Attacker seeds the empty vault with the smallest viable position: MIN_EXTERNAL_PULL
+        // atoms (a smaller deposit cannot pre-fund the stream's GDA buffer on an empty reserve).
+        _deposit(ALICE, _fundManager.MIN_EXTERNAL_PULL());
 
         // Attacker donates super-token to the FM, inflating NAV ~10x above the victim's deposit
         // (donation in 18-dec super-token terms; /SCALING_FACTOR=1e12 gives the underlying value).
