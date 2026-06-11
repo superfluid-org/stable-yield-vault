@@ -222,7 +222,7 @@ contract BaseSyncVaultForkTest is Test {
         _yieldPool.claimAll(alice);
         uint256 streamed = USDCX.balanceOf(alice);
         assertApproxEqRel(streamed, _expectedStreamWei[alice], 0.002e18, "streamed yield != GDA expectation");
-        uint256 promised = amount * STABLE_YIELD_RATE_BPS * holdTime / (YEAR * BP_DENOMINATOR) * SCALING_FACTOR;
+        uint256 promised = amount * STABLE_YIELD_RATE_BPS * holdTime * SCALING_FACTOR / (YEAR * BP_DENOMINATOR);
         assertApproxEqRel(streamed, promised, 0.01e18, "streamed yield drifted from the 3% promise");
 
         // --- The treasury fee stream pays ~1% of the yield stream ---
