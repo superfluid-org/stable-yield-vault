@@ -80,7 +80,7 @@ contract BaseSyncVaultForkTest is Test {
         _skipped = vm.envOr("SKIP_FORK_TESTS", true);
         if (_skipped) return;
 
-        string memory rpcUrl = vm.envOr("BASE_RPC_URL", string("https://mainnet.base.org"));
+        string memory rpcUrl = vm.envOr("BASE_MAINNET_RPC_URL", string("https://mainnet.base.org"));
         uint256 blockNumber = vm.envOr("BASE_FORK_BLOCK_NUMBER", uint256(0));
         if (blockNumber == 0) {
             vm.createSelectFork(rpcUrl);
