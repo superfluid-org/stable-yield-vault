@@ -6,12 +6,15 @@ import { NetworkConfig } from "script/config/NetworkConfig.sol";
 
 import { StableYieldAsyncVault } from "src/vault/async/StableYieldAsyncVault.sol";
 import { StableYieldSyncVault } from "src/vault/sync/StableYieldSyncVault.sol";
+import { SyncVaultDepositMacro } from "src/vault/sync/SyncVaultDepositMacro.sol";
 
 library StableYieldVaultDeployer {
 
     struct DeploymentResult {
         address fundManager;
         address vault;
+        // Sync only: the ClearMacro that batches permit + deposit + connect-to-pool (0 for async).
+        address depositMacro;
     }
 
     function deployAsyncVault(NetworkConfig.DeploymentConfig memory config)
@@ -69,6 +72,9 @@ library StableYieldVaultDeployer {
 
         results.vault = address(syncVault);
         results.fundManager = address(syncVault.FUND_MANAGER());
+
+        // Periphery: the macro that batches permit + deposit + connect-to-pool in one user tx.
+        results.depositMacro = address(new SyncVaultDepositMacro(syncVault));
     }
 
 }

@@ -6,12 +6,19 @@ import { ISyncFundManager } from "src/interfaces/vault/sync/ISyncFundManager.sol
 import { SyncFundManager } from "src/vault/sync/SyncFundManager.sol";
 
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+
+import { ERC2771Context } from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ERC4626 } from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import { IERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { Context } from "@openzeppelin/contracts/utils/Context.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+
+import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
+import { ISuperfluid } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperfluid.sol";
 
 /**
  * @title StableYieldSyncVault
@@ -23,7 +30,7 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
  *         Superfluid Distribution pool, pre-funded from each deposit.
  * @dev    Read this contract before {SyncFundManager}
  */
-contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault {
+contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStableYieldSyncVault {
 
     using Math for uint256;
     using SafeERC20 for IERC20;
@@ -73,7 +80,11 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
         uint256 _initialGuaranteedFlowDuration,
         string memory name,
         string memory symbol
-    ) ERC20(name, symbol) ERC4626(IERC20(_underlyingAsset)) {
+    )
+        ERC20(name, symbol)
+        ERC4626(IERC20(_underlyingAsset))
+        ERC2771Context(ISuperfluid(ISuperToken(_yieldAsset).getHost()).getERC2771Forwarder())
+    {
         if (IERC4626(_externalVault).asset() != _underlyingAsset) revert EXTERNAL_ASSET_MISMATCH();
 
         FUND_MANAGER = new SyncFundManager(
@@ -119,6 +130,20 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
      */
     function mint(uint256 shares, address receiver) public override(ERC4626, IERC4626) nonReentrant returns (uint256) {
         return super.mint(shares, receiver);
+    }
+
+    /// @inheritdoc IStableYieldSyncVault
+    function depositWithPermit(uint256 assets, address receiver, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        public
+        nonReentrant
+        returns (uint256)
+    {
+        // Front-run tolerant: a third party landing the same permit first leaves the allowance set,
+        // so swallow the revert — the deposit pull enforces the allowance regardless.
+        try IERC20Permit(asset()).permit(_msgSender(), address(this), assets, deadline, v, r, s) { } catch { }
+        // `super.deposit` is ERC4626's (skips this contract's `nonReentrant deposit` override, so no
+        // guard nesting) but still routes through the fee-bearing `previewDeposit`/`_deposit`.
+        return super.deposit(assets, receiver);
     }
 
     /// @inheritdoc ERC4626
@@ -354,6 +379,30 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
             FUND_MANAGER.onShareTransfer(from, to, value);
         }
         super._update(from, to, value);
+    }
+
+    //    ______            __            __     _______________ ____ ___
+    //   / ____/___  ____  / /____  _  __/ /_   / __  /__  /__  // / // /
+    //  / /   / __ \/ __ \/ __/ _ \| |/_/ __/  / /_/ /  / /  / // /_// /
+    // / /___/ /_/ / / / / /_/  __/>  </ /_    \__,_/  /_/  /_//_/(_)_/
+    // \____/\____/_/ /_/\__/\___/_/|_|\__/
+
+    /**
+     * @dev EIP-2771: when called through the trusted Superfluid `ERC2771Forwarder` (a macro's
+     *      type-302 op), the real caller is recovered from the appended calldata; otherwise this is a
+     *      plain `msg.sender`. Resolves the {Context}/{ERC2771Context} diamond so ERC20/ERC4626 read
+     *      the appended sender.
+     */
+    function _msgSender() internal view override(Context, ERC2771Context) returns (address) {
+        return ERC2771Context._msgSender();
+    }
+
+    function _msgData() internal view override(Context, ERC2771Context) returns (bytes calldata) {
+        return ERC2771Context._msgData();
+    }
+
+    function _contextSuffixLength() internal view override(Context, ERC2771Context) returns (uint256) {
+        return ERC2771Context._contextSuffixLength();
     }
 
 }

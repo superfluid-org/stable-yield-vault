@@ -395,6 +395,17 @@ Morpho V2 specifics the integration relies on (vendored interface:
   the value-bearing FM hooks (`onDeposit`/`onWithdraw`) are reachable only from the
   pinned vault via `VAULT_ROLE`.
 
+- **EIP-2771 / meta-tx surface.** The vault is an `ERC2771Context` trusting the Superfluid
+  Host's canonical `ERC2771Forwarder` (resolved at construction from the yield asset's
+  Host), so a deposit batched through a Superfluid macro recovers the real depositor from
+  the appended calldata. Trust is benign: the forwarder only ever appends the
+  Host-authenticated batch initiator (equivalent to a direct call), and an untrusted caller
+  appending a spoofed sender is ignored (`_msgSender()` stays `msg.sender`). The
+  `depositWithPermit` entrypoint folds an EIP-2612 permit in (front-run tolerant via
+  `try/catch`; `transferFrom`'s allowance check is the real gate). See
+  [`flow/batched-deposit-flow.md`](./flow/batched-deposit-flow.md) and
+  [`plan/eip2771-batched-deposit.md`](./plan/eip2771-batched-deposit.md).
+
 - **Decimals.** Supported underlying decimals are `[6, 18]`. The hard-coded
   `1e12 = SCALING_FACTOR · RAW_PER_UNIT` and the share offset assume the 6-decimal USDC
   deployment; a non-6-decimal underlying needs the offset and scaling revisited.

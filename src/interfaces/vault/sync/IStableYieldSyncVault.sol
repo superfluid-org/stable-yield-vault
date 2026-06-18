@@ -40,6 +40,25 @@ interface IStableYieldSyncVault is IERC4626 {
     //   / /____>  </ /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  /_____/_/|_|\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
+    /**
+     * @notice Deposit `assets` (gross) in one call after an EIP-2612 permit — for batching through a
+     *         Superfluid macro (the vault is EIP-2771-aware, so the real depositor is recovered from
+     *         the appended calldata when called via the trusted forwarder).
+     * @dev The permit authorizes the vault to pull `assets` (the gross amount); the flat
+     *      {DEPOSIT_FEE} is then skimmed and the net is deposited. The permit is consumed best-effort
+     *      (a front-run permit that already set the allowance is tolerated).
+     * @param assets Gross underlying amount to pull (fee-inclusive); must be authorized by the permit.
+     * @param receiver Address to receive the minted shares.
+     * @param deadline EIP-2612 permit deadline.
+     * @param v Permit signature `v`.
+     * @param r Permit signature `r`.
+     * @param s Permit signature `s`.
+     * @return shares The number of vault shares minted to `receiver`.
+     */
+    function depositWithPermit(uint256 assets, address receiver, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
+        external
+        returns (uint256 shares);
+
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
     //  | | / / / _ \ | /| / /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
