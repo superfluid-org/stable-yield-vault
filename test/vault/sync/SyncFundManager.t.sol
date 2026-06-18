@@ -7,6 +7,7 @@ import { MockMorphoVaultV2 } from "test/mocks/MockMorphoVaultV2.sol";
 import { ISuperToken, SuperToken } from "@superfluid-finance/ethereum-contracts/contracts/superfluid/SuperToken.sol";
 import { TestToken } from "@superfluid-finance/ethereum-contracts/contracts/utils/TestToken.sol";
 
+import { IAccessControl } from "@openzeppelin-v5/contracts/access/IAccessControl.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import { IFundManagerBase } from "src/interfaces/common/IFundManagerBase.sol";
@@ -182,6 +183,100 @@ contract SyncFundManagerTest is SyncVaultTestBase {
             _external.previewRedeem(_external.balanceOf(address(_fundManager))),
             "externalPositionValue == previewRedeem(balanceOf)"
         );
+    }
+
+    //     ______                                                  _    __    _ __  __    __
+    //    / ____/___ ___  ___  _________ ____  ____  _______  __  | |  / /   (_) /_/ /_  / /________ __      __
+    //   / __/ / __ `__ \/ _ \/ ___/ __ `/ _ \/ __ \/ ___/ / / /  | | / / __/ / __/ __ \/ / ___/ __ `/ | /| / /
+    //  / /___/ / / / / /  __/ /  / /_/ /  __/ / / / /__/ /_/ /   | |/ / /_/ / /_/ / / / / / /  / /_/ /| |/ |/ /
+    // /_____/_/ /_/ /_/\___/_/   \__, /\___/_/ /_/\___/\__, /    |___/\__,_/\__/_/ /_/_/_/   \__,_/ |__/|__/
+    //                           /____/               /____/
+
+    /// @dev `emergencyWithdraw` is a `DEFAULT_ADMIN_ROLE` escape hatch: it `safeTransfer`s an
+    ///      arbitrary token out of the FM to the caller. Rescue of a stuck/donated raw token (here
+    ///      USDC dealt straight to the FM) lands the full amount at the admin.
+    function test_emergencyWithdraw_rescuesArbitraryToken() public {
+        uint256 amount = 12_345 * 1e6;
+        _dealUSDC(address(_fundManager), amount);
+
+        uint256 adminBefore = _usdc.balanceOf(FUND_ADMIN);
+
+        vm.expectEmit(true, true, true, true, address(_fundManager));
+        emit IFundManagerBase.EmergencyWithdraw(address(_usdc), FUND_ADMIN, amount);
+        vm.prank(FUND_ADMIN);
+        _fundManager.emergencyWithdraw(address(_usdc), amount);
+
+        assertEq(_usdc.balanceOf(FUND_ADMIN), adminBefore + amount, "admin received the full amount");
+        assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM drained");
+    }
+
+    /// @dev Partial withdrawals are honoured; the residue stays in the FM.
+    function test_emergencyWithdraw_partialLeavesResidue() public {
+        uint256 seeded = 1000 * 1e18;
+        _seedReserve(seeded);
+
+        uint256 take = 400 * 1e18;
+        vm.prank(FUND_ADMIN);
+        _fundManager.emergencyWithdraw(address(_usdcx), take);
+
+        assertEq(_usdcx.balanceOf(FUND_ADMIN), take, "admin received the partial amount");
+        assertEq(_usdcx.balanceOf(address(_fundManager)), seeded - take, "residue stays in the FM");
+    }
+
+    /// @dev The hatch reaches the value-bearing balances too: the USDCx yield reserve and the
+    ///      external (Morpho) position shares are both ordinary ERC-20 balances held by the FM, so
+    ///      the admin can sweep either of them — documenting the full custodial reach of the role.
+    function test_emergencyWithdraw_canSweepReserveAndExternalShares() public {
+        _deposit(ALICE, DEFAULT_DEPOSIT);
+
+        // Yield reserve (USDCx).
+        uint256 reserve = _usdcx.balanceOf(address(_fundManager));
+        assertGt(reserve, 0, "precondition: reserve funded by the deposit");
+        vm.prank(FUND_ADMIN);
+        _fundManager.emergencyWithdraw(address(_usdcx), reserve);
+        assertEq(_usdcx.balanceOf(FUND_ADMIN), reserve, "admin swept the yield reserve");
+
+        // External Morpho position shares.
+        uint256 extShares = _external.balanceOf(address(_fundManager));
+        assertGt(extShares, 0, "precondition: external position held");
+        vm.prank(FUND_ADMIN);
+        _fundManager.emergencyWithdraw(address(_external), extShares);
+        assertEq(_external.balanceOf(FUND_ADMIN), extShares, "admin swept the external position");
+        assertEq(_external.balanceOf(address(_fundManager)), 0, "FM position drained");
+    }
+
+    /// @dev Only `DEFAULT_ADMIN_ROLE` may call it. The operator role and an arbitrary user are both
+    ///      rejected with the OZ AccessControl error naming the missing admin role.
+    function test_emergencyWithdraw_revertsForNonAdmin() public {
+        _seedReserve(1000 * 1e18);
+        bytes32 adminRole = _fundManager.DEFAULT_ADMIN_ROLE();
+
+        // The fund operator holds FUND_OPERATOR_ROLE, not the admin role.
+        vm.prank(FUND_OPERATOR);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, FUND_OPERATOR, adminRole)
+        );
+        _fundManager.emergencyWithdraw(address(_usdcx), 1);
+
+        // An unprivileged user.
+        vm.prank(ALICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, ALICE, adminRole)
+        );
+        _fundManager.emergencyWithdraw(address(_usdcx), 1);
+    }
+
+    /// @dev Withdrawing more than the FM holds reverts on the underlying `safeTransfer` (no internal
+    ///      accounting masks the shortfall), leaving balances untouched.
+    function test_emergencyWithdraw_revertsOnInsufficientBalance() public {
+        uint256 seeded = 100 * 1e18;
+        _seedReserve(seeded);
+
+        vm.prank(FUND_ADMIN);
+        vm.expectRevert();
+        _fundManager.emergencyWithdraw(address(_usdcx), seeded + 1);
+
+        assertEq(_usdcx.balanceOf(address(_fundManager)), seeded, "balance untouched after the failed sweep");
     }
 
 }

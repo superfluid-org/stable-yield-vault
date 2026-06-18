@@ -240,6 +240,12 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
         emit GuaranteedFlowDurationChanged(oldDuration, newDuration);
     }
 
+    /// @inheritdoc IFundManagerBase
+    function emergencyWithdraw(address token, uint256 amount) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        IERC20(token).safeTransfer(msg.sender, amount);
+        emit EmergencyWithdraw(token, msg.sender, amount);
+    }
+
     //    _    __             ____     ______      __           __
     //   | |  / /___ ___  __/ / /_   / ____/___ _/ /____  ____/ /
     //   | | / / __ `/ / / / / __/  / / __/ __ `/ __/ _ \/ __  /

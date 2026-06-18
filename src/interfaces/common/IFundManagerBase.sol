@@ -34,6 +34,14 @@ interface IFundManagerBase {
      */
     event GuaranteedFlowDurationChanged(uint256 oldDuration, uint256 newDuration);
 
+    /**
+     * @notice Emitted when the admin sweeps tokens out of the FundManager via {emergencyWithdraw}.
+     * @param token The token swept out.
+     * @param to The recipient of the swept tokens (the calling admin).
+     * @param amount The amount transferred.
+     */
+    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
+
     //    ______
     //   / ____/_____________  __________
     //  / __/ / ___/ ___/ __ \/ ___/ ___/
@@ -93,6 +101,14 @@ interface IFundManagerBase {
      * @param newDuration The new guaranteed flow duration, in seconds.
      */
     function setGuaranteedFlowDuration(uint256 newDuration) external;
+
+    /**
+     * @notice Withdraw tokens from the FundManager in case of emergency.
+     * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
+     * @param token The address of the token to withdraw.
+     * @param amount The amount of tokens to withdraw.
+     */
+    function emergencyWithdraw(address token, uint256 amount) external;
 
     //    _    __             ____     ______      __           __
     //   | |  / /___ ___  __/ / /_   / ____/___ _/ /____  ____/ /
