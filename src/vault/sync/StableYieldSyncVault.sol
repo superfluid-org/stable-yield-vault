@@ -37,6 +37,12 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
     /// @inheritdoc IStableYieldSyncVault
     ISyncFundManager public immutable FUND_MANAGER;
 
+    /// @inheritdoc IStableYieldSyncVault
+    address public immutable TREASURY;
+
+    /// @inheritdoc IStableYieldSyncVault
+    uint256 public constant DEPOSIT_FEE = 0.0001 ether;
+
     //     ______                 __                  __
     //    / ____/___  ____  _____/ /________  _______/ /_____  _____
     //   / /   / __ \/ __ \/ ___/ __/ ___/ / / / ___/ __/ __ \/ ___/
@@ -80,6 +86,8 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
             _initialStableYieldRate,
             _initialGuaranteedFlowDuration
         );
+
+        TREASURY = _treasury;
     }
 
     //      ______     __                        __   ______                 __  _
@@ -88,19 +96,32 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
     //   / /____>  </ /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  /_____/_/|_|\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
 
-    /// @inheritdoc ERC4626
-    function deposit(uint256 assets, address receiver)
-        public
-        override(ERC4626, IERC4626)
-        nonReentrant
-        returns (uint256)
-    {
+    /// @inheritdoc IStableYieldSyncVault
+    function depositWithFee(uint256 assets, address receiver) public payable nonReentrant returns (uint256) {
+        _collectParticipationFee();
         return super.deposit(assets, receiver);
     }
 
-    /// @inheritdoc ERC4626
-    function mint(uint256 shares, address receiver) public override(ERC4626, IERC4626) nonReentrant returns (uint256) {
+    /// @inheritdoc IStableYieldSyncVault
+    function mintWithFee(uint256 shares, address receiver) public payable nonReentrant returns (uint256) {
+        _collectParticipationFee();
         return super.mint(shares, receiver);
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev Disabled: deposits must go through {depositWithFee} so the participation fee is collected.
+    function deposit(uint256, /* assets */ address /* receiver */ )
+        public
+        override(ERC4626, IERC4626)
+        returns (uint256)
+    {
+        revert INVALID_CALL();
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev Disabled: mints must go through {mintWithFee} so the participation fee is collected.
+    function mint(uint256, /* shares */ address /* receiver */ ) public override(ERC4626, IERC4626) returns (uint256) {
+        revert INVALID_CALL();
     }
 
     /// @inheritdoc ERC4626
@@ -311,6 +332,18 @@ contract StableYieldSyncVault is ERC4626, ReentrancyGuard, IStableYieldSyncVault
             FUND_MANAGER.onShareTransfer(from, to, value);
         }
         super._update(from, to, value);
+    }
+
+    /**
+     * @dev Collects the participation fee from the caller.
+     */
+    function _collectParticipationFee() internal {
+        // Ensure the caller has sent the correct deposit fee (in ETH)
+        if (msg.value != DEPOSIT_FEE) revert INVALID_DEPOSIT_FEE();
+
+        // Forward fee to SF DAO treasury
+        (bool sent,) = TREASURY.call{ value: msg.value }("");
+        if (!sent) revert FEE_TRANSFER_FAILED();
     }
 
 }

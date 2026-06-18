@@ -35,6 +35,7 @@ interface IHevm {
     function etch(address who, bytes calldata code) external;
     function prank(address) external;
     function warp(uint256) external;
+    function deal(address who, uint256 newBalance) external;
 
 }
 

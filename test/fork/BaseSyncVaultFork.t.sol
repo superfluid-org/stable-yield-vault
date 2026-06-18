@@ -388,7 +388,9 @@ contract BaseSyncVaultForkTest is Test {
 
     /// @dev Deposit with full state-change assertions (shares, units, flow, custody).
     function _deposit(address user, uint256 assets) internal returns (uint256 shares) {
+        uint256 fee = _vault.DEPOSIT_FEE();
         deal(address(USDC), user, USDC.balanceOf(user) + assets);
+        vm.deal(user, user.balance + fee);
 
         vm.prank(user);
         USDC.approve(address(_vault), assets);
@@ -398,7 +400,7 @@ contract BaseSyncVaultForkTest is Test {
         uint256 expectedShares = _vault.previewDeposit(assets);
 
         vm.prank(user);
-        shares = _vault.deposit(assets, user);
+        shares = _vault.depositWithFee{ value: fee }(assets, user);
 
         assertEq(shares, expectedShares, "deposit != previewDeposit");
         assertEq(_vault.totalSupply(), supplyBefore + shares, "supply did not grow by minted shares");

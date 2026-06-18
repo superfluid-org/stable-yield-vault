@@ -61,18 +61,23 @@ contract SyncVaultTestBase is StableYieldVaultTestBase {
     //  /_/ /_/\___/_/ .___/\___/_/
     //              /_/
 
-    /// @dev Fund `user` with `amount` USDC and approve the vault to pull it.
+    /// @dev Fund `user` with `amount` USDC, approve the vault to pull it, and top up ETH so the
+    ///      caller can pay the participation fee on `depositWithFee`/`mintWithFee`.
     function _fund(address user, uint256 amount) internal {
         _dealUSDC(user, amount);
+        vm.deal(user, 1 ether);
         vm.prank(user);
         _usdc.approve(address(_vault), type(uint256).max);
     }
 
-    /// @dev Deposit `amount` for `user` (funds + approves first).
+    /// @dev Deposit `amount` for `user` (funds + approves first) through the fee-bearing entrypoint.
     function _deposit(address user, uint256 amount) internal returns (uint256 shares) {
         _fund(user, amount);
+        // Cache the fee before pranking: an external call in the `{value:}` arg would otherwise
+        // consume the prank, so the actual deposit would run as the test contract (no allowance).
+        uint256 fee = _vault.DEPOSIT_FEE();
         vm.prank(user);
-        shares = _vault.deposit(amount, user);
+        shares = _vault.depositWithFee{ value: fee }(amount, user);
     }
 
     /// @dev Seed the FundManager reserve so the stream can start without waiting for harvest.
