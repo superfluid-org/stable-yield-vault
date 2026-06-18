@@ -29,38 +29,16 @@ interface IStableYieldSyncVault is IERC4626 {
     error EXTERNAL_ASSET_MISMATCH();
 
     /**
-     * @notice Thrown when the deposit fee is not equal to the expected value.
+     * @notice Thrown on a deposit whose `assets` do not exceed the flat {DEPOSIT_FEE}, so no positive
+     *         net principal would remain after the fee.
      */
-    error INVALID_DEPOSIT_FEE();
-
-    /**
-     * @notice Thrown when the transfer of the deposit fee to the treasury fails.
-     */
-    error FEE_TRANSFER_FAILED();
-
-    error INVALID_CALL();
+    error DEPOSIT_BELOW_FEE();
 
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //    / __/ | |/_/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
     //   / /____>  </ /_/  __/ /  / / / / /_/ / /  / __/ / /_/ / / / / /__/ /_/ / /_/ / / / (__  )
     //  /_____/_/|_|\__/\___/_/  /_/ /_/\__,_/_/  /_/    \__,_/_/ /_/\___/\__/_/\____/_/ /_/____/
-
-    /**
-     * @dev Deposit `assets` underlying tokens and send the corresponding number of vault `shares` to `receiver`.
-     * @param assets The amount of underlying tokens to deposit.
-     * @param receiver The address to receive the vault shares.
-     * @return shares The number of vault shares minted to `receiver`.
-     */
-    function depositWithFee(uint256 assets, address receiver) external payable returns (uint256 shares);
-
-    /**
-     * @dev Mint `shares` vault shares and pull the corresponding amount of underlying tokens from the caller.
-     * @param shares The number of vault shares to mint.
-     * @param receiver The address to receive the vault shares.
-     * @return assets The amount of underlying tokens pulled from the caller.
-     */
-    function mintWithFee(uint256 shares, address receiver) external payable returns (uint256 assets);
 
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
@@ -82,8 +60,10 @@ interface IStableYieldSyncVault is IERC4626 {
     function TREASURY() external view returns (address);
 
     /**
-     * @notice The participation fee, taken at deposit (in ETH).
-     * @dev flat fee of 0.0001 ETH per deposit
+     * @notice The flat participation fee, taken in the underlying asset on every deposit/mint and
+     *         sent to {TREASURY}.
+     * @dev Flat 0.2 USDC (6-dec underlying). On `deposit` it is subtracted from the input (the net is
+     *      deposited); on `mint` it is added on top of the assets required for the requested shares.
      */
     function DEPOSIT_FEE() external view returns (uint256);
 

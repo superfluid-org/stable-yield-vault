@@ -58,8 +58,8 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         _approveActorsTo(address(_vault));
 
-        // Fund actors with ETH so they can pay the fixed participation fee on every
-        // `depositWithFee`/`mintWithFee` across a long fuzzing run.
+        // The flat participation fee is now paid in the underlying asset (no ETH needed); actor USDC
+        // funding covers it. Give actors ETH anyway as a harmless harness convenience.
         for (uint256 i = 0; i < _actors.length; i++) {
             HEVM.deal(_actors[i], type(uint128).max);
         }
@@ -91,14 +91,14 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         ISuperfluidPool pool = _fundManager.YIELD_POOL();
         uint128 unitsBefore = pool.getUnits(actor);
-        // Cache the fee before pranking: an external call in the `{value:}` arg would consume the prank.
         uint256 fee = _vault.DEPOSIT_FEE();
         HEVM.prank(actor);
 
-        try _vault.depositWithFee{ value: fee }(amt, actor) returns (uint256 shares) {
+        try _vault.deposit(amt, actor) returns (uint256 shares) {
             _ghostSupply += shares;
-            // C.1: a non-dust deposit grants the receiver yield units at deposit time.
-            if (amt >= _fundManager.RAW_PER_UNIT()) {
+            // C.1: a non-dust deposit grants the receiver yield units at deposit time, on the net
+            // principal (gross minus the flat fee).
+            if (amt > fee && amt - fee >= _fundManager.RAW_PER_UNIT()) {
                 assert(pool.getUnits(actor) > unitsBefore);
             }
         } catch { }
@@ -113,11 +113,10 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
         uint256 s = _bound(shares, _min(maxShares, actorCap));
         if (s == 0) return;
 
-        uint256 fee = _vault.DEPOSIT_FEE();
         HEVM.prank(actor);
         // Deposit-equivalent: no hard no-brick assertion (same unconditional-recalibrate reason as
         // `deposit`).
-        try _vault.mintWithFee{ value: fee }(s, actor) returns (uint256) {
+        try _vault.mint(s, actor) returns (uint256) {
             _ghostSupply += s;
         } catch { }
 
@@ -184,9 +183,8 @@ contract EchidnaStableYieldSyncVault is EchidnaVaultHarnessBase {
 
         uint256 balBefore = _usdc.balanceOf(actor);
 
-        uint256 fee = _vault.DEPOSIT_FEE();
         HEVM.prank(actor);
-        try _vault.depositWithFee{ value: fee }(amt, actor) returns (uint256 shares) {
+        try _vault.deposit(amt, actor) returns (uint256 shares) {
             _ghostSupply += shares;
             // Redeem the just-minted shares right back (only if in-bounds — a successful deposit
             // leaves the vault unpaused, so `maxRedeem >= shares` save for extreme rounding).

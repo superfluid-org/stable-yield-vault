@@ -386,21 +386,22 @@ contract BaseSyncVaultForkTest is Test {
         amount = base * 9 / 10 + jitter; // 90% .. 110% of base
     }
 
-    /// @dev Deposit with full state-change assertions (shares, units, flow, custody).
+    /// @dev Deposit `assets` of net principal with full state-change assertions (shares, units, flow,
+    ///      custody). The flat fee is funded on top and paid in underlying, so `assets` is the net
+    ///      principal that lands in the vault.
     function _deposit(address user, uint256 assets) internal returns (uint256 shares) {
-        uint256 fee = _vault.DEPOSIT_FEE();
-        deal(address(USDC), user, USDC.balanceOf(user) + assets);
-        vm.deal(user, user.balance + fee);
+        uint256 gross = assets + _vault.DEPOSIT_FEE();
+        deal(address(USDC), user, USDC.balanceOf(user) + gross);
 
         vm.prank(user);
-        USDC.approve(address(_vault), assets);
+        USDC.approve(address(_vault), gross);
 
         uint128 unitsBefore = _yieldPool.getUnits(user);
         uint256 supplyBefore = _vault.totalSupply();
-        uint256 expectedShares = _vault.previewDeposit(assets);
+        uint256 expectedShares = _vault.previewDeposit(gross);
 
         vm.prank(user);
-        shares = _vault.depositWithFee{ value: fee }(assets, user);
+        shares = _vault.deposit(gross, user);
 
         assertEq(shares, expectedShares, "deposit != previewDeposit");
         assertEq(_vault.totalSupply(), supplyBefore + shares, "supply did not grow by minted shares");

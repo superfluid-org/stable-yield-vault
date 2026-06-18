@@ -131,111 +131,68 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
 
     function test_mint_pullsAssets(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
-        // Offset 12: the first mint of `amount * 10**offset` shares pulls exactly `amount` assets.
+        // Offset 12: the first mint of `amount * 10**offset` shares needs exactly `amount` of net
+        // principal; the flat fee is pulled on top.
         uint256 shares = amount * 1e12;
-        _fund(ALICE, amount);
-
         uint256 fee = _vault.DEPOSIT_FEE();
-        vm.prank(ALICE);
-        uint256 assets = _vault.mintWithFee{ value: fee }(shares, ALICE);
+        _fund(ALICE, amount + fee);
 
-        assertEq(assets, amount, "first mint pulls assets == shares / 10**offset");
+        vm.prank(ALICE);
+        uint256 assets = _vault.mint(shares, ALICE);
+
+        assertEq(assets, amount + fee, "first mint pulls net principal + flat fee");
         assertEq(_vault.balanceOf(ALICE), shares, "shares minted");
     }
 
-    /// @dev The plain ERC-4626 `deposit`/`mint` are disabled: state mutability forbids re-adding
-    ///      `payable` on an override, so the fee-bearing flow lives on `depositWithFee`/`mintWithFee`
-    ///      and the canonical entrypoints hard-revert with `INVALID_CALL` (before any max/balance
-    ///      check) to force callers through the fee path.
-    function test_deposit_disabled_reverts() public {
-        _fund(ALICE, DEFAULT_DEPOSIT);
+    /// @dev A deposit whose gross `assets` do not exceed the flat fee leaves no positive net
+    ///      principal, so it reverts `DEPOSIT_BELOW_FEE` (checked in `_deposit`, after the OZ
+    ///      `maxDeposit` gate, which is open here).
+    function test_deposit_belowFee_reverts(uint256 assets) public {
+        uint256 fee = _vault.DEPOSIT_FEE();
+        assets = bound(assets, 0, fee);
+        _fund(ALICE, fee);
+
         vm.prank(ALICE);
-        vm.expectRevert(IStableYieldSyncVault.INVALID_CALL.selector);
-        _vault.deposit(DEFAULT_DEPOSIT, ALICE);
+        vm.expectRevert(IStableYieldSyncVault.DEPOSIT_BELOW_FEE.selector);
+        _vault.deposit(assets, ALICE);
     }
 
-    function test_mint_disabled_reverts() public {
-        _fund(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(ALICE);
-        vm.expectRevert(IStableYieldSyncVault.INVALID_CALL.selector);
-        _vault.mint(DEFAULT_DEPOSIT * 1e12, ALICE);
+    /// @dev `previewDeposit` returns 0 for a gross amount at or below the fee (no shares would mint).
+    function test_previewDeposit_belowFee_isZero(uint256 assets) public view {
+        assets = bound(assets, 0, _vault.DEPOSIT_FEE());
+        assertEq(_vault.previewDeposit(assets), 0, "no shares for a sub-fee deposit");
     }
 
-    /// @dev The disabled overrides revert even on an empty vault with open gates — the revert is
-    ///      unconditional, not a consequence of a `max*` check.
-    function test_deposit_disabled_revertsEvenWhenDepositable() public {
-        assertEq(_vault.maxDeposit(ALICE), type(uint256).max, "sanity: deposits otherwise open");
-        _fund(ALICE, DEFAULT_DEPOSIT);
-        vm.prank(ALICE);
-        vm.expectRevert(IStableYieldSyncVault.INVALID_CALL.selector);
-        _vault.deposit(DEFAULT_DEPOSIT, ALICE);
-    }
-
-    /// @dev `depositWithFee` collects exactly `DEPOSIT_FEE` in ETH and forwards it to the treasury,
-    ///      then performs the underlying deposit.
-    function test_depositWithFee_forwardsFeeToTreasury(uint256 amount) public {
+    /// @dev `deposit` subtracts the flat fee from the input, forwards it to the treasury in the
+    ///      underlying asset, and mints shares on the net principal.
+    function test_deposit_forwardsFeeToTreasury(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
         uint256 fee = _vault.DEPOSIT_FEE();
-        _fund(ALICE, amount);
+        uint256 gross = amount + fee;
+        _fund(ALICE, gross);
 
-        uint256 treasuryBefore = TREASURY.balance;
+        uint256 treasuryBefore = _usdc.balanceOf(TREASURY);
         vm.prank(ALICE);
-        uint256 shares = _vault.depositWithFee{ value: fee }(amount, ALICE);
+        uint256 shares = _vault.deposit(gross, ALICE);
 
-        assertEq(shares, amount * 1e12, "deposit went through");
-        assertEq(TREASURY.balance - treasuryBefore, fee, "fee forwarded to treasury");
+        assertEq(shares, amount * 1e12, "shares minted on the net principal");
+        assertEq(_usdc.balanceOf(TREASURY) - treasuryBefore, fee, "flat fee forwarded to treasury in underlying");
     }
 
-    /// @dev `mintWithFee` likewise forwards the fee to the treasury.
-    function test_mintWithFee_forwardsFeeToTreasury(uint256 amount) public {
+    /// @dev `mint` adds the flat fee on top of the assets needed for the requested shares, forwarding
+    ///      it to the treasury in the underlying asset.
+    function test_mint_forwardsFeeToTreasury(uint256 amount) public {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
         uint256 fee = _vault.DEPOSIT_FEE();
-        _fund(ALICE, amount);
+        uint256 shares = amount * 1e12;
+        _fund(ALICE, amount + fee);
 
-        uint256 treasuryBefore = TREASURY.balance;
+        uint256 treasuryBefore = _usdc.balanceOf(TREASURY);
         vm.prank(ALICE);
-        uint256 assets = _vault.mintWithFee{ value: fee }(amount * 1e12, ALICE);
+        uint256 assets = _vault.mint(shares, ALICE);
 
-        assertEq(assets, amount, "mint pulled the assets");
-        assertEq(TREASURY.balance - treasuryBefore, fee, "fee forwarded to treasury");
-    }
-
-    /// @dev Wrong `msg.value` (too little or too much) reverts `INVALID_DEPOSIT_FEE` on both
-    ///      fee-bearing entrypoints — the fee is an exact-match toll, not a minimum.
-    function test_depositWithFee_revertsOnWrongFee(uint256 wrongFee) public {
-        uint256 fee = _vault.DEPOSIT_FEE();
-        wrongFee = bound(wrongFee, 0, 1 ether);
-        vm.assume(wrongFee != fee);
-        _fund(ALICE, DEFAULT_DEPOSIT);
-
-        vm.prank(ALICE);
-        vm.expectRevert(IStableYieldSyncVault.INVALID_DEPOSIT_FEE.selector);
-        _vault.depositWithFee{ value: wrongFee }(DEFAULT_DEPOSIT, ALICE);
-    }
-
-    function test_mintWithFee_revertsOnWrongFee(uint256 wrongFee) public {
-        uint256 fee = _vault.DEPOSIT_FEE();
-        wrongFee = bound(wrongFee, 0, 1 ether);
-        vm.assume(wrongFee != fee);
-        _fund(ALICE, DEFAULT_DEPOSIT);
-
-        vm.prank(ALICE);
-        vm.expectRevert(IStableYieldSyncVault.INVALID_DEPOSIT_FEE.selector);
-        _vault.mintWithFee{ value: wrongFee }(DEFAULT_DEPOSIT * 1e12, ALICE);
-    }
-
-    /// @dev If the treasury rejects the ETH transfer, the fee collection reverts `FEE_TRANSFER_FAILED`
-    ///      (and the whole deposit rolls back). Simulated by etching a stub that reverts on receive
-    ///      at the treasury address.
-    function test_depositWithFee_revertsWhenTreasuryRejects() public {
-        // Runtime bytecode `PUSH1 0 PUSH1 0 REVERT` — reverts on any (value) call.
-        _fund(ALICE, DEFAULT_DEPOSIT);
-        uint256 fee = _vault.DEPOSIT_FEE();
-        vm.etch(TREASURY, hex"60006000fd");
-
-        vm.prank(ALICE);
-        vm.expectRevert(IStableYieldSyncVault.FEE_TRANSFER_FAILED.selector);
-        _vault.depositWithFee{ value: fee }(DEFAULT_DEPOSIT, ALICE);
+        assertEq(assets, amount + fee, "mint pulled net principal + fee");
+        assertEq(_usdc.balanceOf(TREASURY) - treasuryBefore, fee, "flat fee forwarded to treasury in underlying");
     }
 
     function test_withdraw_returnsUnderlying_proportional(uint256 amount, uint256 wPortion) public {
@@ -277,12 +234,12 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         amount = bound(amount, 1e6, ONE_BILLION * 1e6);
 
         // Unlike the async sibling, preview* do not revert.
-        uint256 pd = _vault.previewDeposit(amount);
-        _fund(ALICE, amount);
-        uint256 fee = _vault.DEPOSIT_FEE();
+        uint256 gross = amount + _vault.DEPOSIT_FEE();
+        uint256 pd = _vault.previewDeposit(gross);
+        _fund(ALICE, gross);
         vm.prank(ALICE);
-        uint256 shares = _vault.depositWithFee{ value: fee }(amount, ALICE);
-        assertEq(pd, shares, "previewDeposit == actual");
+        uint256 shares = _vault.deposit(gross, ALICE);
+        assertEq(pd, shares, "previewDeposit == actual (net of the flat fee)");
 
         // Redeem within `maxRedeem` (the GDA-buffer slice keeps maxRedeem a hair below balance).
         uint256 maxShares = _vault.maxRedeem(ALICE);
@@ -545,15 +502,13 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         assertEq(_vault.maxWithdraw(ALICE), 0, "maxWithdraw paused");
         assertEq(_vault.maxRedeem(ALICE), 0, "maxRedeem paused");
 
-        // Every entrypoint reverts with the corresponding OZ max-exceeded error (max == 0). The
-        // fee-bearing entrypoints collect the fee first, then revert at the OZ max check (rolling
-        // the fee transfer back), so the surfaced error is still `ERC4626ExceededMax*`.
-        uint256 fee = _vault.DEPOSIT_FEE();
+        // Every entrypoint reverts with the corresponding OZ max-exceeded error (max == 0). The OZ
+        // `max*` gate runs before `_deposit`, so the flat fee is never taken.
         vm.startPrank(BOB);
         vm.expectRevert(abi.encodeWithSelector(ERC4626.ERC4626ExceededMaxDeposit.selector, BOB, 1e6, 0));
-        _vault.depositWithFee{ value: fee }(1e6, BOB);
+        _vault.deposit(1e6, BOB);
         vm.expectRevert(abi.encodeWithSelector(ERC4626.ERC4626ExceededMaxMint.selector, BOB, 1e6, 0));
-        _vault.mintWithFee{ value: fee }(1e6, BOB);
+        _vault.mint(1e6, BOB);
         vm.stopPrank();
 
         vm.startPrank(ALICE);
