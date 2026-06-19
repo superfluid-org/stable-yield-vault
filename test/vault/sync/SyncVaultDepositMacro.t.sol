@@ -94,6 +94,27 @@ contract SyncVaultDepositMacroTest is SyncVaultTestBase {
         _macro.describeDepositAndConnect(bytes32("xx"), 100e6);
     }
 
+    function test_description_formatsDecimals() public view {
+        // 6-dec USDC: whole amount renders without a fractional part.
+        assertEq(
+            _macro.describeDepositAndConnect(LANG_EN, 100e6),
+            "Deposit 100 USDC (incl. fee) and connect to the yield pool",
+            "whole amount"
+        );
+        // Fractional amount renders with left-padded fraction, trailing zeros preserved.
+        assertEq(
+            _macro.describeDepositAndConnect(LANG_EN, 100_500_000),
+            "Deposit 100.500000 USDC (incl. fee) and connect to the yield pool",
+            "fractional amount"
+        );
+        // Sub-unit amount renders a zero integer part with left-padded fraction.
+        assertEq(
+            _macro.describeDepositAndConnect(LANG_EN, 1),
+            "Deposit 0.000001 USDC (incl. fee) and connect to the yield pool",
+            "single atom"
+        );
+    }
+
     function test_structHash_isDeterministic() public view {
         bytes memory params = _macro.encodeDepositAndConnect(LANG_EN, 100e6, 42, 1, bytes32(0), bytes32(0));
         assertEq(_macro.getActionStructHash(params), _macro.getActionStructHash(params), "deterministic struct hash");

@@ -38,6 +38,9 @@ contract SyncVaultDepositMacro is ClearMacroBase {
     /// @notice The vault's GDA yield pool (the connect target).
     ISuperfluidPool public immutable POOL;
 
+    /// @notice Decimals of the vault's underlying asset, cached for formatting the description amount.
+    uint8 public immutable ASSET_DECIMALS;
+
     bytes32 private constant _GDA_ID = keccak256("org.superfluid-finance.agreements.GeneralDistributionAgreement.v1");
     bytes32 private constant _LANG_EN = bytes32("en");
 
@@ -57,6 +60,7 @@ contract SyncVaultDepositMacro is ClearMacroBase {
     constructor(IStableYieldSyncVault vault) {
         VAULT = vault;
         POOL = vault.FUND_MANAGER().YIELD_POOL();
+        ASSET_DECIMALS = IERC20Metadata(vault.asset()).decimals();
     }
 
     function _registerActions() internal override {
@@ -90,14 +94,33 @@ contract SyncVaultDepositMacro is ClearMacroBase {
 
     function _description(bytes32 lang, uint256 assets) internal view returns (string memory) {
         if (lang != _LANG_EN) revert UnsupportedLanguage();
-        // NOTE: `assets` is the raw (6-dec) amount; a production UI/macro should format the decimals.
         return string.concat(
             "Deposit ",
-            Strings.toString(assets),
+            _formatUnits(assets, ASSET_DECIMALS),
             " ",
             IERC20Metadata(VAULT.asset()).symbol(),
             " (incl. fee) and connect to the yield pool"
         );
+    }
+
+    /// @notice Render a raw token amount as a fixed-point decimal string (e.g. `100500000` @ 6 dec → `"100.5"`).
+    /// @dev Vendored from Superfluid's `FormatterLibs` (a test-only helper) so production code carries no
+    ///      dependency on a `test/` path. Trailing zeros in the fractional part are preserved; an all-zero
+    ///      fraction is dropped entirely (renders the integer part alone).
+    /// @param amount Raw amount in the token's smallest unit.
+    /// @param decimals The token's decimals (the divisor exponent).
+    function _formatUnits(uint256 amount, uint8 decimals) internal pure returns (string memory) {
+        uint256 intPart = amount / 10 ** decimals;
+        uint256 fracPart = amount % 10 ** decimals;
+        string memory intString = Strings.toString(intPart);
+        if (fracPart == 0) {
+            return intString;
+        }
+        string memory fracString = Strings.toString(fracPart);
+        while (bytes(fracString).length < decimals) {
+            fracString = string.concat("0", fracString);
+        }
+        return string.concat(intString, ".", fracString);
     }
 
     function _structHash(bytes memory actionSpecificParams, bytes32 lang) internal view returns (bytes32) {
