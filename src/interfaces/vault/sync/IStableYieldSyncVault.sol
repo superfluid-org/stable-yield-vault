@@ -16,6 +16,25 @@ import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
  */
 interface IStableYieldSyncVault is IERC4626 {
 
+    //      ______                 __
+    //     / ____/   _____  ____  / /______
+    //    / __/ | | / / _ \/ __ \/ __/ ___/
+    //   / /___ | |/ /  __/ / / / /_(__  )
+    //  /_____/ |___/\___/_/ /_/\__/____/
+
+    /**
+     * @notice Emitted when the admin toggles the (reversible) pause that blocks both the deposit and
+     *         withdraw legs.
+     * @param paused The new pause state.
+     */
+    event PauseStatusChanged(bool paused);
+
+    /**
+     * @notice Emitted when the admin terminates the vault, permanently closing the deposit leg while
+     *         leaving withdrawals open. One-way; never reversed.
+     */
+    event Terminated();
+
     //      ______
     //     / ____/_____________  __________
     //    / __/ / ___/ ___/ __ \/ ___/ ___/
@@ -33,6 +52,23 @@ interface IStableYieldSyncVault is IERC4626 {
      *         net principal would remain after the fee.
      */
     error DEPOSIT_BELOW_FEE();
+
+    /**
+     * @notice Thrown on any deposit/mint/withdraw/redeem while the vault is paused by the admin.
+     */
+    error VAULT_PAUSED();
+
+    /**
+     * @notice Thrown on a deposit/mint while the vault is terminated (deposit leg permanently
+     *         closed). Withdrawals remain open.
+     */
+    error VAULT_TERMINATED();
+
+    /**
+     * @notice Thrown when a non-admin calls an admin-gated function ({setPaused}/{terminate}).
+     * @dev Authority is the FundManager's DEFAULT_ADMIN_ROLE.
+     */
+    error NOT_ADMIN();
 
     //      ______     __                        __   ______                 __  _
     //     / ____/  __/ /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
@@ -58,6 +94,21 @@ interface IStableYieldSyncVault is IERC4626 {
     function depositWithPermit(uint256 assets, address receiver, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         external
         returns (uint256 shares);
+
+    /**
+     * @notice Toggle the reversible pause. While paused, both the deposit and withdraw legs are
+     *         blocked; the yield stream keeps paying existing holders out of the reserve.
+     * @dev Authorized by the FundManager's DEFAULT_ADMIN_ROLE (reverts {NOT_ADMIN} otherwise).
+     * @param isPaused The new pause state.
+     */
+    function setPaused(bool isPaused) external;
+
+    /**
+     * @notice Permanently terminate the vault: the deposit leg is closed forever while withdrawals
+     *         stay open so holders can exit. One-way; cannot be undone.
+     * @dev Authorized by the FundManager's DEFAULT_ADMIN_ROLE (reverts {NOT_ADMIN} otherwise).
+     */
+    function terminate() external;
 
     //   _    ___                 ______                 __  _
     //  | |  / (_)__ _      __   / ____/_  ______  _____/ /_(_)___  ____  _____
@@ -85,5 +136,15 @@ interface IStableYieldSyncVault is IERC4626 {
      *      deposited); on `mint` it is added on top of the assets required for the requested shares.
      */
     function DEPOSIT_FEE() external view returns (uint256);
+
+    /**
+     * @notice Whether the vault is currently paused (both legs blocked). Reversible by the admin.
+     */
+    function paused() external view returns (bool);
+
+    /**
+     * @notice Whether the vault has been terminated (deposit leg permanently closed). One-way.
+     */
+    function terminated() external view returns (bool);
 
 }

@@ -5,6 +5,7 @@ import { IStableYieldSyncVault } from "src/interfaces/vault/sync/IStableYieldSyn
 import { ISyncFundManager } from "src/interfaces/vault/sync/ISyncFundManager.sol";
 import { SyncFundManager } from "src/vault/sync/SyncFundManager.sol";
 
+import { IAccessControl } from "@openzeppelin/contracts/access/IAccessControl.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import { ERC2771Context } from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
@@ -49,6 +50,18 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
 
     /// @inheritdoc IStableYieldSyncVault
     uint256 public constant DEPOSIT_FEE = 0.2e6;
+
+    //     _____ __        __
+    //    / ___// /_____ _/ /____  _____
+    //    \__ \/ __/ __ `/ __/ _ \/ ___/
+    //   ___/ / /_/ /_/ / /_/  __(__  )
+    //  /____/\__/\__,_/\__/\___/____/
+
+    /// @inheritdoc IStableYieldSyncVault
+    bool public paused;
+
+    /// @inheritdoc IStableYieldSyncVault
+    bool public terminated;
 
     //     ______                 __                  __
     //    / ____/___  ____  _____/ /________  _______/ /_____  _____
@@ -116,6 +129,7 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     function deposit(uint256 assets, address receiver)
         public
         override(ERC4626, IERC4626)
+        whenDepositable
         nonReentrant
         returns (uint256)
     {
@@ -128,13 +142,20 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
      *      for `shares` (see {previewMint}): the caller pays `assets + DEPOSIT_FEE`, the fee is sent
      *      to {TREASURY}, and exactly `shares` are minted.
      */
-    function mint(uint256 shares, address receiver) public override(ERC4626, IERC4626) nonReentrant returns (uint256) {
+    function mint(uint256 shares, address receiver)
+        public
+        override(ERC4626, IERC4626)
+        whenDepositable
+        nonReentrant
+        returns (uint256)
+    {
         return super.mint(shares, receiver);
     }
 
     /// @inheritdoc IStableYieldSyncVault
     function depositWithPermit(uint256 assets, address receiver, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         public
+        whenDepositable
         nonReentrant
         returns (uint256)
     {
@@ -150,6 +171,7 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     function withdraw(uint256 assets, address receiver, address owner)
         public
         override(ERC4626, IERC4626)
+        whenNotPaused
         nonReentrant
         returns (uint256)
     {
@@ -160,10 +182,35 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     function redeem(uint256 shares, address receiver, address owner)
         public
         override(ERC4626, IERC4626)
+        whenNotPaused
         nonReentrant
         returns (uint256)
     {
         return super.redeem(shares, receiver, owner);
+    }
+
+    //      ___       __          _
+    //     /   | ____/ /___ ___  (_)___
+    //    / /| |/ __  / __ `__ \/ / __ \
+    //   / ___ / /_/ / / / / / / / / / /
+    //  /_/  |_\__,_/_/ /_/ /_/_/_/ /_/
+
+    /// @inheritdoc IStableYieldSyncVault
+    function setPaused(bool isPaused) external onlyAdmin {
+        // Idempotent: only transition (and emit) on a real change, mirroring OZ Pausable's
+        // guarded `_pause`/`_unpause` so redundant calls don't spam `PauseStatusChanged`.
+        if (paused == isPaused) return;
+        paused = isPaused;
+        emit PauseStatusChanged(isPaused);
+    }
+
+    /// @inheritdoc IStableYieldSyncVault
+    function terminate() external onlyAdmin {
+        // One-way latch: the deposit leg is permanently closed; withdrawals stay open so holders
+        // can exit. No un-terminate exists; a redundant call is a no-op (no second `Terminated`).
+        if (terminated) return;
+        terminated = true;
+        emit Terminated();
     }
 
     //    _    ___                 ______                 __  _
@@ -207,7 +254,7 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
      *      into a vault they cannot withdraw from.
      */
     function maxDeposit(address) public view override(ERC4626, IERC4626) returns (uint256) {
-        if (_isExternallyPaused()) return 0;
+        if (_depositsDisabled()) return 0;
         return FUND_MANAGER.canDepositExternal() ? type(uint256).max : 0;
     }
 
@@ -216,7 +263,7 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
      * @dev Same gate-based binary limit as {maxDeposit} (unlimited needs no share conversion).
      */
     function maxMint(address) public view override(ERC4626, IERC4626) returns (uint256) {
-        if (_isExternallyPaused()) return 0;
+        if (_depositsDisabled()) return 0;
         return FUND_MANAGER.canDepositExternal() ? type(uint256).max : 0;
     }
 
@@ -231,7 +278,7 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
      *      unstick path).
      */
     function maxWithdraw(address owner) public view override(ERC4626, IERC4626) returns (uint256) {
-        if (_isExternallyPaused()) return 0;
+        if (_withdrawalsDisabled()) return 0;
         uint256 byShares = _convertToAssets(balanceOf(owner), Math.Rounding.Floor);
         uint256 serviceable = FUND_MANAGER.totalManagedAssets();
         return byShares < serviceable ? byShares : serviceable;
@@ -244,7 +291,7 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
      *      {maxWithdraw}.
      */
     function maxRedeem(address owner) public view override(ERC4626, IERC4626) returns (uint256) {
-        if (_isExternallyPaused()) return 0;
+        if (_withdrawalsDisabled()) return 0;
         uint256 ownerShares = balanceOf(owner);
         uint256 redeemableByLiquidity = _convertToShares(FUND_MANAGER.totalManagedAssets(), Math.Rounding.Floor);
         return ownerShares < redeemableByLiquidity ? ownerShares : redeemableByLiquidity;
@@ -318,6 +365,25 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
         return FUND_MANAGER.externalPositionValue() == 0 || !FUND_MANAGER.canWithdrawExternal();
     }
 
+    /**
+     * @dev The deposit leg is closed when the admin has paused or terminated the vault, or when the
+     *      external position is unwithdrawable (see {_isExternallyPaused}). Drives `maxDeposit` /
+     *      `maxMint` to 0; the entry functions additionally revert with the precise
+     *      {VAULT_PAUSED} / {VAULT_TERMINATED} error via {whenDepositable}.
+     */
+    function _depositsDisabled() internal view returns (bool) {
+        return paused || terminated || _isExternallyPaused();
+    }
+
+    /**
+     * @dev The withdraw leg is closed only by the admin pause or the external pause — a terminated
+     *      vault keeps withdrawals open so holders can exit. Drives `maxWithdraw` / `maxRedeem` to 0;
+     *      the entry functions additionally revert with {VAULT_PAUSED} via {whenNotPaused}.
+     */
+    function _withdrawalsDisabled() internal view returns (bool) {
+        return paused || _isExternallyPaused();
+    }
+
     //      ____      __                        __   ______                 __  _
     //     /  _/___  / /____  _________  ____ _/ /  / ____/_  ______  _____/ /_(_)___  ____  _____
     //     / // __ \/ __/ _ \/ ___/ __ \/ __ `/ /  / /_  / / / / __ \/ ___/ __/ / __ \/ __ \/ ___/
@@ -381,12 +447,6 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
         super._update(from, to, value);
     }
 
-    //    ______            __            __     _______________ ____ ___
-    //   / ____/___  ____  / /____  _  __/ /_   / __  /__  /__  // / // /
-    //  / /   / __ \/ __ \/ __/ _ \| |/_/ __/  / /_/ /  / /  / // /_// /
-    // / /___/ /_/ / / / / /_/  __/>  </ /_    \__,_/  /_/  /_//_/(_)_/
-    // \____/\____/_/ /_/\__/\___/_/|_|\__/
-
     /**
      * @dev EIP-2771: when called through the trusted Superfluid `ERC2771Forwarder` (a macro's
      *      type-302 op), the real caller is recovered from the appended calldata; otherwise this is a
@@ -403,6 +463,39 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
 
     function _contextSuffixLength() internal view override(Context, ERC2771Context) returns (uint256) {
         return ERC2771Context._contextSuffixLength();
+    }
+
+    //      __  ___          ___ _____
+    //     /  |/  /___  ____/ (_) __(_)__  __________
+    //    / /|_/ / __ \/ __  / / /_/ / _ \/ ___/ ___/
+    //   / /  / / /_/ / /_/ / / __/ /  __/ /  (__  )
+    //  /_/  /_/\____/\__,_/_/_/ /_/\___/_/  /____/
+
+    /**
+     * @notice Modifier to restrict function calls to the FundManager's default admin.
+     * @dev Authorizes against the FundManager's DEFAULT_ADMIN_ROLE (`0x00`).
+     *      The vault keeps no role registry of its own; it only reads the FM's
+     */
+    modifier onlyAdmin() {
+        if (!IAccessControl(address(FUND_MANAGER)).hasRole(0x00, _msgSender())) revert NOT_ADMIN();
+        _;
+    }
+
+    /**
+     * @dev Blocks the entry while the admin has paused the vault (both legs).
+     */
+    modifier whenNotPaused() {
+        if (paused) revert VAULT_PAUSED();
+        _;
+    }
+
+    /**
+     * @dev Blocks the deposit leg while the vault is paused or terminated.
+     */
+    modifier whenDepositable() {
+        if (paused) revert VAULT_PAUSED();
+        if (terminated) revert VAULT_TERMINATED();
+        _;
     }
 
 }
