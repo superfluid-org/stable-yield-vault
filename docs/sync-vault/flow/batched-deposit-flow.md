@@ -10,7 +10,7 @@ See [`../design.md`](../design.md) for the model and the implementation plan at
 
 | Contract | Role |
 |---|---|
-| **SyncVaultDepositMacro** | `ClearMacroBase` macro pinned to one vault. Builds the 2-op batch; carries the EIP-712 clear-signing metadata. Custodies nothing |
+| **SyncVaultMacro** | `ClearMacroBase` macro pinned to one vault, exposing two actions (deposit-and-connect, redeem). Builds the ops; carries the EIP-712 clear-signing metadata. Custodies nothing |
 | **ClearMacroForwarder** | Superfluid forwarder. Verifies the signer's EIP-712 payload, then calls `host.forwardBatchCall(ops)` as that signer |
 | **Superfluid Host** | Runs the batch. For the deposit op it routes through its `ERC2771Forwarder`, appending the signer to the vault's calldata |
 | **StableYieldSyncVault** | EIP-2771 recipient. Recovers the real depositor from the appended calldata, runs `depositWithPermit` (inline permit + fee-bearing deposit) |
@@ -25,7 +25,7 @@ and — because the deposit leg reaches the vault as a type-302 call — the vau
 
 ## The 2-op batch
 
-`SyncVaultDepositMacro` builds exactly two operations (`account` = the verified signer):
+`SyncVaultMacro` builds exactly two operations (`account` = the verified signer):
 
 | # | Op type | Target | Call |
 |---|---|---|---|
@@ -50,7 +50,7 @@ and — because the deposit leg reaches the vault as a type-302 call — the vau
 sequenceDiagram
     participant U as User (signer)
     participant F as ClearMacroForwarder
-    participant M as SyncVaultDepositMacro
+    participant M as SyncVaultMacro
     participant H as Superfluid Host
     participant V as StableYieldSyncVault
     participant T as Treasury
@@ -68,6 +68,25 @@ sequenceDiagram
     H->>P: connectPool(POOL)   (as signer)
     M->>P: postCheck: getUnits(signer) > 0
 ```
+
+## The redeem action (single op)
+
+The same macro exposes a `Redeem` action — a meta-tx (gasless relay), not a batch. It builds exactly
+one operation (`account` = the verified signer):
+
+| # | Op type | Target | Call |
+|---|---|---|---|
+| 0 | `ERC2771_FORWARD_CALL` (302) | vault | `redeem(shares, account, account)` |
+
+- **No permit, no allowance.** The forwarder appends `account`, so `_msgSender()` at the vault is the
+  signer. In `_withdraw` `caller == owner == account`, so OZ's allowance branch is skipped and the
+  vault burns the signer's *own* shares, paying the OZ pro-rata proceeds back to the signer.
+- **No connect op.** The FM's `onWithdraw` decreases the holder's pool units (zeroing them on a full
+  exit); any residual pool connection is harmless, so nothing needs disconnecting.
+- **`deadline`** is bound into the clear-signed digest (bounding the signed intent's validity so a
+  stale redeem can't execute later at a different NAV) but is consumed by no op.
+- No `postCheck` (`_noOpPostCheck`): the redeem op reverts on failure, and there is no before-state
+  snapshot against which to assert a delta.
 
 ## Submission modes
 
@@ -96,5 +115,5 @@ The on-chain effect is identical in both; they differ only in who broadcasts and
 
 - `test/vault/sync/SyncVaultEIP2771.t.sol` — vault EIP-2771 sender recovery, spoof rejection,
   `depositWithPermit` (happy / front-run / below-fee).
-- `test/vault/sync/SyncVaultDepositMacro.t.sol` — op-shape, clear-signing views, and a full
-  `host.batchCall` integration (permit + deposit + connect end-to-end).
+- `test/vault/sync/SyncVaultMacro.t.sol` — op-shape, clear-signing views, and full `host.batchCall`
+  integrations for both actions (permit + deposit + connect end-to-end; and redeem end-to-end).

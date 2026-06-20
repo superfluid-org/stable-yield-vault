@@ -2,7 +2,7 @@
 pragma solidity ^0.8.34;
 
 import { SyncVaultTestBase } from "./SyncVaultTestBase.t.sol";
-import { SyncVaultDepositMacro } from "src/vault/sync/SyncVaultDepositMacro.sol";
+import { SyncVaultMacro } from "src/vault/sync/SyncVaultMacro.sol";
 
 import { IGeneralDistributionAgreementV1 } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/agreements/gdav1/IGeneralDistributionAgreementV1.sol";
@@ -13,15 +13,15 @@ import { IClearMacroForwarderV1 } from
     "@superfluid-finance/ethereum-contracts/contracts/interfaces/utils/IClearMacroForwarderV1.sol";
 
 /**
- * @title SyncVaultDepositMacroTest
- * @notice Unit + integration coverage for {SyncVaultDepositMacro}: the 2-op batch shape
- *         (`depositWithPermit` via ERC-2771 + `connectPool`), the clear-signing views, and a full
- *         run through the real Host op-loop (`batchCall`, the same path `forwardBatchCall` uses).
- *         See `docs/sync-vault/plan/eip2771-batched-deposit.md`.
+ * @title SyncVaultMacroTest
+ * @notice Unit + integration coverage for {SyncVaultMacro}: the deposit-and-connect 2-op batch shape
+ *         (`depositWithPermit` via ERC-2771 + `connectPool`), the single-op redeem, the clear-signing
+ *         views, and full runs through the real Host op-loop (`batchCall`, the same path
+ *         `forwardBatchCall` uses). See `docs/sync-vault/plan/eip2771-batched-deposit.md`.
  */
-contract SyncVaultDepositMacroTest is SyncVaultTestBase {
+contract SyncVaultMacroTest is SyncVaultTestBase {
 
-    SyncVaultDepositMacro internal _macro;
+    SyncVaultMacro internal _macro;
 
     bytes32 internal constant LANG_EN = bytes32("en");
     bytes32 internal constant PERMIT_TYPEHASH =
@@ -29,7 +29,7 @@ contract SyncVaultDepositMacroTest is SyncVaultTestBase {
 
     function setUp() public virtual override {
         super.setUp();
-        _macro = new SyncVaultDepositMacro(_vault);
+        _macro = new SyncVaultMacro(_vault);
     }
 
     //    __  __      _ __
@@ -122,7 +122,7 @@ contract SyncVaultDepositMacroTest is SyncVaultTestBase {
 
     function test_postCheck_revertsWithoutUnits() public {
         bytes memory params = _macro.encodeDepositAndConnect(LANG_EN, 100e6, 0, 0, bytes32(0), bytes32(0));
-        vm.expectRevert(SyncVaultDepositMacro.PoolUnitsNotGranted.selector);
+        vm.expectRevert(SyncVaultMacro.PoolUnitsNotGranted.selector);
         _macro.postCheck(_sf.host, params, makeAddr("nobody"));
     }
 
@@ -160,6 +160,85 @@ contract SyncVaultDepositMacroTest is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(TREASURY) - treasuryBefore, fee, "flat fee to treasury");
         assertGt(pool.getUnits(user), 0, "yield units granted to user");
         assertTrue(_gda().isMemberConnected(pool, user), "user connected to the yield pool");
+    }
+
+    //    ____           __                    __  _ __
+    //   / __ \___  ____/ /__  ___  ____ ___  / /_(_) /_
+    //  / /_/ / _ \/ __  / _ \/ _ \/ __ `__ \/ __/ / __ \
+    // / _, _/  __/ /_/ /  __/  __/ / / / / / /_/ / / / /
+    ///_/ |_|\___/\__,_/\___/\___/_/ /_/ /_/\__/_/_/ /_/
+
+    /// @dev The redeem action builds exactly one op: a 302 `redeem(shares, signer, signer)` to the
+    ///      vault (raw calldata, sender appended by the forwarder). No permit, no connect op.
+    function test_buildOps_redeem_shape() public view {
+        uint256 shares = 100e18;
+        uint256 deadline = 123;
+
+        bytes memory params = _macro.encodeRedeem(LANG_EN, shares, deadline);
+        ISuperfluid.Operation[] memory ops = _macro.buildBatchOperations(_sf.host, params, ALICE);
+
+        assertEq(ops.length, 1, "one op");
+        assertEq(uint256(ops[0].operationType), 302, "op0 = ERC2771_FORWARD_CALL");
+        assertEq(ops[0].target, address(_vault), "op0 -> vault");
+        assertEq(
+            ops[0].data,
+            abi.encodeCall(_vault.redeem, (shares, ALICE, ALICE)),
+            "op0 raw redeem calldata (receiver == owner == account)"
+        );
+    }
+
+    function test_views_redeem_primaryTypeAndDefinition() public view {
+        bytes memory encodedPayload = _wrapPayload(_macro.encodeRedeem(LANG_EN, 100e18, 0));
+        assertEq(_macro.getPrimaryTypeName(encodedPayload), "SyncVaultRedeem", "primary type name");
+        assertEq(
+            _macro.getActionTypeDefinition(encodedPayload),
+            "Action(string description,uint256 shares,uint256 deadline)",
+            "action type definition"
+        );
+    }
+
+    function test_describeRedeem_nonEmpty_and_langGated() public {
+        assertGt(bytes(_macro.describeRedeem(LANG_EN, 100e18)).length, 0, "non-empty description");
+        vm.expectRevert(); // UnsupportedLanguage
+        _macro.describeRedeem(bytes32("xx"), 100e18);
+    }
+
+    function test_describeRedeem_formatsDecimals() public view {
+        // 18-dec shares: whole amount renders without a fractional part.
+        assertEq(_macro.describeRedeem(LANG_EN, 100e18), "Redeem 100 SYSVS shares", "whole amount");
+        // Fractional amount renders with left-padded fraction, trailing zeros preserved.
+        assertEq(_macro.describeRedeem(LANG_EN, 1.5e18), "Redeem 1.500000000000000000 SYSVS shares", "fractional");
+    }
+
+    function test_structHash_redeem_isDeterministic() public view {
+        bytes memory params = _macro.encodeRedeem(LANG_EN, 100e18, 42);
+        assertEq(_macro.getActionStructHash(params), _macro.getActionStructHash(params), "deterministic struct hash");
+    }
+
+    /// @dev Full redeem through the real Host op-loop (`batchCall` as the user — same path
+    ///      `forwardBatchCall` uses): the forwarder appends the user, so the vault burns the user's own
+    ///      shares (no allowance) and pays the proceeds back to the user.
+    function test_integration_redeem(uint256 amount) public {
+        amount = bound(amount, 1e6, ONE_BILLION * 1e6);
+        address user = makeAddr("redeem-user");
+        uint256 shares = _deposit(user, amount);
+
+        // `maxRedeem` (≤ owned shares; capped by the recoverable NAV, a few dust atoms below the
+        // balance right after deposit) is the largest immediately-redeemable amount.
+        uint256 toRedeem = _vault.maxRedeem(user);
+
+        bytes memory params = _macro.encodeRedeem(LANG_EN, toRedeem, type(uint256).max);
+        ISuperfluid.Operation[] memory ops = _macro.buildBatchOperations(_sf.host, params, user);
+
+        uint256 usdcBefore = _usdc.balanceOf(user);
+        uint128 unitsBefore = _fundManager.YIELD_POOL().getUnits(user);
+
+        vm.prank(user);
+        _sf.host.batchCall(ops);
+
+        assertEq(_vault.balanceOf(user), shares - toRedeem, "exactly the redeemed shares burned");
+        assertGt(_usdc.balanceOf(user) - usdcBefore, 0, "proceeds paid to user");
+        assertLt(_fundManager.YIELD_POOL().getUnits(user), unitsBefore, "yield units reduced");
     }
 
     //    __  __     __
