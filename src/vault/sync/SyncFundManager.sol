@@ -90,7 +90,7 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
     //   |___/\__,_/\__,_/_/\__/   \____/\__,_/\__/\___/\__,_/
 
     /// @inheritdoc ISyncFundManager
-    function onDeposit(address receiver, uint256 assets) external onlyRole(VAULT_ROLE) {
+    function onDeposit(address receiver, uint256 assets) external nonReentrantonlyRole(VAULT_ROLE) {
         uint128 units = _toUnit(assets);
         if (units > 0) {
             // Grant units to the depositor so they start accruing yield upon deposit
@@ -136,7 +136,7 @@ contract SyncFundManager is FundManagerBase, ISyncFundManager {
         uint256 supplyBeforeBurn,
         address receiver,
         uint256 redeemingAssets
-    ) external onlyRole(VAULT_ROLE) {
+    ) external nonReentrant onlyRole(VAULT_ROLE) {
         if (totalSharesOwned == 0 || shares > totalSharesOwned) revert BAD_WITHDRAW_ARGS();
 
         uint128 holderUnits = YIELD_POOL.getUnits(holder);
