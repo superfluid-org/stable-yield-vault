@@ -1,4 +1,6 @@
-# 🔐 Security Review — Stable Yield **Sync** Vault family
+# 🔐 Security Review — poc-stable-yield-vault (sync family)
+
+_Generated 2026-06-22 · AI-assisted parallel audit (8 agents)_
 
 ---
 
@@ -6,47 +8,35 @@
 
 |                                  |                                                        |
 | -------------------------------- | ------------------------------------------------------ |
-| **Mode**                         | sync-vault family (caller-scoped)                      |
-| **Files reviewed**               | `src/common/FundManagerBase.sol` · `src/vault/sync/SyncFundManager.sol`<br>`src/vault/sync/StableYieldSyncVault.sol` |
+| **Mode**                         | filename subset (sync + shared base; async excluded per request) |
+| **Files reviewed**               | `src/common/FundManagerBase.sol` · `src/vault/sync/StableYieldSyncVault.sol`<br>`src/vault/sync/SyncFundManager.sol` · `src/vault/sync/SyncVaultMacro.sol` |
 | **Confidence threshold (1-100)** | 80                                                     |
 
-8 agents · 266 attack vectors classified · 2 candidate FINDINGs verified (1 confirmed, 1 refuted by live-read).
+---
+
+## Bottom line on the audit question
+
+> *"I want to make sure that the contract cannot be exploited to steal user's funds."*
+
+**No unprivileged fund-theft path was found.** Across 8 parallel agents (attack-vector scan, math/precision, access control, economic, execution-trace, invariants, periphery, first-principles), every value-flow path traced is either correctly guarded or maps to an explicitly documented, accepted tradeoff. Specifically confirmed safe:
+
+- The `onWithdraw` three-leg payout (donation → reserve slice → external) provably sums to exactly `redeemingAssets` (OZ floor-priced), so a withdrawer cannot pull more than their pro-rata NAV; stayers are protected.
+- `onShareTransfer` conserves total GDA pool units — wash transfers between owned wallets **cannot** inflate a holder's unit fraction to siphon the yield stream.
+- First-deposit inflation is mitigated by `_decimalsOffset() == 12`; donations only ever gift existing holders (irrational, not an attack).
+- All FM/vault external entrypoints are `nonReentrant`.
+
+**The one way user funds CAN be fully taken is via the admin key** — see Lead #1. This is the single most important item for the deployment decision, so it leads the Leads section even though the rubric classifies trusted-role issues as Leads rather than Findings.
 
 ---
 
 ## Findings
 
-[75] **1. Surplus reserve-trim consumes external deposit capacity → compliant `deposit`/`mint` bricks at the deposit-cap boundary**
+[35] **1. `maxMint`/`maxDeposit` advertise `type(uint256).max` but minting that amount reverts**
 
-`SyncFundManager.onDeposit` · Confidence: 75 · [agents: 2]
+`StableYieldSyncVault.maxMint` · Confidence: 35
 
 **Description**
-OZ checks `assets ≤ maxDeposit(FM) = EXTERNAL_VAULT.maxDeposit(FM)` at entry, but `onDeposit` then calls `_rebalanceYieldAssets()`, whose surplus branch (`SyncFundManager.sol:233-236`) deposits `underlyingNeeded` into the external vault *first*, lowering its remaining capacity; the subsequent principal deposit `EXTERNAL_VAULT.deposit(toExternal = assets)` (`:110`) now exceeds the reduced cap and reverts — a fully ERC-4626-compliant external with any deposit cap (Aave/Morpho supply caps are the norm) bricks the user's deposit whenever the reserve is in surplus (reachable via an operator `setStableYieldRate` cut, or a redeem that lowered target flow, while the external sits near its cap). Same root applies to the `mint` path (`previewMint`-derived `assets`). The ERC-4626 contract that `maxDeposit` returns a value `deposit` will accept is violated; impact is a recoverable deposit DoS at the cap boundary (no fund loss).
-
-**Fix**
-
-```diff
-         // Deploy the remainder as principal
-         uint256 toExternal = assets - toUpgrade;
-         if (toExternal > 0) {
-+            // The surplus-trim branch of _rebalanceYieldAssets() above may have
-+            // consumed external deposit capacity that OZ already counted toward
-+            // `assets` at entry; bound by the live remaining capacity and retain
-+            // any shortfall in the reserve so a capped (but compliant) external
-+            // cannot brick the deposit.
-+            uint256 cap = EXTERNAL_VAULT.maxDeposit(address(this));
-+            if (toExternal > cap) {
-+                _upgrade(toExternal - cap);
-+                toExternal = cap;
-+            }
-+        }
-+        if (toExternal > 0) {
-             UNDERLYING_ASSET.forceApprove(address(EXTERNAL_VAULT), toExternal);
-             EXTERNAL_VAULT.deposit(toExternal, address(this));
-         }
-```
-
-(Alternatively, skip the `deficit < 0` trim branch entirely inside the deposit-path rebalance — the excess can stay as above-target reserve slack and is trimmed idempotently on the next op.)
+`maxMint`/`maxDeposit` return `type(uint256).max` when `canDepositExternal()`, but `previewMint(shares) = super.previewMint(shares) + DEPOSIT_FEE` overflows long before that, so an op at the advertised limit reverts — a spec deviation, not a fund-theft path (caller's own tx reverts; no victim). This is also OZ's standard `ERC4626` behavior. Below threshold, informational only.
 
 ---
 
@@ -54,33 +44,44 @@ Findings List
 
 | # | Confidence | Title |
 |---|---|---|
-| 1 | [75] | Surplus reserve-trim consumes external deposit capacity → compliant `deposit`/`mint` bricks at deposit-cap boundary |
-
-_No findings at or above the confidence threshold (80). The sync family is well-hardened; the items below are sub-threshold trails and accepted-design liveness boundaries._
+| 1 | [35] | `maxMint`/`maxDeposit` sentinel-value reverts on execution (ERC-4626 deviation) |
 
 ---
 
 ## Leads
 
-_Vulnerability trails with concrete code smells where the full exploit path could not be completed in one analysis pass. These are not false positives — they are high-signal leads for manual review. Not scored._
+_Vulnerability trails with concrete code smells where the full exploit path could not be completed (or is trusted-role / documented-tradeoff gated). Not scored._
 
-- **DEFAULT_ADMIN_ROLE is the implicit admin of VAULT_ROLE** — `FundManagerBase` (constructor / AccessControl) — Code smells: no `_setRoleAdmin` is ever called, so the flow-duration admin (`_fundAdmin`, intended only for `setGuaranteedFlowDuration`) can `grantRole(VAULT_ROLE, attacker)` and then call `SyncFundManager.onWithdraw(victim, shares, …, attacker, redeemingAssets)` directly — the FM fully trusts the caller and never re-checks vault supply/balances, so it pays out the reserve + external position to an attacker-chosen `receiver` with **no corresponding share burn**, and `onShareTransfer` can relocate any holder's yield units. Breaks the role separation the design relies on. Admin-trust boundary (gated behind the trusted key), but the enforcement is missing. Fix: `_setRoleAdmin(VAULT_ROLE, <unreachable/self>)` in the constructor.
-- **int96 flow-rate cast chain has no width guard** — `FundManagerBase._targetFlowRate` (`:318`) / `evaluateYieldAssetsDeficit` (`:286`) — Code smells: `_flowRatePerUnit * int96(int128(YIELD_POOL.getTotalUnits()))` — the `int96(int128(units))` narrowing silently truncates above `int96.max` and the product is a checked int96 multiply (reverts on overflow). Both bounds require ≥~1e18 USDC TVL (≥7 orders beyond total USDC supply), so practically unreachable — flagged by 3 agents purely as a defense-in-depth/theoretical bound; consider `SafeCast` + widen-before-multiply if a non-6-dec or extreme-TVL deployment is ever contemplated.
-- **`onWithdraw` post-payout trim can brick a withdraw under a non-compliant external** — `SyncFundManager.onWithdraw` (`:169`) — Code smells: the trailing `_rebalanceYieldAssets()` surplus branch (`:233-236`) deposits into the external; for a *compliant* external it deposits exactly `underlyingNeeded ≤ maxDeposit` (safe), but a non-compliant external that reverts `deposit` despite `maxDeposit > 0` would brick the exit (strictly worse than the documented deposit-side limitation, since it traps funds). Documented as an accepted external-compliance requirement; confirm the withdraw path is in scope of that acceptance.
-- **`onWithdraw` reserve slice rounds up (`Ceil`) while payout is floor-priced** — `SyncFundManager.onWithdraw` (`:145`) — Code smells: `fromYieldAssets = scaledYieldAssetsBalance().mulDiv(shares, supplyBeforeBurn, Ceil)` sources the reserve in preference to the external by up to ~1 atom over strict pro-rata; clamped to `redeemingAssets` (no over-payment) and self-healed by post-payout rebalance + flow-decrease recalibrate. Three agents converged; could not construct an extractable or bricking path — only transient buffer erosion. Unverified whether a high-frequency dust-redeem loop under a `maxDeposit==0` external (trim branch skipped) can outpace rebalancing.
-- **Dust / partial-impairment deposit leaves the reserve below the solvency horizon** — `SyncFundManager.onDeposit` (`:100-104`) — Code smells: pre-fund caps `toUpgrade = min(deficit/SCALING_FACTOR + 1, assets)`; when `assets < need` (a dust deposit, or partial external illiquidity where `0 < maxWithdraw(FM) < need` so the vault is *not* paused) the reserve stays below `flowRate · guaranteedFlowDuration` yet `_recalibrateFlow()` still raises the flow. `distributeFlow` doesn't revert (Superfluid buffer uses the shorter liquidation period), so the documented `guaranteedFlowDuration` horizon is silently violated until the next op/operator poke. Design docs tolerate "residual positive deficit"; confirm reachability under realistic external liquidity caps.
-- **Vestigial unbounded approval to the vault** — `FundManagerBase` constructor — Code smells: `UNDERLYING_ASSET.forceApprove(msg.sender, type(uint256).max)` grants the vault unlimited spend on the FM's underlying, but the sync vault never calls `transferFrom` on the FM (deposits pull caller→FM; payouts are FM-pushed). Dead surface today (vault is immutable/pinned); remove or scope per-op.
-- **Temporary external liquidity freeze hard-pauses all redemptions** — `StableYieldSyncVault._isExternallyPaused` (`:819-822`) / `maxWithdraw`/`maxRedeem` — Code smells: the full pause keys solely on `EXTERNAL_VAULT.maxWithdraw(FM) == 0`, which a *non-loss* freeze (Aave at 100% utilization, external self-pause) also triggers; all four `max*` return 0 for the whole freeze even though `totalManagedAssets()` still includes the reserve + resting underlying that `onWithdraw`'s R-shares path could pay out. In-code NatSpec explicitly acknowledges this conflation as accepted — surfaced as the most material liveness consideration; consider capping `max*` at the reserve-serviceable amount during a freeze instead of forcing 0.
+- **🔑 Admin can drain 100% of custodied funds via `emergencyWithdraw`** — `FundManagerBase.emergencyWithdraw` — Code smells: `onlyRole(DEFAULT_ADMIN_ROLE)` + `IERC20(token).safeTransfer(msg.sender, amount)` for *any* token, no accounting hook. The FM is the sole capital custodian, so `emergencyWithdraw(address(EXTERNAL_VAULT), …)` + `emergencyWithdraw(address(YIELD_ASSET), …)` empties all principal and reserve in two calls; NAV is a live balance read, so `totalAssets → 0` and every holder's `maxWithdraw → 0` with no recovery. **This is the answer to "can funds be stolen": yes, by whoever holds `DEFAULT_ADMIN_ROLE`.** Demoted to Lead because it is a trusted-role, explicitly-named emergency escape hatch — but its safety depends entirely on `DEFAULT_ADMIN_ROLE` being a timelock/multisig, **not an EOA**. _Action: verify the deployment's admin is a multisig/timelock before going live._
+
+- **External full-exit rounding can brick the last redemption** — `SyncFundManager.onWithdraw` — Code smells: `EXTERNAL_VAULT.withdraw(fromExternal, FM, FM)` requests an exact asset amount; on a near-full last-holder exit `fromExternal` approaches `previewRedeem(balanceOf(FM))` (rounded *down*), while ERC-4626 `withdraw(assets)` burns `previewWithdraw(assets)` shares (rounded *up*) — a 1-share asymmetry that can revert the final redeem until a dust top-up. Unverified against Morpho V2's exact rounding; OZ virtual-offset floor pricing mitigates but doesn't provably eliminate. Consider `redeem(balanceOf(FM), …)` (share-denominated) for the terminal pull. DoS, not theft.
+
+- **Bootstrap self-pause if a first deposit is fully absorbed into the GDA buffer** — `StableYieldSyncVault._isExternallyPaused` — Code smells: if `onDeposit` pre-fund consumes the whole deposit (`toExternal == 0`) on an empty external position, the deposit completes with `externalPositionValue() == 0 && totalSupply() > 0`, latching the external pause (all four `max*` → 0) and freezing the vault. Team documents this as precluded by the `rate × guaranteedFlowDuration ≤ YEAR × BP_DENOMINATOR` guard; worth a targeted unit test at the guard boundary. Liveness, not theft.
+
+- **Unchecked uint128→int96 narrowing in the flow-rate math** — `FundManagerBase._targetFlowRate` / `evaluateYieldAssetsDeficit` — Code smells: `_flowRatePerUnit * int96(int128(YIELD_POOL.getTotalUnits()))` and the `uint96(...)` cast in the deficit calc silently wrap above ~1.3e28 pool units (~1.3e22 USDC). Threshold is far beyond any plausible TVL, so latent only. _[converged: 2 agents]_
+
+- **Cosmetic `deadline` in the redeem macro** — `SyncVaultMacro._buildRedeemOps` — Code smells: `deadline` is bound into the EIP-712 digest and shown to the user, but no op enforces it; real expiry comes from the forwarder's `validBefore`/nonce. A signed redeem can be relayed after the user-visible deadline. Bounded by `ClearMacroForwarderV1`'s nonce + `validBefore` window, so not free replay — confirm the relayer always sets a sane `validBefore`.
+
+- **Reserve-slice Ceil drift / donatable NAV / `max*` liquidity overestimate / unused max approval** — `SyncFundManager`, `FundManagerBase.constructor` — Code smells: (a) `fromYieldAssets` Ceil over-downgrades the reserve by ≤1 atom per withdraw (self-correcting, NAV-neutral); (b) `totalManagedAssets` counts raw `balanceOf(FM)` donations (documented gift); (c) `maxWithdraw`/`maxRedeem` cap by position *value* not instant liquidity, so a within-`max*` redeem can revert at the external leg (documented `forceDeallocate` deviation); (d) the constructor's `forceApprove(vault, max)` underlying allowance is unused in the sync flow — harmless (only the trusted immutable vault holds it) but widens blast radius. All documented accepted tradeoffs or non-exploitable.
 
 ---
 
-## Verified-closed (chased and refuted, not reported)
+## Deployment recommendation
 
-- **Donation NAV double-count on `maxWithdraw`** — `totalManagedAssets()` (`:180-183`) is a *live* `balanceOf` read; once redeemer #1 spends the donation, NAV drops for redeemer #2's fresh `maxWithdraw`. No cross-call double-count. Agents independently confirmed value conservation `fromExternal + fromYieldAssets + fromDonation = redeemingAssets`, with the external leg always `≤ maxWithdraw(FM)`.
-- **Unit-decrease underflow** in `onWithdraw`/`onShareTransfer` — `Ceil` mulDiv with `shares ≤ balance` ⇒ `delta ≤ units`; zero-unit dust positions are skipped, not reverted.
-- **First-deposit inflation attack** — mitigated by `_decimalsOffset() = 12`.
-- **Single-function reentrancy** — vault entrypoints are `nonReentrant`; `_withdraw` burns before the external call (CEI).
-- **Terminal-pause gate** — keyed on `totalSupply() > 0` (not the FM's external-share balance), resisting the dust-share donation false-pause and the total-loss share-burn blind-spot.
+The contracts hold up well against external attackers — the math, custody, and accounting are carefully done and match the design docs. The one thing that determines whether user funds are safe is **who controls `DEFAULT_ADMIN_ROLE`**. If that's an EOA, `emergencyWithdraw` is a single-key total-loss button. Make it a multisig (ideally timelocked) and the only complete fund-extraction path this audit surfaced is closed.
+
+---
+
+## Coverage notes
+
+8 agents ran in parallel over the 4 in-scope contracts. Each agent's verified-safe conclusions:
+
+- **Access control** — role wiring correct: `VAULT_ROLE` granted only to the deploying vault; `onShareTransfer`/`onDeposit`/`onWithdraw` all `onlyRole(VAULT_ROLE)`; setters split correctly between `FUND_OPERATOR_ROLE` and `DEFAULT_ADMIN_ROLE`. No init hijack (constructor-only, immutable pinning, no proxy).
+- **Math/precision** — three-leg payout sums exactly; `_downgrade` never underflows (`fromYieldAssets ≤ scaledYieldAssetsBalance()`); unit-transfer Ceil conserves total pool units (no wash-trade inflation); `uint128` downcasts bounded by `shares ≤ balance`; decimals identity `SCALING_FACTOR · RAW_PER_UNIT = 1e12` holds for `[6,18]`.
+- **Economic** — donation socialized-then-realized (no theft); deposit-fee/preview/mint consistent; first-deposit inflation mitigated by offset 12; NAV spot-read manipulation bounded by Morpho V2's accrual-priced, non-spikable share price.
+- **Execution-trace** — all FM/vault entrypoints `nonReentrant`; `_upgrade` approval/amount match; in-flight `net` not swept by rebalance trim (deposit-brick fix in place).
+- **Invariants** — withdraw conservation, unit conservation, reserve-slice bound, custody hazard A.2, and deficit pre-fund all hold within documented bounds.
+- **Vector scan** — 266 vectors classified; threat surface excludes cross-chain/bridge, proxy/upgrade, AMM/oracle, NFT, governance, liquidation, paymaster/AA, assembly (none present).
 
 ---
 
