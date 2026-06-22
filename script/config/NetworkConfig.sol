@@ -57,8 +57,8 @@ library NetworkConfig {
             fundAdmin: 0xdc36265ca4505021250F02d3b711Dd9e9F23aD3D,
             initialEraStableYieldRate: 300,
             guaranteedFlowDuration: 2 days,
-            shareName: "SYV v0 Share",
-            shareSymbol: "SYVV0"
+            shareName: "SYV v2 Share",
+            shareSymbol: "SYVV2"
         });
     }
 
