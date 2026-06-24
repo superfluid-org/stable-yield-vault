@@ -242,8 +242,9 @@ abstract contract FundManagerBase is IFundManagerBase, AccessControl, Reentrancy
 
     /// @inheritdoc IFundManagerBase
     function emergencyWithdraw(address token, uint256 amount) public nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
-        IERC20(token).safeTransfer(msg.sender, amount);
-        emit EmergencyWithdraw(token, msg.sender, amount);
+        // Transfer rescued tokens to the Treasury address
+        IERC20(token).safeTransfer(TREASURY, amount);
+        emit EmergencyWithdraw(token, TREASURY, amount);
     }
 
     //    _    __             ____     ______      __           __

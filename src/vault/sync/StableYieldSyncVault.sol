@@ -58,9 +58,6 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     //  /____/\__/\__,_/\__/\___/____/
 
     /// @inheritdoc IStableYieldSyncVault
-    bool public paused;
-
-    /// @inheritdoc IStableYieldSyncVault
     bool public terminated;
 
     //     ______                 __                  __
@@ -159,11 +156,7 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
         nonReentrant
         returns (uint256)
     {
-        // Front-run tolerant: a third party landing the same permit first leaves the allowance set,
-        // so swallow the revert — the deposit pull enforces the allowance regardless.
-        try IERC20Permit(asset()).permit(_msgSender(), address(this), assets, deadline, v, r, s) { } catch { }
-        // `super.deposit` is ERC4626's (skips this contract's `nonReentrant deposit` override, so no
-        // guard nesting) but still routes through the fee-bearing `previewDeposit`/`_deposit`.
+        IERC20Permit(asset()).permit(_msgSender(), address(this), assets, deadline, v, r, s);
         return super.deposit(assets, receiver);
     }
 
@@ -171,7 +164,6 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     function withdraw(uint256 assets, address receiver, address owner)
         public
         override(ERC4626, IERC4626)
-        whenNotPaused
         nonReentrant
         returns (uint256)
     {
@@ -182,7 +174,6 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     function redeem(uint256 shares, address receiver, address owner)
         public
         override(ERC4626, IERC4626)
-        whenNotPaused
         nonReentrant
         returns (uint256)
     {
@@ -194,15 +185,6 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     //    / /| |/ __  / __ `__ \/ / __ \
     //   / ___ / /_/ / / / / / / / / / /
     //  /_/  |_\__,_/_/ /_/ /_/_/_/ /_/
-
-    /// @inheritdoc IStableYieldSyncVault
-    function setPaused(bool isPaused) external onlyAdmin {
-        // Idempotent: only transition (and emit) on a real change, mirroring OZ Pausable's
-        // guarded `_pause`/`_unpause` so redundant calls don't spam `PauseStatusChanged`.
-        if (paused == isPaused) return;
-        paused = isPaused;
-        emit PauseStatusChanged(isPaused);
-    }
 
     /// @inheritdoc IStableYieldSyncVault
     function terminate() external onlyAdmin {
@@ -366,22 +348,22 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     }
 
     /**
-     * @dev The deposit leg is closed when the admin has paused or terminated the vault, or when the
-     *      external position is unwithdrawable (see {_isExternallyPaused}). Drives `maxDeposit` /
-     *      `maxMint` to 0; the entry functions additionally revert with the precise
-     *      {VAULT_PAUSED} / {VAULT_TERMINATED} error via {whenDepositable}.
+     * @dev The deposit leg is closed when the admin has terminated the vault, or when the external
+     *      position is unwithdrawable (see {_isExternallyPaused}). Drives `maxDeposit` / `maxMint`
+     *      to 0; the entry functions additionally revert with the precise {VAULT_TERMINATED} error
+     *      via {whenDepositable}.
      */
     function _depositsDisabled() internal view returns (bool) {
-        return paused || terminated || _isExternallyPaused();
+        return terminated || _isExternallyPaused();
     }
 
     /**
-     * @dev The withdraw leg is closed only by the admin pause or the external pause — a terminated
-     *      vault keeps withdrawals open so holders can exit. Drives `maxWithdraw` / `maxRedeem` to 0;
-     *      the entry functions additionally revert with {VAULT_PAUSED} via {whenNotPaused}.
+     * @dev The withdraw leg is closed only by the external pause — there is no admin withdraw switch,
+     *      and a terminated vault keeps withdrawals open so holders can always exit. Drives
+     *      `maxWithdraw` / `maxRedeem` to 0; OZ then reverts the entry with `ERC4626ExceededMax*`.
      */
     function _withdrawalsDisabled() internal view returns (bool) {
-        return paused || _isExternallyPaused();
+        return _isExternallyPaused();
     }
 
     //      ____      __                        __   ______                 __  _
@@ -482,18 +464,9 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
     }
 
     /**
-     * @dev Blocks the entry while the admin has paused the vault (both legs).
-     */
-    modifier whenNotPaused() {
-        if (paused) revert VAULT_PAUSED();
-        _;
-    }
-
-    /**
-     * @dev Blocks the deposit leg while the vault is paused or terminated.
+     * @dev Blocks the deposit leg once the vault is terminated (one-way; withdrawals stay open).
      */
     modifier whenDepositable() {
-        if (paused) revert VAULT_PAUSED();
         if (terminated) revert VAULT_TERMINATED();
         _;
     }

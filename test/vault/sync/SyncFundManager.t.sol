@@ -202,11 +202,11 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         uint256 adminBefore = _usdc.balanceOf(FUND_ADMIN);
 
         vm.expectEmit(true, true, true, true, address(_fundManager));
-        emit IFundManagerBase.EmergencyWithdraw(address(_usdc), FUND_ADMIN, amount);
+        emit IFundManagerBase.EmergencyWithdraw(address(_usdc), _fundManager.TREASURY(), amount);
         vm.prank(FUND_ADMIN);
         _fundManager.emergencyWithdraw(address(_usdc), amount);
 
-        assertEq(_usdc.balanceOf(FUND_ADMIN), adminBefore + amount, "admin received the full amount");
+        assertEq(_usdc.balanceOf(_fundManager.TREASURY()), adminBefore + amount, "admin received the full amount");
         assertEq(_usdc.balanceOf(address(_fundManager)), 0, "FM drained");
     }
 
@@ -219,7 +219,7 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         vm.prank(FUND_ADMIN);
         _fundManager.emergencyWithdraw(address(_usdcx), take);
 
-        assertEq(_usdcx.balanceOf(FUND_ADMIN), take, "admin received the partial amount");
+        assertEq(_usdcx.balanceOf(_fundManager.TREASURY()), take, "admin received the partial amount");
         assertEq(_usdcx.balanceOf(address(_fundManager)), seeded - take, "residue stays in the FM");
     }
 
@@ -234,14 +234,14 @@ contract SyncFundManagerTest is SyncVaultTestBase {
         assertGt(reserve, 0, "precondition: reserve funded by the deposit");
         vm.prank(FUND_ADMIN);
         _fundManager.emergencyWithdraw(address(_usdcx), reserve);
-        assertEq(_usdcx.balanceOf(FUND_ADMIN), reserve, "admin swept the yield reserve");
+        assertEq(_usdcx.balanceOf(_fundManager.TREASURY()), reserve, "admin swept the yield reserve");
 
         // External Morpho position shares.
         uint256 extShares = _external.balanceOf(address(_fundManager));
         assertGt(extShares, 0, "precondition: external position held");
         vm.prank(FUND_ADMIN);
         _fundManager.emergencyWithdraw(address(_external), extShares);
-        assertEq(_external.balanceOf(FUND_ADMIN), extShares, "admin swept the external position");
+        assertEq(_external.balanceOf(_fundManager.TREASURY()), extShares, "admin swept the external position");
         assertEq(_external.balanceOf(address(_fundManager)), 0, "FM position drained");
     }
 

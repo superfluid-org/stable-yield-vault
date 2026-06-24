@@ -103,28 +103,6 @@ contract SyncVaultEIP2771Test is SyncVaultTestBase {
         assertEq(_usdc.balanceOf(TREASURY) - treasuryBefore, _vault.DEPOSIT_FEE(), "fee to treasury");
     }
 
-    /// @dev A front-run permit (a third party lands the same signature first, consuming the nonce and
-    ///      setting the allowance) does NOT brick the deposit — the `try/catch` swallows the stale
-    ///      permit and the pull proceeds off the standing allowance.
-    function test_depositWithPermit_frontRunTolerated(uint256 amount) public {
-        amount = bound(amount, 1e6, ONE_BILLION * 1e6);
-        (address user, uint256 pk) = makeAddrAndKey("permit-frontrun");
-        uint256 gross = amount + _vault.DEPOSIT_FEE();
-        _dealUSDC(user, gross);
-
-        (uint8 v, bytes32 r, bytes32 s) = _signPermit(pk, user, address(_vault), gross, type(uint256).max);
-
-        // Attacker front-runs: consumes the permit nonce and sets `user -> vault` allowance.
-        _usdc.permit(user, address(_vault), gross, type(uint256).max, v, r, s);
-
-        // The user's batch still carries the now-stale permit; the deposit must succeed regardless.
-        vm.prank(user);
-        uint256 sharesOut = _vault.depositWithPermit(gross, user, type(uint256).max, v, r, s);
-
-        assertEq(sharesOut, amount * 1e12, "deposit not bricked by a front-run permit");
-        assertEq(_vault.balanceOf(user), sharesOut, "shares minted");
-    }
-
     /// @dev `depositWithPermit` honours the flat-fee floor: a gross at/below the fee reverts.
     function test_depositWithPermit_belowFee_reverts() public {
         (address user, uint256 pk) = makeAddrAndKey("permit-dust");

@@ -103,7 +103,7 @@ interface IFundManagerBase {
     function setGuaranteedFlowDuration(uint256 newDuration) external;
 
     /**
-     * @notice Withdraw tokens from the FundManager in case of emergency.
+     * @notice Withdraw tokens from the FundManager to the treasury in case of emergency.
      * @dev Only callable by accounts holding DEFAULT_ADMIN_ROLE.
      * @param token The address of the token to withdraw.
      * @param amount The amount of tokens to withdraw.

@@ -161,6 +161,14 @@ the FundManager is meaningless in isolation.
 - **`deposit`/`mint`/`withdraw`/`redeem`** are `nonReentrant`. `preview*` functions
   use the OZ defaults and work synchronously — they do **not** revert (unlike the async
   vault).
+- **Admin lifecycle — `terminate()` only.** The sole admin control is the one-way
+  `terminate()` latch (authorized against the FM's `DEFAULT_ADMIN_ROLE`): it permanently
+  closes the deposit leg (`maxDeposit`/`maxMint` → 0, `deposit`/`mint` revert
+  `VAULT_TERMINATED` via `whenDepositable`) while leaving withdrawals open so holders can
+  always exit. It is irreversible and a redundant call is a no-op. **There is no admin
+  pause** — the withdraw leg is *never* blocked by an admin switch; the only thing that
+  gates withdrawals is the automatic external pause below (external vault
+  failure / blocked exit gates).
 
 #### External pause
 
