@@ -1,5 +1,78 @@
 # DEPLOYMENTS LOGS
 
+## SYNC VAULT final
+
+Date: 26th June 2026
+Operator: 0xPilou
+
+```shell
+forge script script/sync/DeploySync.s.sol:DeploySync --rpc-url $BASE_MAINNET_RPC_URL --account SUP_DEPLOYER --broadcast --verify
+
+[⠊] Compiling...
+No files changed, compilation skipped
+Enter keystore password:
+Script ran successfully.
+
+== Logs ==
+  
+  ===> DEPLOYMENT CONFIGURATION
+   --- Treasury                      : 0xac808840f02c47C05507f48165d2222FF28EF4e1
+   --- Underlying Asset              : 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+   --- Yield Asset                   : 0xD04383398dD2426297da660F9CCA3d439AF9ce1b
+   --- External Vault                : 0xbeef0e0834849aCC03f0089F01f4F1Eeb06873C9
+   --- Fund Operator                 : 0xB9337958009Fc5b320844FE34F9eb58D8018837C
+   --- Fund Admin                    : 0x4396c45Ac5910Dab4d27f74fe678932a51f33a4d
+   --- Initial Era Stable Yield Rate : 300
+   --- Guaranteed Flow Duration      : 172800
+   --- Share Name                    : SuperVault Technical Demo Share
+   --- Share Symbol                  : SVTD
+  
+  ===> STARTING STRATEGY DEPLOYMENT :
+   --- Chain ID          :    8453
+   --- Deployer address  :    0x011E5Ee334F9af11c631B362f1E0cbab4E15642a
+  
+  
+  ===> DEPLOYMENT RESULTS
+   --- Sync Fund Manager    : 0x904103dfE7231e2534e0Be29E6086CB0FF7d76bd
+   --- Sync Vault           : 0x8C60503C0353ED12c3Eebc3036BF033A3BbB95Aa
+   --- Sync Deposit Macro   : 0xA2175966fD97356C9ADb72ECC40875BC02Fa110b
+  
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 8453
+
+Estimated gas price: 0.088279264 gwei
+
+Estimated total gas used for script: 9519287
+
+Estimated amount required: 0.000840355650164768 ETH
+
+==========================
+
+##### base
+✅  [Success] Hash: 0xbfa5bc597113bf02ac41927a9195387492e2e0cb62798578dd82e8e4252f93b3
+Contract Address: 0x8C60503C0353ED12c3Eebc3036BF033A3BbB95Aa
+Block: 47845670
+Paid: 0.000245446593772124 ETH (5513372 gas * 0.044518417 gwei)
+
+
+##### base
+✅  [Success] Hash: 0xd4112651c42d012d200409d8a7632f3b082dc2c4968ea8b2f4e766a5c787284a
+Contract Address: 0xA2175966fD97356C9ADb72ECC40875BC02Fa110b
+Block: 47845670
+Paid: 0.000080540805744469 ETH (1809157 gas * 0.044518417 gwei)
+
+✅ Sequence #1 on base | Total Paid: 0.000325987399516593 ETH (7322529 gas * avg 0.044518417 gwei)
+                                                                                                                                                                                                                                                                                                        
+
+==========================
+
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+```
+
 ## SYNC VAULT rc3 
 
 Date: 25th June 2026
