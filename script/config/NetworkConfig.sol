@@ -49,16 +49,16 @@ library NetworkConfig {
      */
     function getBaseMainnetConfig() internal pure returns (DeploymentConfig memory) {
         return DeploymentConfig({
-            treasury: 0xdc36265ca4505021250F02d3b711Dd9e9F23aD3D,
+            treasury: 0xac808840f02c47C05507f48165d2222FF28EF4e1,
             underlyingAsset: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,
             yieldAsset: 0xD04383398dD2426297da660F9CCA3d439AF9ce1b,
             externalVault: 0xbeef0e0834849aCC03f0089F01f4F1Eeb06873C9,
             fundOperator: 0xB9337958009Fc5b320844FE34F9eb58D8018837C,
-            fundAdmin: 0xdc36265ca4505021250F02d3b711Dd9e9F23aD3D,
+            fundAdmin: 0x4396c45Ac5910Dab4d27f74fe678932a51f33a4d,
             initialEraStableYieldRate: 300,
             guaranteedFlowDuration: 2 days,
-            shareName: "SYV v2 Share",
-            shareSymbol: "SYVV2"
+            shareName: "SuperVault Technical Demo Share",
+            shareSymbol: "SVTD"
         });
     }
 
