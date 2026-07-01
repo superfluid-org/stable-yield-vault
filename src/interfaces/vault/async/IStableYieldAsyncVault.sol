@@ -143,12 +143,7 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      * @param effectiveSupply totalSupply + unclaimed deposit shares - unclaimed redeem shares
      * @param assetsPerShare The exchange rate locked for this epoch (scaled by ASSETS_PER_SHARE_SCALE)
      */
-    event EpochClosed(
-        uint256 indexed epoch,
-        uint256 totalAssets,
-        uint256 effectiveSupply,
-        uint256 assetsPerShare
-    );
+    event EpochClosed(uint256 indexed epoch, uint256 totalAssets, uint256 effectiveSupply, uint256 assetsPerShare);
 
     /**
      * @notice Emitted when the operator settles an epoch.

@@ -88,7 +88,7 @@ abstract contract EchidnaVaultHarnessBase {
         _actors[2] = address(uint160(uint256(keccak256(bytes(carolSalt)))));
         _treasury = address(uint160(uint256(keccak256(bytes(treasurySalt)))));
 
-        HEVM.etch(ERC1820RegistryCompiled.at, ERC1820RegistryCompiled.bin);
+        HEVM.etch(ERC1820RegistryCompiled.ADDRESS, ERC1820RegistryCompiled.BYTECODE);
         _plantSuperfluidLibraries();
 
         _deployer = new SuperfluidFrameworkDeployer();

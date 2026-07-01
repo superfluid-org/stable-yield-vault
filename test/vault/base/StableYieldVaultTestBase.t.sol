@@ -69,7 +69,7 @@ contract StableYieldVaultTestBase is Test {
         returns (SuperfluidFrameworkDeployer.Framework memory sf, SuperfluidFrameworkDeployer deployer)
     {
         // Superfluid Protocol Deployment Start
-        vm.etch(ERC1820RegistryCompiled.at, ERC1820RegistryCompiled.bin);
+        vm.etch(ERC1820RegistryCompiled.ADDRESS, ERC1820RegistryCompiled.BYTECODE);
 
         deployer = new SuperfluidFrameworkDeployer();
         deployer.deployTestFramework();
