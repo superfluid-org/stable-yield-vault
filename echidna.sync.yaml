@@ -1,0 +1,25 @@
+testMode: assertion
+testLimit: 50000
+seqLen: 100
+shrinkLimit: 5000
+corpusDir: echidna-corpus/sync
+coverage: true
+prefix: echidna_
+deployer: "0x30000"
+contractAddr: "0x40000"
+codeSize: 0xffff
+allContracts: false
+# Operator-diligence assumption (design D.1): the operator calls `ensureYieldFlowDuration()` within
+# every `guaranteedFlowDuration` window, so the reserve never over-drains to insolvency. The sync
+# harness models this with a `keepAlive` modifier (replenish before every op) AND by bounding every
+# time advance below the `MIN_GUARANTEED_FLOW_DURATION` (= 1 day) floor. `maxTimeDelay` caps echidna's
+# inter-call timestamp jump at 6h; combined with the harness `MAX_WARP` (6h) the gap between two
+# replenishes stays <= 12h < 24h. Without this cap a single week-long jump drains the stream to
+# insolvency and an in-bounds withdraw/redeem reverts GDA_INSUFFICIENT_BALANCE (a false F.2 failure
+# that does not reflect the operator-diligence trust model).
+maxTimeDelay: 21600
+maxBlockDelay: 10
+cryticArgs:
+  - "--compile-libraries=(SlotsBitmapLibrary,0x0000000000000000000000000000000000000A01),(SuperfluidPoolDeployerLibrary,0x0000000000000000000000000000000000000A02),(SuperfluidGovDeployerLibrary,0x0000000000000000000000000000000000000A03),(SuperfluidHostDeployerLibrary,0x0000000000000000000000000000000000000A04),(SuperfluidCFAv1DeployerLibrary,0x0000000000000000000000000000000000000A05),(SuperfluidIDAv1DeployerLibrary,0x0000000000000000000000000000000000000A06),(SuperfluidPoolLogicDeployerLibrary,0x0000000000000000000000000000000000000A07),(SuperfluidGDAv1DeployerLibrary,0x0000000000000000000000000000000000000A08),(CFAv1ForwarderDeployerLibrary,0x0000000000000000000000000000000000000A09),(GDAv1ForwarderDeployerLibrary,0x0000000000000000000000000000000000000A0a),(SuperTokenDeployerLibrary,0x0000000000000000000000000000000000000A0b),(SuperfluidPoolNFTLogicDeployerLibrary,0x0000000000000000000000000000000000000A0c),(ProxyDeployerLibrary,0x0000000000000000000000000000000000000A0d),(TokenDeployerLibrary,0x0000000000000000000000000000000000000A0e),(SuperTokenFactoryDeployerLibrary,0x0000000000000000000000000000000000000A0f),(SuperfluidPeripheryDeployerLibrary,0x0000000000000000000000000000000000000A10)"
+filterFunctions: []
+filterBlacklist: true
