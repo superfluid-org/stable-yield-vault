@@ -38,7 +38,7 @@ contract SyncFundManagerTest is SyncVaultTestBase {
     function test_constructor_revertsOnUnsupportedDecimals() public {
         // 5-dec underlying + matching wrapper super-token + external vault over the same token.
         (TestToken lowDec, SuperToken lowDecx) =
-            _deployer.deployWrapperSuperToken("LOW", "LOW", 5, type(uint256).max, address(0));
+            _deployer.deployWrapperSuperToken("LOW", "LOW", 19, type(uint256).max, address(0));
         MockMorphoVaultV2 lowExternal = new MockMorphoVaultV2(IERC20(address(lowDec)), "Low External", "lx");
 
         vm.expectRevert(IFundManagerBase.UNSUPPORTED_DECIMALS.selector);

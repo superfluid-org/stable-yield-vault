@@ -98,6 +98,25 @@ contract StableYieldSyncVaultTest is SyncVaultTestBase {
         );
     }
 
+    function test_constructor_revertsOnInvalidConfiguration() public {
+        // External vault over a *different* asset.
+        MockMorphoVaultV2 correctExternal = new MockMorphoVaultV2(IERC20(address(_randomToken)), "correct", "CRT");
+
+        vm.expectRevert(IStableYieldSyncVault.INVALID_CONFIGURATION.selector);
+        new StableYieldSyncVault(
+            TREASURY,
+            address(_randomToken),
+            address(_randomTokenx),
+            address(correctExternal),
+            FUND_OPERATOR,
+            FUND_ADMIN,
+            INITIAL_ERA_STABLE_YIELD_RATE,
+            GUARANTEED_FLOW_DURATION,
+            "x",
+            "x"
+        );
+    }
+
     //     __  __      _ __     ____                        _ __
     //    / / / /___  (_) /_   / __ \___  ____  ____  _____(_) /______
     //   / / / / __ \/ / __/  / / / / _ \/ __ \/ __ \/ ___/ / __/ ___/

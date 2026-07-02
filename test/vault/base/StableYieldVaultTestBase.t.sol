@@ -21,6 +21,9 @@ contract StableYieldVaultTestBase is Test {
     TestToken internal _usdc;
     ISuperToken internal _usdcx;
     SuperToken internal _usdcSuperToken;
+    TestToken internal _randomToken;
+    ISuperToken internal _randomTokenx;
+    SuperToken internal _randomSuperToken;
 
     address internal immutable DEPLOYER = makeAddr("DEPLOYER");
     address internal immutable TREASURY = makeAddr("TREASURY");
@@ -41,6 +44,10 @@ contract StableYieldVaultTestBase is Test {
         (_sf, _deployer) = _deploySuperfluid();
         (_usdc, _usdcSuperToken) = _deployer.deployWrapperSuperToken("USDC", "USDC", 6, type(uint256).max, address(0));
         _usdcx = ISuperToken(address(_usdcSuperToken));
+        (_randomToken, _randomSuperToken) =
+            _deployer.deployWrapperSuperToken("RANDOM", "RANDOM", 18, type(uint256).max, address(0));
+        _randomTokenx = ISuperToken(address(_randomSuperToken));
+
         _initWhale();
     }
 

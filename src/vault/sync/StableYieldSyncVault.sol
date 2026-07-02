@@ -108,6 +108,8 @@ contract StableYieldSyncVault is ERC4626, ERC2771Context, ReentrancyGuard, IStab
             _initialGuaranteedFlowDuration
         );
 
+        if (ERC20(_underlyingAsset).decimals() != 6) revert INVALID_CONFIGURATION();
+
         TREASURY = _treasury;
     }
 

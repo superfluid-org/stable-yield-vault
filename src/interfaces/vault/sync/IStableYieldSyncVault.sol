@@ -41,6 +41,13 @@ interface IStableYieldSyncVault is IERC4626 {
     error EXTERNAL_ASSET_MISMATCH();
 
     /**
+     * @notice Thrown at construction when the underlying asset is not 6-decimals (USDC).
+     * @dev This vault is hard-coded for 6-decimals underlying (USDC) and 18-decimals yield asset (Super USDC).
+     *      Revisit `_decimalOffset()` internal function for the vault's 6-to-18 decimal conversion.
+     */
+    error INVALID_CONFIGURATION();
+
+    /**
      * @notice Thrown on a deposit whose `assets` do not exceed the flat {DEPOSIT_FEE}, so no positive
      *         net principal would remain after the fee.
      */
