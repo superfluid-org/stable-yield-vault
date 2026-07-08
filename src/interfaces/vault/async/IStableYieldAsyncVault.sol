@@ -128,6 +128,12 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      */
     error NOTHING_TO_CLAIM();
 
+    /**
+     * @notice Thrown when the constructor arguments describe an unsupported deployment
+     *         (e.g. a non-6-decimals underlying, which VIRTUAL_SHARES is hardcoded for).
+     */
+    error INVALID_CONFIGURATION();
+
     // ──────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────

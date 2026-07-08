@@ -35,6 +35,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
 
+    /// @notice Virtual shares added to the effective supply when computing the epoch rate.
+    uint256 internal constant VIRTUAL_SHARES = 1e12;
+
     //     _____ __        __
     //    / ___// /_____ _/ /____  _____
     //    \__ \/ __/ __ `/ __/ _ \/ ___/
@@ -115,6 +118,10 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
             _initialEraStableYieldRate,
             _initialGuaranteedFlowDuration
         );
+
+        // VIRTUAL_SHARES (and the 18-dec share presentation it produces) is hardcoded for a
+        // 6-decimals underlying — mirror the sync vault's pin.
+        if (ERC20(_underlyingAsset).decimals() != 6) revert INVALID_CONFIGURATION();
 
         // Initialize the first epoch to 1
         currentEpoch = 1;
@@ -228,9 +235,10 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         // This corrects for the lag between settlement (assets move) and claim (shares mint/burn).
         uint256 effectiveSupply = totalSupply() + _unclaimedDepositShares - _unclaimedRedeemShares;
 
-        // Calculate the epoch rate (assets per share) using the total assets reported by the FundManager
-        uint256 epochRate =
-            effectiveSupply == 0 ? ASSETS_PER_SHARE_SCALE : _totalAssets.mulDiv(ASSETS_PER_SHARE_SCALE, effectiveSupply);
+        // Calculate the epoch rate (assets per share) with OZ-style virtual shares/assets:
+        // a donation-inflated NAV mostly dilutes into the virtual holder, so rounding a settling
+        // depositor's shares toward zero costs the attacker ~VIRTUAL_SHARES times the victim's loss.
+        uint256 epochRate = (_totalAssets + 1).mulDiv(ASSETS_PER_SHARE_SCALE, effectiveSupply + VIRTUAL_SHARES);
 
         uint256 closingEpoch = currentEpoch;
 
@@ -325,7 +333,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /**
      * @inheritdoc IERC4626
-     * @dev Uses the last settled epoch rate. Returns ASSETS_PER_SHARE_SCALE (1:1) before any epoch has settled.
+     * @dev Uses the last settled epoch rate. Before any epoch has settled, uses the empty-vault
+     *      bootstrap rate ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES (1 asset atom = 1e12 share atoms).
      */
     function convertToShares(uint256 assets) public view returns (uint256 shares) {
         uint256 rate = _lastSettledRate();
@@ -334,7 +343,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /**
      * @inheritdoc IERC4626
-     * @dev Uses the last settled epoch rate. Returns ASSETS_PER_SHARE_SCALE (1:1) before any epoch has settled.
+     * @dev Uses the last settled epoch rate. Before any epoch has settled, uses the empty-vault
+     *      bootstrap rate ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES (1 asset atom = 1e12 share atoms).
      */
     function convertToAssets(uint256 shares) public view returns (uint256 assets) {
         uint256 rate = _lastSettledRate();
@@ -549,7 +559,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /**
      * @dev Returns the exchange rate from the last settled epoch.
-     *      Before any epoch has settled, returns ASSETS_PER_SHARE_SCALE (1:1).
+     *      Before any epoch has settled, returns the empty-vault bootstrap rate
+     *      ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES.
      *      During close/settle window, falls back to the epoch before.
      */
     function _lastSettledRate() internal view returns (uint256 lastSettledRate) {
@@ -561,8 +572,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         else if (currentEpoch >= 3 && isEpochSettled(currentEpoch - 2)) {
             lastSettledRate = _epochRate[currentEpoch - 2];
         } else {
-            // Bootstrap: no epochs settled yet
-            lastSettledRate = ASSETS_PER_SHARE_SCALE;
+            // Bootstrap: no epochs settled yet — matches the empty-vault closeEpoch rate,
+            // (0 + 1) * ASSETS_PER_SHARE_SCALE / (0 + VIRTUAL_SHARES)
+            lastSettledRate = ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES;
         }
     }
 
