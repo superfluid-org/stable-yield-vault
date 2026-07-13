@@ -64,33 +64,8 @@ contract StableYieldAsyncVaultTest is AsyncVaultTestBase {
         _vault.requestDeposit(amount, user, user);
     }
 
-    /// @dev Directly drive closeEpoch on the vault (bypasses FM totalAssets calculation).
-    function _vaultCloseEpoch(uint256 totalAssetsReported) internal {
-        vm.prank(address(_fundManager));
-        _vault.onCloseEpoch(totalAssetsReported);
-    }
-
-    /// @dev Directly drive settleEpoch on the vault.
-    function _vaultSettleEpoch() internal {
-        vm.prank(address(_fundManager));
-        _vault.onSettleEpoch();
-    }
-
-    /// @dev Drives settleEpoch + mimics the pool-unit grant that FM.settleEpoch would normally do.
-    ///      Needed so subsequent claims (which call `onClaimDeposit` → `decreaseMemberUnits`) don't underflow.
-    function _vaultSettleAndGrantUnits() internal {
-        IStableYieldAsyncVault.Snapshot memory snap = _vault.getSnapshot();
-
-        vm.startPrank(address(_fundManager));
-        _vault.onSettleEpoch();
-
-        if (snap.depositingAssets > 0) {
-            uint256 units = snap.depositingAssets / _fundManager.RAW_PER_UNIT();
-            _fundManager.YIELD_POOL().increaseMemberUnits(address(_fundManager), uint128(units));
-        }
-
-        vm.stopPrank();
-    }
+    // NOTE: `_vaultCloseEpoch`, `_vaultSettleEpoch` and `_vaultSettleAndGrantUnits` live in
+    // {AsyncVaultTestBase} (shared with the EIP-2771 / Permit2 / macro suites).
 
     /// @dev Full deposit lifecycle for a single user. At the bootstrap rate, shares == assets * SHARE_SCALE.
     ///      Reports NAV = totalSupply / SHARE_SCALE — the assets backing the outstanding shares — which
