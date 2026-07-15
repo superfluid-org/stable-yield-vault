@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import { Script } from "forge-std/Script.sol";
 import { NetworkConfig } from "script/config/NetworkConfig.sol";
 
+import { AsyncVaultMacro } from "src/vault/async/AsyncVaultMacro.sol";
 import { StableYieldAsyncVault } from "src/vault/async/StableYieldAsyncVault.sol";
 import { StableYieldSyncVault } from "src/vault/sync/StableYieldSyncVault.sol";
 import { SyncVaultMacro } from "src/vault/sync/SyncVaultMacro.sol";
@@ -13,8 +14,7 @@ library StableYieldVaultDeployer {
     struct DeploymentResult {
         address fundManager;
         address vault;
-        // Sync only: the ClearMacro exposing deposit-and-connect + redeem user actions.
-        address depositMacro;
+        address vaultMacro;
     }
 
     function deployAsyncVault(NetworkConfig.DeploymentConfig memory config)
@@ -51,6 +51,9 @@ library StableYieldVaultDeployer {
 
         results.vault = address(asyncVault);
         results.fundManager = address(asyncVault.FUND_MANAGER());
+
+        // Periphery: the macro exposing the request/claim user actions.
+        results.vaultMacro = address(new AsyncVaultMacro(asyncVault));
     }
 
     function _deploySyncVault(NetworkConfig.DeploymentConfig memory config)
@@ -74,7 +77,7 @@ library StableYieldVaultDeployer {
         results.fundManager = address(syncVault.FUND_MANAGER());
 
         // Periphery: the macro exposing deposit-and-connect + redeem user actions.
-        results.depositMacro = address(new SyncVaultMacro(syncVault));
+        results.vaultMacro = address(new SyncVaultMacro(syncVault));
     }
 
 }

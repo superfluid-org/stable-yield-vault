@@ -58,7 +58,7 @@ contract DeploySync is Script {
         console.log("===> DEPLOYMENT RESULTS");
         console.log(" --- Sync Fund Manager    :", result.fundManager);
         console.log(" --- Sync Vault           :", result.vault);
-        console.log(" --- Sync Deposit Macro   :", result.depositMacro);
+        console.log(" --- Sync Vault Macro     :", result.vaultMacro);
         console.log("");
     }
 
