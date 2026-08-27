@@ -4,8 +4,10 @@ pragma solidity ^0.8.34;
 import { IAsyncFundManager } from "src/interfaces/vault/async/IAsyncFundManager.sol";
 import { AsyncFundManager } from "src/vault/async/AsyncFundManager.sol";
 
+import { ERC2771Context } from "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Context } from "@openzeppelin/contracts/utils/Context.sol";
 import {
     IERC4626,
     IERC7540Deposit,
@@ -18,7 +20,11 @@ import {
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
-contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
+import { IPermit2 } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/external/IPermit2.sol";
+import { ISuperToken } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperToken.sol";
+import { ISuperfluid } from "@superfluid-finance/ethereum-contracts/contracts/interfaces/superfluid/ISuperfluid.sol";
+
+contract StableYieldAsyncVault is ERC20, ERC2771Context, IStableYieldAsyncVault {
 
     using Math for uint256;
     using SafeERC20 for IERC20;
@@ -34,6 +40,24 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     IAsyncFundManager public immutable FUND_MANAGER;
 
     uint256 public constant ASSETS_PER_SHARE_SCALE = 1e18;
+
+    /// @notice Virtual shares added to the effective supply when computing the epoch rate.
+    uint256 internal constant VIRTUAL_SHARES = 1e12;
+
+    /// @notice Canonical Permit2 (SignatureTransfer) — same address on all EVM chains.
+    address public constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
+
+    /**
+     * @notice Permit2 witness type string for {requestDepositWithPermit2}.
+     * @dev Appended by Permit2 to its `PermitWitnessTransferFrom(TokenPermissions permitted,
+     *      address spender,uint256 nonce,uint256 deadline,` stub; referenced types must follow in
+     *      alphabetical order (AsyncVaultDepositWitness < TokenPermissions).
+     */
+    string public constant DEPOSIT_WITNESS_TYPE_STRING =
+        "AsyncVaultDepositWitness witness)AsyncVaultDepositWitness(address controller)TokenPermissions(address token,uint256 amount)";
+
+    /// @notice EIP-712 typehash of the witness struct bound into the Permit2 signature.
+    bytes32 private constant _DEPOSIT_WITNESS_TYPEHASH = keccak256("AsyncVaultDepositWitness(address controller)");
 
     //     _____ __        __
     //    / ___// /_____ _/ /____  _____
@@ -103,7 +127,7 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         uint256 _initialGuaranteedFlowDuration,
         string memory name,
         string memory symbol
-    ) ERC20(name, symbol) {
+    ) ERC20(name, symbol) ERC2771Context(ISuperfluid(ISuperToken(_yieldAsset).getHost()).getERC2771Forwarder()) {
         underlyingAsset = IERC20(_underlyingAsset);
 
         FUND_MANAGER = new AsyncFundManager(
@@ -115,6 +139,10 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
             _initialEraStableYieldRate,
             _initialGuaranteedFlowDuration
         );
+
+        // VIRTUAL_SHARES (and the 18-dec share presentation it produces) is hardcoded for a
+        // 6-decimals underlying — mirror the sync vault's pin.
+        if (ERC20(_underlyingAsset).decimals() != 6) revert INVALID_CONFIGURATION();
 
         // Initialize the first epoch to 1
         currentEpoch = 1;
@@ -128,8 +156,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC7540Deposit
     function requestDeposit(uint256 assets, address controller, address owner) external returns (uint256 requestId) {
+        address sender = _msgSender();
         if (assets == 0) revert INVALID_PARAMETERS();
-        if (owner != msg.sender && !_isOperator[owner][msg.sender]) revert INVALID_CALLER();
+        if (owner != sender && !_isOperator[owner][sender]) revert INVALID_CALLER();
         if (_snapshot.epoch != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
 
         // Lazy-settle any pending deposit from a previous settled epoch
@@ -138,46 +167,73 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         // Pending deposits are custodied by the vault itself until settlement.
         underlyingAsset.safeTransferFrom(owner, address(this), assets);
 
-        ControllerState storage cs = _controllerStates[controller];
+        requestId = _recordDepositRequest(assets, controller, owner, sender);
+    }
 
-        // Accrue the assets deposited by this controller
-        cs.pendingDepositAssets += assets;
-        totalPendingDepositAssets += assets;
+    /// @inheritdoc IStableYieldAsyncVault
+    function requestDepositWithPermit2(
+        uint256 assets,
+        address controller,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (uint256 requestId) {
+        address owner = _msgSender();
+        if (assets == 0) revert INVALID_PARAMETERS();
+        if (_snapshot.epoch != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
 
-        // Record the epoch of this deposit request
-        cs.depositRequestEpoch = currentEpoch;
+        // Lazy-settle any pending deposit from a previous settled epoch
+        _settleDepositIfNeeded(controller);
 
-        requestId = REQUEST_ID;
+        // Pull the assets straight into the vault's escrow via Permit2 SignatureTransfer.
+        // The signature can only move funds here: it names this vault as spender (Permit2
+        // enforces `spender == msg.sender`), and the witness pins the credited controller, so
+        // neither the destination nor the beneficiary can be redirected by a relayer.
+        IPermit2(PERMIT2).permitWitnessTransferFrom(
+            IPermit2.PermitTransferFrom({
+                permitted: IPermit2.TokenPermissions({ token: address(underlyingAsset), amount: assets }),
+                nonce: nonce,
+                deadline: deadline
+            }),
+            IPermit2.SignatureTransferDetails({ to: address(this), requestedAmount: assets }),
+            owner,
+            depositWitness(controller),
+            DEPOSIT_WITNESS_TYPE_STRING,
+            signature
+        );
 
-        emit DepositRequest(controller, owner, requestId, msg.sender, assets);
+        requestId = _recordDepositRequest(assets, controller, owner, owner);
     }
 
     /// @inheritdoc IStableYieldAsyncVault
     function deposit(uint256 assets, address receiver, address controller) external returns (uint256 shares) {
-        if (controller != msg.sender && !_isOperator[controller][msg.sender]) revert INVALID_CALLER();
+        address sender = _msgSender();
+        if (controller != sender && !_isOperator[controller][sender]) revert INVALID_CALLER();
         shares = _deposit(assets, receiver, controller);
     }
 
     /// @inheritdoc IERC4626
     function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
-        shares = _deposit(assets, receiver, msg.sender);
+        shares = _deposit(assets, receiver, _msgSender());
     }
 
     /// @inheritdoc IStableYieldAsyncVault
     function mint(uint256 shares, address receiver, address controller) external returns (uint256 assets) {
-        if (controller != msg.sender && !_isOperator[controller][msg.sender]) revert INVALID_CALLER();
+        address sender = _msgSender();
+        if (controller != sender && !_isOperator[controller][sender]) revert INVALID_CALLER();
         assets = _mintShares(shares, receiver, controller);
     }
 
     /// @inheritdoc IERC4626
     function mint(uint256 shares, address receiver) external returns (uint256 assets) {
-        assets = _mintShares(shares, receiver, msg.sender);
+        assets = _mintShares(shares, receiver, _msgSender());
     }
 
     /// @inheritdoc IERC7540Redeem
     function requestRedeem(uint256 shares, address controller, address owner) external returns (uint256 requestId) {
+        address sender = _msgSender();
         if (shares == 0) revert INVALID_PARAMETERS();
-        if (owner != msg.sender && !_isOperator[owner][msg.sender]) revert INVALID_CALLER();
+        if (owner != sender && !_isOperator[owner][sender]) revert INVALID_CALLER();
         if (_snapshot.epoch != 0) revert EPOCH_SETTLEMENT_IN_PROGRESS();
 
         // Lazy-settle any pending redeem from a previous epoch
@@ -204,18 +260,20 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
         requestId = REQUEST_ID;
 
-        emit RedeemRequest(controller, owner, requestId, msg.sender, shares);
+        emit RedeemRequest(controller, owner, requestId, sender, shares);
     }
 
     /// @inheritdoc IStableYieldAsyncVault
     function redeem(uint256 shares, address receiver, address controller) external returns (uint256 assets) {
-        if (controller != msg.sender && !_isOperator[controller][msg.sender]) revert INVALID_CALLER();
+        address sender = _msgSender();
+        if (controller != sender && !_isOperator[controller][sender]) revert INVALID_CALLER();
         assets = _redeem(shares, receiver, controller);
     }
 
     /// @inheritdoc IStableYieldAsyncVault
     function withdraw(uint256 assets, address receiver, address controller) external returns (uint256 shares) {
-        if (controller != msg.sender && !_isOperator[controller][msg.sender]) revert INVALID_CALLER();
+        address sender = _msgSender();
+        if (controller != sender && !_isOperator[controller][sender]) revert INVALID_CALLER();
         shares = _withdraw(assets, receiver, controller);
     }
 
@@ -228,9 +286,10 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         // This corrects for the lag between settlement (assets move) and claim (shares mint/burn).
         uint256 effectiveSupply = totalSupply() + _unclaimedDepositShares - _unclaimedRedeemShares;
 
-        // Calculate the epoch rate (assets per share) using the total assets reported by the FundManager
-        uint256 epochRate =
-            effectiveSupply == 0 ? ASSETS_PER_SHARE_SCALE : _totalAssets.mulDiv(ASSETS_PER_SHARE_SCALE, effectiveSupply);
+        // Calculate the epoch rate (assets per share) with OZ-style virtual shares/assets:
+        // a donation-inflated NAV mostly dilutes into the virtual holder, so rounding a settling
+        // depositor's shares toward zero costs the attacker ~VIRTUAL_SHARES times the victim's loss.
+        uint256 epochRate = (_totalAssets + 1).mulDiv(ASSETS_PER_SHARE_SCALE, effectiveSupply + VIRTUAL_SHARES);
 
         uint256 closingEpoch = currentEpoch;
 
@@ -302,8 +361,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /// @inheritdoc IERC7540Operator
     function setOperator(address operator, bool approved) external returns (bool success) {
-        _isOperator[msg.sender][operator] = approved;
-        emit OperatorSet(msg.sender, operator, approved);
+        address sender = _msgSender();
+        _isOperator[sender][operator] = approved;
+        emit OperatorSet(sender, operator, approved);
         success = true;
     }
 
@@ -319,13 +379,19 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
     }
 
     /// @inheritdoc IStableYieldAsyncVault
+    function depositWitness(address controller) public pure returns (bytes32 witness) {
+        witness = keccak256(abi.encode(_DEPOSIT_WITNESS_TYPEHASH, controller));
+    }
+
+    /// @inheritdoc IStableYieldAsyncVault
     function getSnapshot() external view returns (Snapshot memory snapshot) {
         snapshot = _snapshot;
     }
 
     /**
      * @inheritdoc IERC4626
-     * @dev Uses the last settled epoch rate. Returns ASSETS_PER_SHARE_SCALE (1:1) before any epoch has settled.
+     * @dev Uses the last settled epoch rate. Before any epoch has settled, uses the empty-vault
+     *      bootstrap rate ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES (1 asset atom = 1e12 share atoms).
      */
     function convertToShares(uint256 assets) public view returns (uint256 shares) {
         uint256 rate = _lastSettledRate();
@@ -334,7 +400,8 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
 
     /**
      * @inheritdoc IERC4626
-     * @dev Uses the last settled epoch rate. Returns ASSETS_PER_SHARE_SCALE (1:1) before any epoch has settled.
+     * @dev Uses the last settled epoch rate. Before any epoch has settled, uses the empty-vault
+     *      bootstrap rate ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES (1 asset atom = 1e12 share atoms).
      */
     function convertToAssets(uint256 shares) public view returns (uint256 assets) {
         uint256 rate = _lastSettledRate();
@@ -461,6 +528,28 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         super._update(from, to, value);
     }
 
+    /**
+     * @dev Shared tail of both deposit-request entry points: accrues the controller's pending
+     *      assets (already custodied by the vault at this point) and emits {DepositRequest}.
+     */
+    function _recordDepositRequest(uint256 assets, address controller, address owner, address sender)
+        internal
+        returns (uint256 requestId)
+    {
+        ControllerState storage cs = _controllerStates[controller];
+
+        // Accrue the assets deposited by this controller
+        cs.pendingDepositAssets += assets;
+        totalPendingDepositAssets += assets;
+
+        // Record the epoch of this deposit request
+        cs.depositRequestEpoch = currentEpoch;
+
+        requestId = REQUEST_ID;
+
+        emit DepositRequest(controller, owner, requestId, sender, assets);
+    }
+
     function _deposit(uint256 assets, address receiver, address controller) internal returns (uint256 shares) {
         if (assets == 0) revert INVALID_PARAMETERS();
         (uint256 claimableAssets, uint256 claimableShares) = _resolveClaimableDeposit(controller);
@@ -544,12 +633,13 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         totalClaimableRedeemAssets -= assets;
         _burn(address(this), shares);
         underlyingAsset.safeTransfer(receiver, assets);
-        emit Withdraw(msg.sender, receiver, controller, assets, shares);
+        emit Withdraw(_msgSender(), receiver, controller, assets, shares);
     }
 
     /**
      * @dev Returns the exchange rate from the last settled epoch.
-     *      Before any epoch has settled, returns ASSETS_PER_SHARE_SCALE (1:1).
+     *      Before any epoch has settled, returns the empty-vault bootstrap rate
+     *      ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES.
      *      During close/settle window, falls back to the epoch before.
      */
     function _lastSettledRate() internal view returns (uint256 lastSettledRate) {
@@ -561,8 +651,9 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
         else if (currentEpoch >= 3 && isEpochSettled(currentEpoch - 2)) {
             lastSettledRate = _epochRate[currentEpoch - 2];
         } else {
-            // Bootstrap: no epochs settled yet
-            lastSettledRate = ASSETS_PER_SHARE_SCALE;
+            // Bootstrap: no epochs settled yet — matches the empty-vault closeEpoch rate,
+            // (0 + 1) * ASSETS_PER_SHARE_SCALE / (0 + VIRTUAL_SHARES)
+            lastSettledRate = ASSETS_PER_SHARE_SCALE / VIRTUAL_SHARES;
         }
     }
 
@@ -672,6 +763,24 @@ contract StableYieldAsyncVault is ERC20, IStableYieldAsyncVault {
             uint256 epochRate = _epochRate[redeemRequestEpoch];
             assets += pending.mulDiv(epochRate, ASSETS_PER_SHARE_SCALE);
         }
+    }
+
+    /**
+     * @dev EIP-2771: when called through the trusted Superfluid `ERC2771Forwarder` (a macro's
+     *      type-302 op), the real caller is recovered from the appended calldata; otherwise this is a
+     *      plain `msg.sender`. Resolves the {Context}/{ERC2771Context} diamond so ERC20 reads the
+     *      appended sender too.
+     */
+    function _msgSender() internal view override(Context, ERC2771Context) returns (address) {
+        return ERC2771Context._msgSender();
+    }
+
+    function _msgData() internal view override(Context, ERC2771Context) returns (bytes calldata) {
+        return ERC2771Context._msgData();
+    }
+
+    function _contextSuffixLength() internal view override(Context, ERC2771Context) returns (uint256) {
+        return ERC2771Context._contextSuffixLength();
     }
 
     //      __  ___          ___ _____

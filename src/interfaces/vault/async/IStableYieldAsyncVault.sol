@@ -128,6 +128,12 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      */
     error NOTHING_TO_CLAIM();
 
+    /**
+     * @notice Thrown when the constructor arguments describe an unsupported deployment
+     *         (e.g. a non-6-decimals underlying, which VIRTUAL_SHARES is hardcoded for).
+     */
+    error INVALID_CONFIGURATION();
+
     // ──────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────
@@ -166,6 +172,31 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
     //  These extend the 2-param ERC-4626 versions
     //  to support controller-based claiming.
     // ──────────────────────────────────────────────
+
+    /**
+     * @notice Submit a deposit request funded through a Permit2 `SignatureTransfer` — for one-tx
+     *         (or gasless, via a Superfluid ClearMacro relaying an EIP-2771 call) entry without a
+     *         prior ERC-20 approval of the vault.
+     * @dev The caller (`_msgSender()` — the vault is EIP-2771-aware) is the token owner whose
+     *      Permit2 signature is consumed; they become the request's `owner`. The signed permit must
+     *      name this vault as spender and carry the witness returned by {depositWitness} for
+     *      `controller`, binding the credited controller into the signature. The pull lands
+     *      directly in the vault's escrow, exactly like {requestDeposit}'s `safeTransferFrom`.
+     *      Reverts with EPOCH_SETTLEMENT_IN_PROGRESS while a snapshot is open.
+     * @param assets Underlying amount to pull and escrow (must equal the permitted amount).
+     * @param controller Controller credited with the pending deposit (claims it after settlement).
+     * @param nonce Permit2 unordered nonce of the signed permit.
+     * @param deadline Permit2 signature deadline.
+     * @param signature Permit2 `permitWitnessTransferFrom` signature by the caller.
+     * @return requestId Always 0 (single aggregated request per controller).
+     */
+    function requestDepositWithPermit2(
+        uint256 assets,
+        address controller,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (uint256 requestId);
 
     /**
      * @notice Claims shares from a claimable deposit request.
@@ -282,6 +313,25 @@ interface IStableYieldAsyncVault is IERC4626, IERC7540Deposit, IERC7540Redeem, I
      * @dev `snapshot.epoch == 0` means no epoch is currently in the close→settle window.
      */
     function getSnapshot() external view returns (Snapshot memory snapshot);
+
+    /**
+     * @notice The canonical Permit2 contract consumed by {requestDepositWithPermit2}.
+     */
+    function PERMIT2() external view returns (address);
+
+    /**
+     * @notice Witness type string a Permit2 deposit signature must be built with
+     *         (see {requestDepositWithPermit2}).
+     */
+    function DEPOSIT_WITNESS_TYPE_STRING() external view returns (string memory);
+
+    /**
+     * @notice EIP-712 struct hash of the Permit2 witness binding `controller` into a deposit
+     *         permit — sign `permitWitnessTransferFrom` with this witness and
+     *         {DEPOSIT_WITNESS_TYPE_STRING}.
+     * @param controller Controller to be credited by {requestDepositWithPermit2}.
+     */
+    function depositWitness(address controller) external pure returns (bytes32 witness);
 
     // ──────────────────────────────────────────────
     //  ERC-165

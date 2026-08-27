@@ -1,6 +1,85 @@
 # DEPLOYMENTS LOGS
 
-## SYNC VAULT final
+## ASYNC VAULT
+
+### POLYTHEME Vault rc2 
+
+
+Date: 20th July 2026
+Operator: 0xPilou
+
+
+```shell
+forge script script/async/DeployAsync.s.sol:DeployAsync --rpc-url $POLYGON_MAINNET_RPC_URL --account TEST_IN_PROD_DEPLOYER --verify --broadcast
+[⠊] Compiling...
+[⠔] Compiling 3 files with Solc 0.8.34
+[⠒] Solc 0.8.34 finished in 1.40s
+Compiler run successful!
+Enter keystore password:
+Script ran successfully.
+
+== Logs ==
+  
+  ===> DEPLOYMENT CONFIGURATION
+   --- Treasury                      : 0xac808840f02c47C05507f48165d2222FF28EF4e1
+   --- Underlying Asset              : 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB
+   --- Yield Asset                   : 0x3aDf5b0Fab6bDF9De34DF3035826470d516F3066
+   --- Fund Operator                 : 0xF9c355002585Cab21AC34aD60FFfB0776657e38F
+   --- Fund Admin                    : 0xdc36265ca4505021250F02d3b711Dd9e9F23aD3D
+   --- Initial Era Stable Yield Rate : 500
+   --- Guaranteed Flow Duration      : 604800
+   --- Share Name                    : PT Share v0.2
+   --- Share Symbol                  : Polytheme Share v0.2
+  
+  ===> STARTING STRATEGY DEPLOYMENT :
+   --- Chain ID          :    137
+   --- Deployer address  :    0xdc36265ca4505021250F02d3b711Dd9e9F23aD3D
+  
+  
+  ===> DEPLOYMENT RESULTS
+   --- Async Fund Manager    : 0x4D2604d539fCFa6BC8a3B7DB2282F84b56e8CeA8
+   --- Async Vault           : 0x0cEE806c01F9F261808CdEbc125818Dd7af3e887
+   --- Async Vault Macro     : 0x683a25bEeFC58a74f232030d1968bF0396e4784d
+  
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 137
+
+Estimated gas price: 710.900336132 gwei
+
+Estimated total gas used for script: 12408321
+
+Estimated amount required: 8.821079569733754372 POL
+
+==========================
+
+##### polygon
+✅  [Success] Hash: 0xbc4d3878e281df3862aea3862bb077b62e190648cd55c933a4261f862b322747
+Contract Address: 0x0cEE806c01F9F261808CdEbc125818Dd7af3e887
+Block: 90553784
+Paid: 2.972209884247400548 POL (6806924 gas * 436.645081427 gwei)
+
+
+##### polygon
+✅  [Success] Hash: 0xd4518611acefed2fe5b80261ed48fa49190a9ee8f8c185cbbf399f02293b4226
+Contract Address: 0x683a25bEeFC58a74f232030d1968bF0396e4784d
+Block: 90553784
+Paid: 1.320580214721108833 POL (3024379 gas * 436.645081427 gwei)
+
+✅ Sequence #1 on polygon | Total Paid: 4.292790098968509381 POL (9831303 gas * avg 436.645081427 gwei)
+                                                                                                                                                                                                                                                                            
+
+==========================
+
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+```
+
+## SYNC VAULT
+
+### SYNC VAULT final
 
 Date: 26th June 2026
 Operator: 0xPilou
@@ -73,7 +152,7 @@ Paid: 0.000080540805744469 ETH (1809157 gas * 0.044518417 gwei)
 ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
 ```
 
-## SYNC VAULT rc3 
+### SYNC VAULT rc3 
 
 Date: 25th June 2026
 Operator: 0xPilou
@@ -148,7 +227,7 @@ Paid: 0.000010402649131686 ETH (1809157 gas * 0.005749998 gwei)
 ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
 ```
 
-## SYNC VAULT rc2
+### SYNC VAULT rc2
 
 Date: 22nd June 2026
 Operator: 0xPilou
@@ -224,7 +303,7 @@ ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
 ```
 
 
-## SYNC VAULT rc1
+### SYNC VAULT rc1
 
 Date: 19th June 2026
 Operator: 0xPilou
@@ -296,7 +375,7 @@ Paid: 0.000007091469 ETH (1289358 gas * 0.0055 gwei)
 ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
 ```
 
-## SYNC VAULT rc0
+### SYNC VAULT rc0
 
 ```shell
 forge script script/sync/DeploySync.s.sol:DeploySync --rpc-url $BASE_MAINNET_RPC_URL --account TEST_IN_PROD_DEPLOYER --broadcast --verify

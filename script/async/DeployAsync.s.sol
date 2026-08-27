@@ -57,6 +57,7 @@ contract DeployAsync is Script {
         console.log("===> DEPLOYMENT RESULTS");
         console.log(" --- Async Fund Manager    :", result.fundManager);
         console.log(" --- Async Vault           :", result.vault);
+        console.log(" --- Async Vault Macro     :", result.vaultMacro);
         console.log("");
     }
 

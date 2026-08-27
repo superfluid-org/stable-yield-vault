@@ -31,16 +31,16 @@ library NetworkConfig {
      */
     function getPolygonMainnetConfig() internal pure returns (DeploymentConfig memory) {
         return DeploymentConfig({
-            treasury: address(0),
-            underlyingAsset: address(0),
-            yieldAsset: address(0),
-            externalVault: address(0),
-            fundOperator: address(0),
-            fundAdmin: address(0),
-            initialEraStableYieldRate: 0,
-            guaranteedFlowDuration: 0,
-            shareName: "",
-            shareSymbol: ""
+            treasury: 0xac808840f02c47C05507f48165d2222FF28EF4e1, // SF DAO Multisig
+            underlyingAsset: 0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB, // pUSD
+            yieldAsset: 0x3aDf5b0Fab6bDF9De34DF3035826470d516F3066, // pUSDx
+            externalVault: address(0), // No external vault for Polytheme contract
+            fundOperator: 0xF9c355002585Cab21AC34aD60FFfB0776657e38F,
+            fundAdmin: 0xdc36265ca4505021250F02d3b711Dd9e9F23aD3D,
+            initialEraStableYieldRate: 500,
+            guaranteedFlowDuration: 7 days,
+            shareName: "PT Share v0.2",
+            shareSymbol: "Polytheme Share v0.2"
         });
     }
 
