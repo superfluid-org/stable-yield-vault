@@ -464,6 +464,8 @@ contract StableYieldAsyncVaultTest is AsyncVaultTestBase {
     function test_claimDeposit_revertsOnInvalidController(uint256 depositAmount, address invalidController) public {
         depositAmount = bound(depositAmount, 2, ONE_BILLION * 1e6);
         vm.assume(invalidController != ALICE);
+        // Pranking as the trusted forwarder makes `_msgSender()` read the appended calldata (= `owner`).
+        vm.assume(invalidController != _vault.trustedForwarder());
 
         _prepareForDeposit(ALICE, depositAmount);
         _requestDeposit(ALICE, depositAmount);
@@ -544,6 +546,8 @@ contract StableYieldAsyncVaultTest is AsyncVaultTestBase {
     function test_mint_revertsOnInvalidController(uint256 depositAmount, address invalidController) public {
         depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
         vm.assume(invalidController != ALICE);
+        // Pranking as the trusted forwarder makes `_msgSender()` read the appended calldata (= `owner`).
+        vm.assume(invalidController != _vault.trustedForwarder());
 
         _prepareForDeposit(ALICE, depositAmount);
         _requestDeposit(ALICE, depositAmount);
@@ -634,6 +638,8 @@ contract StableYieldAsyncVaultTest is AsyncVaultTestBase {
     function test_redeem_revertsOnInvalidController(uint256 depositAmount, address invalidController) public {
         depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
         vm.assume(invalidController != ALICE);
+        // Pranking as the trusted forwarder makes `_msgSender()` read the appended calldata (= `owner`).
+        vm.assume(invalidController != _vault.trustedForwarder());
 
         _completeDepositFlow(ALICE, depositAmount);
         uint256 aliceShares = _vault.balanceOf(ALICE);
@@ -665,6 +671,8 @@ contract StableYieldAsyncVaultTest is AsyncVaultTestBase {
     function test_withdraw_revertsOnInvalidController(uint256 depositAmount, address invalidController) public {
         depositAmount = bound(depositAmount, 1, ONE_BILLION * 1e6);
         vm.assume(invalidController != ALICE);
+        // Pranking as the trusted forwarder makes `_msgSender()` read the appended calldata (= `owner`).
+        vm.assume(invalidController != _vault.trustedForwarder());
 
         _completeDepositFlow(ALICE, depositAmount);
         uint256 aliceShares = _vault.balanceOf(ALICE);

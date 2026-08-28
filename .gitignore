@@ -2,6 +2,9 @@
 cache/
 out/
 
+# Coverage
+lcov.info
+
 # Echidna
 crytic-export/
 echidna-corpus/
@@ -12,6 +15,10 @@ echidna-coverage/
 /broadcast/*/31337/
 /broadcast/**/dry-run/
 
-
 # Dotenv file
 .env
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
