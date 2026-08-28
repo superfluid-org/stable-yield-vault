@@ -54,7 +54,7 @@ Both share the streaming engine in [`src/common/FundManagerBase.sol`](src/common
 | Family | Network | Vault | Underlying |
 |---|---|---|---|
 | Sync | Base (8453) | [`0x8C60503C0353ED12c3Eebc3036BF033A3BbB95Aa`](https://basescan.org/address/0x8C60503C0353ED12c3Eebc3036BF033A3BbB95Aa) | USDC → Morpho Vault V2 |
-| Async | Polygon (137) | [`0x0cEE806c01F9F261808CdEbc125818Dd7af3e887`](https://polygonscan.com/address/0x0cEE806c01F9F261808CdEbc125818Dd7af3e887) | pUSD |
+| Async | Polygon (137) | [`0x0cEE806c01F9F261808CdEbc125818Dd7af3e887`](https://polygonscan.com/address/0x0cEE806c01F9F261808CdEbc125818Dd7af3e887) | pUSD -> Polytheme |
 
 Full address tables (FundManagers, macros, superseded release candidates) in
 [`docs/deployments.md`](docs/deployments.md).

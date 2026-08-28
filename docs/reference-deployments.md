@@ -1,4 +1,4 @@
-# Deployments
+# Reference Deployments
 
 All deployments so far are **technical demos** operated with EOA keys — see the
 [trust assumptions](../README.md#trust-assumptions). Addresses are checksummed; raw
