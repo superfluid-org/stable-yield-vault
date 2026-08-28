@@ -1,5 +1,8 @@
 # Entry Point Map
 
+> **Internal pre-audit entry-point map — not a third-party audit.** This document was produced in-house (AI-assisted review / fuzzing) as pre-audit preparation and is published for transparency. It is a point-in-time snapshot (commit `ba1cc7e`, 2026-06-05 — predates the `FundManager` split, EIP-2771/Permit2 support and the macro contracts); findings marked *Status* below have been reconciled against the current code, everything else may be stale (line numbers in particular). It has not been reviewed by an independent security firm. See [`SECURITY.md`](../../../../SECURITY.md).
+
+
 > Stable Yield Async Vault | 21 entry points | 9 permissionless | 11 role-gated | 1 admin-only
 
 ---
@@ -253,7 +256,7 @@
 | Parameters | `amount` (operator-provided) |
 | Call chain | `→ UNDERLYING_ASSET.safeTransfer(operator, amount)` |
 | State modified | FM underlying balance |
-| Value flow | underlying: `FM → operator` (no solvency check; coordinator responsibility per `docs/invariants.md` §E.5) |
+| Value flow | underlying: `FM → operator` (no solvency check; coordinator responsibility per [`../../invariants.md`](../../invariants.md) §E.5) |
 | Reentrancy guard | yes |
 
 #### `FundManager.setStableYieldRate(newRate)`

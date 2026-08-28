@@ -1,5 +1,7 @@
 # Echidna smoke report — Sync vault (2026-06-08)
 
+> **Internal fuzzing report — not a third-party audit.** This document was produced in-house (AI-assisted review / fuzzing) as pre-audit preparation and is published for transparency. It is a point-in-time snapshot (2026-06-08); findings marked *Status* below have been reconciled against the current code, everything else may be stale (line numbers in particular). It has not been reviewed by an independent security firm. See [`SECURITY.md`](../../../SECURITY.md).
+
 Harness: `test/echidna/EchidnaStableYieldSyncVault.sol` (`EchidnaStableYieldSyncVault`)
 Config: `echidna.sync.yaml` · profile `FOUNDRY_PROFILE=echidna` · `make echidna-sync-smoke`
 Campaign: assertion mode, `testLimit = 50,000`, `seqLen 100`, 4 workers, `maxTimeDelay 6h` / `maxBlockDelay 10`, coverage ~70,127 instructions, corpus seeded from `echidna-corpus/sync/` (3 prior reproducers + 10 coverage seqs).

@@ -1,5 +1,7 @@
 # Echidna smoke report — Async vault (2026-06-05)
 
+> **Internal fuzzing report — not a third-party audit.** This document was produced in-house (AI-assisted review / fuzzing) as pre-audit preparation and is published for transparency. It is a point-in-time snapshot (2026-06-05); findings marked *Status* below have been reconciled against the current code, everything else may be stale (line numbers in particular). It has not been reviewed by an independent security firm. See [`SECURITY.md`](../../../SECURITY.md).
+
 Harness: `test/echidna/EchidnaStableYieldAsyncVault.sol` (`EchidnaStableYieldAsyncVault`)
 Config: `echidna.async.yaml` · profile `FOUNDRY_PROFILE=echidna` · `make echidna-async-smoke`
 Campaign: assertion mode, 50,151 tx, seqLen 100, 3 senders, coverage 76,261 instructions.
@@ -13,7 +15,7 @@ Campaign: assertion mode, 50,151 tx, seqLen 100, 3 senders, coverage 76,261 inst
 
 Falsified: `settle_epoch`, `set_stable_yield_rate`, `set_guaranteed_flow_duration`, `ensure_yield_flow_duration`, `request_redeem`.
 
-**None of these is a fund-loss bug.** Four are the same documented forward-solvency spec/recovery gap (Finding **F-3**); one is a GDA `int96` flow-rate rounding edge (same class as Finding **F-2**). Both are pre-existing and documented in `docs/async-vault/audit/echidna-findings.md`; neither is related to the 2026-06-05 echidna-harness refactor/rename (the harness logic — handlers, `_check`, `_assertForwardSolvency` — was not changed, only the shared bootstrap was extracted into `test/echidna/base/EchidnaVaultHarnessBase.sol`).
+**None of these is a fund-loss bug.** Four are the same documented forward-solvency spec/recovery gap (Finding **F-3**); one is a GDA `int96` flow-rate rounding edge (same class as Finding **F-2**). Both are pre-existing and documented in [`echidna-findings.md`](./echidna-findings.md); neither is related to the 2026-06-05 echidna-harness refactor/rename (the harness logic — handlers, `_check`, `_assertForwardSolvency` — was not changed, only the shared bootstrap was extracted into `test/echidna/base/EchidnaVaultHarnessBase.sol`).
 
 ---
 

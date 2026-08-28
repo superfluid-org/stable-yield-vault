@@ -72,7 +72,7 @@ OZ `ERC4626` + `ReentrancyGuard`. No epoch machinery; ERC-7540/7575 dropped enti
 - Underlying (e.g. USDC) is upgraded to a Superfluid super-token (`YIELD_ASSET`, e.g. USDCx) and held as a "yield reserve."
 - `_flowRatePerUnit = SCALING_FACTOR · stableYieldRate / (YEAR · BP_DENOMINATOR)`. Total flow = `_flowRatePerUnit · POOL.getTotalUnits()`.
 - `guaranteedFlowDuration` is the forward-solvency horizon: FM rebalances yield-asset balance so the stream is funded for at least that long. `MIN_GUARANTEED_FLOW_DURATION = 1 days` is a sanity floor.
-- `SCALING_FACTOR = 10 ** (18 − underlyingDecimals)` lifts underlying amounts into 18-dec super-token amounts. Supported underlying decimals are `[6, 18]` (constructor reverts `UNSUPPORTED_DECIMALS` otherwise); the hard-coded `1e12 = SCALING_FACTOR · RAW_PER_UNIT` and the 18-dec edge need review for a non-6-dec underlying (see `docs/sync-vault/open-questions.md`).
+- `SCALING_FACTOR = 10 ** (18 − underlyingDecimals)` lifts underlying amounts into 18-dec super-token amounts. `FundManagerBase` computes these generically for decimals in `[6, 18]` (`UNSUPPORTED_DECIMALS` otherwise), but **both vault constructors pin the underlying to exactly 6 decimals** (`INVALID_CONFIGURATION`) — the hard-coded `1e12 = SCALING_FACTOR · RAW_PER_UNIT`, the share `_decimalsOffset() = 12` and the async `VIRTUAL_SHARES = 1e12` all assume a 6-dec (USDC-like) underlying.
 - Async-only operator capital management: `give` / `take` deploy unutilized assets externally; the returned value is reported back via `workingAssets` on the next `closeEpoch`. The sync vault replaces this leg with the external ERC-4626.
 
 ### Shares & roles

@@ -1,5 +1,8 @@
 # X-Ray Report
 
+> **Internal pre-audit readiness report — not a third-party audit.** This document was produced in-house (AI-assisted review / fuzzing) as pre-audit preparation and is published for transparency. It is a point-in-time snapshot (commit `ba1cc7e`, 2026-06-05 — before the `FundManager` → `FundManagerBase`/`AsyncFundManager` split, the `VIRTUAL_SHARES` inflation fix, EIP-2771/Permit2 support and the macro contracts); findings marked *Status* below have been reconciled against the current code, everything else may be stale (line numbers in particular). It has not been reviewed by an independent security firm. See [`SECURITY.md`](../../../../SECURITY.md).
+
+
 > Stable Yield Async Vault | 572 nSLOC | ba1cc7e (`feat/test-coverage`) | Foundry (solc 0.8.34) | 06/05/26
 
 Analyzed branch: `feat/test-coverage` at `ba1cc7e`.
@@ -84,7 +87,7 @@ Operator.give(amount)  → safeTransferFrom(operator → FM)              *depos
 Operator.take(amount)  → safeTransfer(FM → operator)                  *deploy capital externally; no solvency check*
 ```
 
-`give` / `take` are not gated by the epoch lifecycle and bypass any solvency precondition. The operator alone is responsible for sequencing them with `canSettleEpoch` / `evaluateFunding` (per E.5 in `docs/invariants.md`).
+`give` / `take` are not gated by the epoch lifecycle and bypass any solvency precondition. The operator alone is responsible for sequencing them with `canSettleEpoch` / `evaluateFunding` (per E.5 in [`../../invariants.md`](../../invariants.md)).
 
 #### Yield-flow rebalancing
 
@@ -136,10 +139,10 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 
 - **`FUND_OPERATOR_ROLE` compromise — full operational blast radius.** A single compromised operator key can: (a) drain the FundManager via `take(amount)` (`FundManager.sol:198`) with no solvency check or epoch-state gate; (b) mis-report NAV through `closeEpoch(workingAssets)` (`FundManager.sol:156`) to set an arbitrary epoch rate; (c) flip `stableYieldRate` every block (`FundManager.sol:204`, `FIXME` flags missing minimum era duration), draining the SuperToken reserve faster than the duration horizon promises; (d) call `give` or `take` between `closeEpoch` and `settleEpoch`, which can either (i) make `settleEpoch` revert with `INSUFFICIENT_ASSETS_IN_FUND_MANAGER` (denying settlement) or (ii) require a re-rebalance after settle.
 - **NAV-manipulation through `workingAssets` — rate-locking attack on requests-in-flight.** The operator chooses `workingAssets` at `closeEpoch` (`FundManager.sol:158`); the vault formula is `totalAssets = workingAssets + unutilizedAssetsBalance() + scaledYieldAssetsBalance()`, of which only the first term is operator-controlled. With no oracle and no on-chain truth for working capital, the operator can re-price both depositors and redeemers in either direction relative to true fair value, since they all settle at the same locked `epochRate`.
-- **Zero-NAV permanently freezes deposits in the closing epoch.** `onCloseEpoch` does not reject `_totalAssets == 0`. With `effectiveSupply > 0`, `epochRate = 0`, and any subsequent `_settleDepositIfNeeded` call divides by zero in `pendingAssets.mulDiv(1e18, 0)` (`StableYieldAsyncVault.sol:582`). Documented in `docs/invariants.md` §B.4 as an unfixed soft-DoS path.
+- **Zero-NAV permanently freezes deposits in the closing epoch.** `onCloseEpoch` does not reject `_totalAssets == 0`. With `effectiveSupply > 0`, `epochRate = 0`, and any subsequent `_settleDepositIfNeeded` call divides by zero in `pendingAssets.mulDiv(1e18, 0)` (`StableYieldAsyncVault.sol:582`). Documented in [`../../invariants.md`](../../invariants.md) §B.4 as an unfixed soft-DoS path.
 - **No separate preflight forward-solvency check on rate/duration changes.** `setStableYieldRate` and `setGuaranteedFlowDuration` rely on `_rebalanceYieldAssets` to maintain the reserve horizon. If the required upgrade cannot be funded, the path reverts with `INSUFFICIENT_UNUTILIZED_ASSETS`; otherwise the change is accepted without a distinct post-state invariant assertion.
 - **First-epoch / empty-vault rate handling.** `_lastSettledRate` returns `1e18` until any epoch is settled (`StableYieldAsyncVault.sol:551–562`); `effectiveSupply == 0` short-circuits to `1e18`. The first depositor's claim rate is therefore deterministic, but the value of those shares relative to NAV is set by whatever `workingAssets` the operator reports at the first `closeEpoch`. Trace the empty-vault → first-deposit → first-redeem path under different operator-reported NAV scenarios.
-- **`int96` / `uint128` truncation in flow-rate and unit math.** `_flowRatePerUnit · totalUnits` is cast to `int96` for `distributeFlow` (`FundManager.sol:401–402`) with no bounds check; pool unit deltas are cast to `uint128` (`FundManager.sol:267, 270, 405–407`). Combined with operator-controlled rate, large pool size + high rate could overflow silently per `docs/invariants.md` §H.1, §H.2.
+- **`int96` / `uint128` truncation in flow-rate and unit math.** `_flowRatePerUnit · totalUnits` is cast to `int96` for `distributeFlow` (`FundManager.sol:401–402`) with no bounds check; pool unit deltas are cast to `uint128` (`FundManager.sol:267, 270, 405–407`). Combined with operator-controlled rate, large pool size + high rate could overflow silently per [`../../invariants.md`](../../invariants.md) §H.1, §H.2.
 - **Decimals-clipping `+1` behavior.** `_rebalanceYieldAssets` adds `+1` to the upgrade amount (`FundManager.sol:387`) and `evaluateFunding` adds `+1` on the deficit branch (`FundManager.sol:317`) to cover sub-atom rounding. Verify both behave correctly when the deficit is exactly representable (no over-upgrade) and at the underlying-decimals boundary (6 vs 18).
 - **Round-trip rate divergence between `onCloseEpoch` and `onSettleEpoch`.** Rate is computed at close via `totalAssets · 1e18 / effectiveSupply` then applied at settle via `redeemingShares · rate / 1e18` and `depositingAssets · 1e18 / rate` — three separate divisions with floor rounding. `_unclaimedDepositShares` is incremented by `depositingAssets · 1e18 / rate` (`StableYieldAsyncVault.sol:275`) which can drift from the per-controller `pendingAssets · 1e18 / epochRate` lazy-settle math (`StableYieldAsyncVault.sol:582`). Audit whether the dust accumulation can cause `_unclaimedDepositShares` underflow in `_claimDeposit`.
 - **`onSettleEpoch` callback ordering with FM state.** `FundManager.settleEpoch` is `nonReentrant` but calls back into the vault, which then calls back into FM on the deficit path (`safeTransferFrom(FM, vault, deficit)` consuming the unlimited approval set in the FM constructor). FM is `ReentrancyGuard`; the `transferFrom` itself doesn't re-enter, but verify the assumption holds across SuperToken / underlying token implementations.
@@ -147,7 +150,7 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 ### Protocol-Type Concerns
 
 **As a Yield Aggregator / Vault:**
-- Share-price rounding: `_deposit` floors shares (`StableYieldAsyncVault.sol:463`), `_withdraw` ceils shares (`:487`), `_mintShares` ceils assets (`:471`), `_redeem` floors assets (`:478`). Per `docs/invariants.md` §H.3 this is asymmetric in the vault's favor; verify the asymmetry compounds rather than cancels across deposit→redeem round trips.
+- Share-price rounding: `_deposit` floors shares (`StableYieldAsyncVault.sol:463`), `_withdraw` ceils shares (`:487`), `_mintShares` ceils assets (`:471`), `_redeem` floors assets (`:478`). Per [`../../invariants.md`](../../invariants.md) §H.3 this is asymmetric in the vault's favor; verify the asymmetry compounds rather than cancels across deposit→redeem round trips.
 - `convertToShares(convertToAssets(s))` and the inverse: both use `_lastSettledRate()` at *current* call time but the round-trip preservation invariant from ERC-4626 is undefined for a forward-priced async vault. Behavior across an epoch boundary is unspecified.
 - `totalAssets()` returns `_lastReportedTotalAssets` (`StableYieldAsyncVault.sol:391–393`) — stale between settlements. Any integrator relying on it for real-time NAV will read a value that is off by up to one full epoch.
 
@@ -198,7 +201,7 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 
 ### Stated Invariants
 
-`docs/invariants.md` enumerates 35+ invariants across A–H sections. Audit-relevant highlights:
+[`../../invariants.md`](../../invariants.md) enumerates 35+ invariants across A–H sections. Audit-relevant highlights:
 
 - **A.1 — Vault underlying balance partition** (`underlyingAsset.balanceOf(vault) == totalPendingDepositAssets + totalClaimableRedeemAssets`). `StableYieldAsyncVault.sol:67–72`. Holds at quiescent state only; out-of-band transfers in violate one direction.
 - **A.3 — Single-snapshot serialization** (`_snapshot.epoch == 0 ⇔ no epoch in close→settle window`). `StableYieldAsyncVault.sol:128, 176, 220, 252, 289`.
@@ -207,7 +210,7 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 - **C.1 — Share transfers re-balance GDA pool units**. `StableYieldAsyncVault.sol:464–471` hooks ERC-20 transfers and calls `FundManager.onShareTransfer`, which moves a proportional slice of the sender's GDA pool units to the receiver (`AsyncFundManager.sol:277–285`). Mint/burn and vault-custody legs are skipped.
 - **D.1 — Yield stream commences at claim, not at request**. `FundManager.sol:243–251`.
 - **D.2 — Yield stream stops at requestRedeem, not at claim**. `FundManager.sol:254–273`.
-- **D.5 — Forward-solvency horizon** (`yieldAssetsBalance() ≥ targetFlowRate · guaranteedFlowDuration`). `FundManager.sol:322–328, 331–361, 382–399`. Per `docs/invariants.md` §D.5 caveat — only enforced via `canSettleEpoch` (pre-settle) and `_rebalanceYieldAssets` revert on missing underlying; no preflight on rate / duration setter.
+- **D.5 — Forward-solvency horizon** (`yieldAssetsBalance() ≥ targetFlowRate · guaranteedFlowDuration`). `FundManager.sol:322–328, 331–361, 382–399`. Per [`../../invariants.md`](../../invariants.md) §D.5 caveat — only enforced via `canSettleEpoch` (pre-settle) and `_rebalanceYieldAssets` revert on missing underlying; no preflight on rate / duration setter.
 - **F.5 — Vault/FM pair pinning is immutable** (no factory, no role re-grant path).
 - **H.3 — Rate rounding favors vault on every path**.
 
@@ -225,10 +228,10 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 |--------|--------|-------|
 | README | Present | `README.md` at repo root |
 | NatSpec | Thorough | Every external/public on impls + interfaces; `@inheritdoc` used throughout |
-| Spec/Whitepaper | Present | `docs/invariants.md` (per spec); `docs/flow/{deposit,redeem,settlement}-flow.md`; `docs/glossary.md` |
+| Spec/Whitepaper | Present | [`../../invariants.md`](../../invariants.md) (per spec); `docs/flow/{deposit,redeem,settlement}-flow.md`; `docs/glossary.md` |
 | Inline Comments | Adequate | Section banners (ASCII art) demarcate Storage/Constructor/External/View/Internal/Modifiers; rate-derivation comments explain decimals math |
 
-The `docs/invariants.md` document is unusually complete for a POC and self-flags four `FIXME` items (§I), making it both a spec and an audit pre-brief.
+The [`../../invariants.md`](../../invariants.md) document is unusually complete for a POC and self-flags four `FIXME` items (§I), making it both a spec and an audit pre-brief.
 
 ---
 
@@ -258,9 +261,9 @@ The `docs/invariants.md` document is unusually complete for a POC and self-flags
 
 ### Gaps
 
-- **No stateful invariant testing.** `docs/invariants.md` enumerates 35+ properties but none are encoded as `invariant_*` Foundry handlers, Echidna/Medusa harnesses, or Certora rules. A.1 (balance partition), B.3 (`canSettleEpoch` strict precondition), D.5 (forward-solvency horizon), and H.1 / H.2 (`int96` / `uint128` overflow) are all amenable to property-based fuzzing and would meaningfully widen the assurance envelope beyond the current example-based coverage.
+- **No stateful invariant testing.** [`../../invariants.md`](../../invariants.md) enumerates 35+ properties but none are encoded as `invariant_*` Foundry handlers, Echidna/Medusa harnesses, or Certora rules. A.1 (balance partition), B.3 (`canSettleEpoch` strict precondition), D.5 (forward-solvency horizon), and H.1 / H.2 (`int96` / `uint128` overflow) are all amenable to property-based fuzzing and would meaningfully widen the assurance envelope beyond the current example-based coverage.
 - **No fork tests.** Behavior against the production Superfluid framework, real USDC (with proxy upgrades, blocklist, fee semantics), and live network conditions is not exercised.
-- **`give`/`take` interaction with the close→settle window** is documented in `docs/invariants.md` §E.5 as an operator-coordination requirement but not directly fuzzed.
+- **`give`/`take` interaction with the close→settle window** is documented in [`../../invariants.md`](../../invariants.md) §E.5 as an operator-coordination requirement but not directly fuzzed.
 
 ---
 
@@ -349,7 +352,7 @@ There is also a dead statement at `FundManager.sol:246` — `_toUnit(depositAsse
 - `StableYieldAsyncVault.sol` is the highest-churn file (35 modifications) **and** carries the most security-critical state (`_snapshot`, `_epochRate`, `_unclaimedDepositShares`, `_unclaimedRedeemShares`). Prioritize the close→settle→claim path for review — this is where the §A.4/§A.5 lag-correction math meets recent edits.
 - `access_control` and `fund_flows` security areas have the same 53-commit count, with overlap on `FundManager.sol`. The `give`/`take`/`setStableYieldRate` cluster — flagged in Section 2 as the operator's largest blast radius — is precisely the code that has been edited the most.
 - HEAD's `fix: generalize flowRatePerUnit formula` (D.4) lands one day before this audit, on a math-heavy path with no stateful fuzz coverage. Section 5's "no stateful fuzz on rate/horizon math" gap intersects directly with the latest unreviewed change.
-- Three of four `FIXME` markers (`FundManager.sol:205, 323, 347`) sit at exactly the locations where `docs/invariants.md` §I.1, §I.3, §I.6, §I.7 acknowledge unfinished enforcement — they are not stray comments, they are the documented known gaps.
+- Three of four `FIXME` markers (`FundManager.sol:205, 323, 347`) sit at exactly the locations where [`../../invariants.md`](../../invariants.md) §I.1, §I.3, §I.6, §I.7 acknowledge unfinished enforcement — they are not stray comments, they are the documented known gaps.
 
 ---
 
@@ -363,5 +366,5 @@ Lowest tier across Tests (ADEQUATE — unit + stateless fuzz, 100% line coverage
 1. 572 nSLOC across 2 in-scope contracts; pinned 1:1 at construction (no factory, no proxy, no migration path).
 2. 100 test functions, 100% line coverage and 95–100% branch coverage on `src/`; 0 stateful fuzz, 0 formal verification, 0 fork tests.
 3. Single developer, 100 commits over 36 days, 1 merge commit; 53-commit churn each on `access_control` and `fund_flows` security areas.
-4. 4 self-flagged `FIXME` markers; 3 sit in security-critical FundManager paths corresponding to documented gaps in `docs/invariants.md` §I.
+4. 4 self-flagged `FIXME` markers; 3 sit in security-critical FundManager paths corresponding to documented gaps in [`../../invariants.md`](../../invariants.md) §I.
 5. No oracle, no governance, no upgradeability — but operator-reported NAV (`workingAssets`) and operator-set yield rate are the protocol's two main truth sources, both instant and unbounded.

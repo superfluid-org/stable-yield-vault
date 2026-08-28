@@ -3,12 +3,17 @@
 Design and policy questions still open for the sync vault (`StableYieldSyncVault` +
 `SyncFundManager`). Each is tagged:
 
-- **[DECIDE]** — a policy question to resolve before it can be encoded or tested.
-- **[FIX]** — a concrete code change that has been decided but not yet made.
+- **[DECIDE]** — a policy question still open.
+- **[RESOLVED]** — settled (by a code change or an explicit decision); kept for the record.
 
 ---
 
-## [DECIDE] Minimum deposit / dust shares
+## [RESOLVED] Minimum deposit / dust shares
+
+> **Resolved by the 6-decimal pin.** The vault constructor requires a 6-decimal underlying
+> (`INVALID_CONFIGURATION` otherwise), so `RAW_PER_UNIT == 1` and every atom of net
+> principal maps to a pool unit. The zero-unit tolerance in `onWithdraw` / `onShareTransfer`
+> remains as defence in depth.
 
 `_toUnit` floors underlying into pool units:
 
@@ -43,14 +48,20 @@ reading, not liveness.
 
 The operator can change `stableYieldRate` every block. There is no minimum era boundary.
 
-### Approches : 
-- Either add guard on the setter
-- Or build an intermediary contract (that owns the FUND_OPERATOR_ROLE) and that build that custom logic that enfore the stable yield duration . 
+Two possible approaches:
+
+- add a minimum-era guard to `setStableYieldRate` itself, or
+- keep the setter as is and put an intermediary contract (holding `FUND_OPERATOR_ROLE`) in
+  front of it that enforces the era cadence off-core.
 
 **Question.** Enforce a minimum era duration (fixed era boundaries), or keep fully
 discretionary real-time rate adjustment? (Same question as the async vault.)
 
-## [DECIDE] Non-6-decimal underlying
+## [RESOLVED] Non-6-decimal underlying
+
+> **Resolved: not supported.** Both vault constructors revert `INVALID_CONFIGURATION` unless
+> the underlying has exactly 6 decimals. Supporting another decimal count would require
+> revisiting the points below; until then the pin makes them moot.
 
 `SCALING_FACTOR = 10 ** (18 − d)`, `RAW_PER_UNIT = 10 ** (d − 6)`, the hard-coded
 `1e12 = SCALING_FACTOR · RAW_PER_UNIT`, and the share `_decimalsOffset() = 12` all target
@@ -64,7 +75,7 @@ underlying needs review:
 **Question.** Decide the offset and scaling policy before deploying with a non-6-decimal
 underlying.
 
-## [DECIDE] Operator liveness — no permissionless backstop
+## [RESOLVED] Operator liveness — no permissionless backstop
 
 The only reserve-poking entry point between user activity is the operator-gated
 `ensureYieldFlowDuration()` (there is no permissionless `harvest()`). Per-op hooks keep the

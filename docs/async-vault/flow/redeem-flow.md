@@ -163,7 +163,7 @@ If a top-up is needed:
 
 The redeem deficit is exact at this point. Separately, `canSettleEpoch`
 also checks the post-settlement yield-asset reserve; the GDA buffer caveat
-from `docs/invariants.md` D.5 still applies to that reserve.
+from [`../invariants.md`](../invariants.md) D.5 still applies to that reserve.
 
 ### Phase 3: settleEpoch (net flows)
 

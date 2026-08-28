@@ -34,11 +34,13 @@ sequenceDiagram
     participant POOL as GDA Pool
 
     I->>V: deposit(assets, receiver)
-    Note right of V: nonReentrant — maxDeposit binary via FM.canDepositExternal() (gate views)
-    V->>FM: safeTransferFrom underlying (caller → FM)
+    Note right of V: nonReentrant · whenDepositable — maxDeposit binary via FM.canDepositExternal() (gate views)
+    V->>V: net = assets − DEPOSIT_FEE  %% reverts DEPOSIT_BELOW_FEE if assets ≤ fee
+    V-->>I: safeTransferFrom DEPOSIT_FEE (caller → TREASURY)
+    V->>FM: safeTransferFrom net underlying (caller → FM)
     V->>V: _mint(receiver, shares)
-    Note right of V: shares ≈ assets (NAV-neutral entry)
-    V->>FM: onDeposit(receiver, assets)
+    Note right of V: shares ≈ net (NAV-neutral entry)
+    V->>FM: onDeposit(receiver, net)
     FM->>POOL: increaseMemberUnits(receiver, _toUnit(assets))
     FM->>FM: _rebalanceYieldAssets()  %% top up the reserve from the external position (deficit only)
     FM->>FM: _upgrade(min(max(deficit / SCALING_FACTOR + 1, MIN_EXTERNAL_PULL), assets))  %% pre-fund the residual
@@ -48,20 +50,26 @@ sequenceDiagram
 
 ## Step by step
 
-1. **Vault entry.** `deposit(assets, receiver)` (or `mint`). `nonReentrant`. OZ checks
-   `assets <= maxDeposit(receiver)`, which is binary: `type(uint256).max` while the FM's
-   deposit-side gates clear (`FUND_MANAGER.canDepositExternal()`), else 0.
-   Shares are priced `previewDeposit(assets) = assets · (totalSupply + 10**offset) /
-   (totalAssets + 1)`. Because the deposit raises external principal + reserve by exactly
-   `assets`, NAV/supply is preserved and `shares ≈ assets` at entry.
+1. **Vault entry.** `deposit(assets, receiver)` (or `mint`, or `depositWithPermit` which
+   first consumes an EIP-2612 permit). `nonReentrant`, `whenDepositable` (reverts
+   `VAULT_TERMINATED` after the admin's one-way `terminate()`). OZ checks
+   `assets <= maxDeposit(receiver)`, which is binary: `type(uint256).max` while the vault
+   is not terminated and the FM's deposit-side gates clear
+   (`FUND_MANAGER.canDepositExternal()`), else 0. `assets` is **gross**: shares are priced
+   on the net `previewDeposit(assets) = (assets − DEPOSIT_FEE) · (totalSupply + 10**offset)
+   / (totalAssets + 1)`. Because the deposit raises external principal + reserve by exactly
+   the net amount, NAV/supply is preserved and `shares ≈ net` at entry.
 
-2. **`_deposit`.** Transfer `assets` from the caller straight to the FM, `_mint` the
-   shares (the `_update` hook skips `onShareTransfer` on the mint leg), then call
-   `FUND_MANAGER.onDeposit(receiver, assets)`.
+2. **`_deposit`.** Revert `DEPOSIT_BELOW_FEE` if `assets <= DEPOSIT_FEE` (`0.2e6`, 0.2 USDC).
+   Transfer `DEPOSIT_FEE` from the caller to `TREASURY` and the net `assets − DEPOSIT_FEE`
+   from the caller straight to the FM, `_mint` the shares (the `_update` hook skips
+   `onShareTransfer` on the mint leg), then call `FUND_MANAGER.onDeposit(receiver, net)`.
+   (`mint(shares)` charges the fee on top of the assets needed for `shares`.)
 
 3. **`onDeposit(receiver, assets)`** (`VAULT_ROLE`):
-   - **Grant units.** `units = _toUnit(assets) = assets / RAW_PER_UNIT` (one whole token
-     → `1e6` units). A sub-`RAW_PER_UNIT` dust deposit maps to 0 units and is skipped.
+   - **Grant units.** `units = _toUnit(net) = net / RAW_PER_UNIT` (one whole token
+     → `1e6` units; `RAW_PER_UNIT = 1` for the pinned 6-dec underlying, so every atom of
+     net principal buys a unit).
      The reserve target now reflects the new, higher unit count.
    - **Top up the reserve.** `_rebalanceYieldAssets()` pulls
      `min(deficit / SCALING_FACTOR + 1, externalPositionValue())` from the external
