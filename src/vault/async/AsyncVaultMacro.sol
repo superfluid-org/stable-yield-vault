@@ -22,6 +22,8 @@ import { ClearMacroBase } from "@superfluid-finance/ethereum-contracts/contracts
  */
 interface IAsyncVaultClaimDeposit {
 
+    /// @dev Mirrors {IStableYieldAsyncVault.deposit} (ERC-7540 claim) so `abi.encodeCall` can name the
+    ///      3-param overload unambiguously; never implemented here — the vault address is cast to it.
     function deposit(uint256 assets, address receiver, address controller) external returns (uint256 shares);
 
 }
@@ -137,12 +139,28 @@ contract AsyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice Format action params for the request-deposit action.
-     * @param assets Underlying amount the Permit2 signature authorizes and the vault escrows.
-     * @param operator ERC-7540 operator to approve alongside the request (`address(0)` = skip).
-     * @param nonce Permit2 unordered nonce of the signed permit.
-     * @param deadline Permit2 signature deadline.
-     * @param signature Permit2 `permitWitnessTransferFrom` signature (spender = vault, witness =
-     *        `VAULT.depositWitness(signer)`). NOT part of the EIP-712 action digest.
+     * @dev Produces `Payload.action.params` in the {ClearMacroBase} wire format
+     *      `abi.encode(uint8 actionId, bytes32 lang, abi.encode(assets, operator, nonce, deadline, signature))`.
+     *      `description`, `assets`, `operator`, `nonce` and `deadline` are bound into the EIP-712 action digest
+     *      the signer approves in their wallet; `signature` rides along outside it. Two signatures are thus
+     *      involved: the Permit2 witness signature carried here, and the Clear forwarder's payload signature
+     *      over the action digest — both by the same signer.
+     * @param lang Description language tag (e.g. `bytes32("en")`). Only English is supported — any other
+     *        value makes the description/digest helpers revert `UnsupportedLanguage`.
+     * @param assets Underlying amount the Permit2 signature authorizes and the vault escrows, in the
+     *        underlying's smallest unit (`ASSET_DECIMALS`, e.g. 6-dec USDC atoms). Must equal the permitted
+     *        amount exactly.
+     * @param operator ERC-7540 operator to approve alongside the request via `VAULT.setOperator(operator,
+     *        true)` executed as the signer (`address(0)` = skip the approval op).
+     * @param nonce Permit2 unordered nonce of the signed permit (any unused nonce for the signer on the
+     *        canonical Permit2).
+     * @param deadline Permit2 signature deadline (unix timestamp) as signed in the permit; forwarded verbatim
+     *        to `VAULT.requestDepositWithPermit2` and also bound into the action digest.
+     * @param signature Permit2 `permitWitnessTransferFrom` signature by the depositor over
+     *        `permitted = {token: VAULT.asset(), amount: assets}`, `spender = VAULT`, `nonce`, `deadline` and
+     *        witness `VAULT.depositWitness(signer)` typed with `VAULT.DEPOSIT_WITNESS_TYPE_STRING()` (the macro
+     *        sets `controller == signer`). NOT part of the EIP-712 action digest — Permit2 verifies it itself.
+     * @return ABI-encoded action params to hand to the Clear forwarder as `Payload.action.params`.
      */
     function encodeRequestDeposit(
         bytes32 lang,
@@ -159,6 +177,16 @@ contract AsyncVaultMacro is ClearMacroBase {
     /**
      * @notice The human-readable request-deposit description bound into the EIP-712 digest.
      * @dev The UI reads this back to assemble `message.action` so the wallet prompt matches the on-chain digest.
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param assets Underlying amount in underlying atoms — the same value passed to {encodeRequestDeposit};
+     *        rendered as a decimal string using `ASSET_DECIMALS`.
+     * @param operator Operator passed to {encodeRequestDeposit}; `address(0)` omits the "approve operator"
+     *        clause, otherwise the checksummed-hex address is spelled out in the sentence.
+     * @return The sentence the wallet displays at signing time, e.g.
+     *         `"Request a deposit of 100.5 USDC, approve operator 0x… and connect to the yield pool"` (the
+     *         connect clause is always present even when the connect op is later skipped because the signer
+     *         is already a pool member). Its `keccak256` is the `description` field of the signed `Action`
+     *         struct, so the string must be reproduced byte-for-byte in `message.action.description`.
      */
     function describeRequestDeposit(bytes32 lang, uint256 assets, address operator)
         public
@@ -170,9 +198,17 @@ contract AsyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice Format action params for the request-redeem action.
-     * @param shares Vault shares moved into the vault's redemption escrow for the signer.
-     * @param deadline Bound into the digest for wallet display; consumed by no op (the request
-     *        carries no permit — shares move by internal transfer).
+     * @dev Produces `Payload.action.params` in the {ClearMacroBase} wire format
+     *      `abi.encode(uint8 actionId, bytes32 lang, abi.encode(shares, deadline))`. Executes as a single
+     *      `ERC2771_FORWARD_CALL` → `VAULT.requestRedeem(shares, signer, signer)` (`owner == controller ==
+     *      signer`, so no share allowance is needed).
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param shares Vault shares moved into the vault's redemption escrow for the signer, in share atoms
+     *        (`SHARE_DECIMALS`). They are priced at the next settled epoch's rate.
+     * @param deadline Unix timestamp bound into the digest for wallet display; consumed by no op (the request
+     *        carries no permit — shares move by internal transfer) and NOT enforced on-chain by this macro.
+     *        Use the forwarder's `Security.validBefore` for an enforced expiry.
+     * @return ABI-encoded action params to hand to the Clear forwarder as `Payload.action.params`.
      */
     function encodeRequestRedeem(bytes32 lang, uint256 shares, uint256 deadline) public pure returns (bytes memory) {
         return abi.encode(uint8(ActionId.RequestRedeem), lang, abi.encode(shares, deadline));
@@ -180,6 +216,14 @@ contract AsyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice The human-readable request-redeem description bound into the EIP-712 digest.
+     * @dev The UI reads this back to assemble `message.action` so the wallet prompt matches the on-chain digest.
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param shares Share amount in share atoms — the same value passed to {encodeRequestRedeem}; rendered as
+     *        a decimal string using `SHARE_DECIMALS`.
+     * @return The sentence the wallet displays at signing time,
+     *         `"Request a redemption of <amount> <share symbol> shares"`. Its `keccak256` is the `description`
+     *         field of the signed `Action` struct, so the string must be reproduced byte-for-byte in
+     *         `message.action.description`.
      */
     function describeRequestRedeem(bytes32 lang, uint256 shares) public view returns (string memory) {
         return _requestRedeemDescription(lang, shares);
@@ -187,8 +231,17 @@ contract AsyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice Format action params for the claim-deposit action.
-     * @param assets Settled deposit assets to claim shares for.
-     * @param deadline Bound into the digest for wallet display; consumed by no op.
+     * @dev Produces `Payload.action.params` in the {ClearMacroBase} wire format
+     *      `abi.encode(uint8 actionId, bytes32 lang, abi.encode(assets, deadline))`. Executes as a single
+     *      `ERC2771_FORWARD_CALL` → `VAULT.deposit(assets, signer, signer)` (`controller == receiver ==
+     *      signer`): shares mint to the signer and their yield stream starts here (design decision D2).
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param assets Settled deposit assets to claim shares for, in underlying atoms (`ASSET_DECIMALS`); must be
+     *        `≤ VAULT.claimableDepositRequest(0, signer)`. Shares are minted at the locked epoch rate.
+     * @param deadline Unix timestamp bound into the digest for wallet display; consumed by no op and NOT
+     *        enforced on-chain by this macro. Use the forwarder's `Security.validBefore` for an enforced
+     *        expiry.
+     * @return ABI-encoded action params to hand to the Clear forwarder as `Payload.action.params`.
      */
     function encodeDeposit(bytes32 lang, uint256 assets, uint256 deadline) public pure returns (bytes memory) {
         return abi.encode(uint8(ActionId.Deposit), lang, abi.encode(assets, deadline));
@@ -196,6 +249,14 @@ contract AsyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice The human-readable claim-deposit description bound into the EIP-712 digest.
+     * @dev The UI reads this back to assemble `message.action` so the wallet prompt matches the on-chain digest.
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param assets Underlying amount in underlying atoms — the same value passed to {encodeDeposit}; rendered
+     *        as a decimal string using `ASSET_DECIMALS`.
+     * @return The sentence the wallet displays at signing time, e.g.
+     *         `"Claim vault shares for 100.5 USDC of settled deposits"`. Its `keccak256` is the `description`
+     *         field of the signed `Action` struct, so the string must be reproduced byte-for-byte in
+     *         `message.action.description`.
      */
     function describeDeposit(bytes32 lang, uint256 assets) public view returns (string memory) {
         return _depositDescription(lang, assets);
@@ -203,8 +264,18 @@ contract AsyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice Format action params for the withdraw action.
-     * @param assets Settled redemption assets to withdraw to the signer.
-     * @param deadline Bound into the digest for wallet display; consumed by no op.
+     * @dev Produces `Payload.action.params` in the {ClearMacroBase} wire format
+     *      `abi.encode(uint8 actionId, bytes32 lang, abi.encode(assets, deadline))`. Executes as a single
+     *      `ERC2771_FORWARD_CALL` → `VAULT.withdraw(assets, signer, signer)` (`controller == receiver ==
+     *      signer`): the underlying is paid to the signer; no shares move (they were escrowed at request time).
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param assets Settled redemption assets to withdraw to the signer, in underlying atoms (`ASSET_DECIMALS`);
+     *        must be `≤ VAULT.claimableRedeemRequest(0, signer)` valued at the locked epoch rate (i.e.
+     *        `≤ VAULT.maxWithdraw(signer)`).
+     * @param deadline Unix timestamp bound into the digest for wallet display; consumed by no op and NOT
+     *        enforced on-chain by this macro. Use the forwarder's `Security.validBefore` for an enforced
+     *        expiry.
+     * @return ABI-encoded action params to hand to the Clear forwarder as `Payload.action.params`.
      */
     function encodeWithdraw(bytes32 lang, uint256 assets, uint256 deadline) public pure returns (bytes memory) {
         return abi.encode(uint8(ActionId.Withdraw), lang, abi.encode(assets, deadline));
@@ -212,6 +283,14 @@ contract AsyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice The human-readable withdraw description bound into the EIP-712 digest.
+     * @dev The UI reads this back to assemble `message.action` so the wallet prompt matches the on-chain digest.
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param assets Underlying amount in underlying atoms — the same value passed to {encodeWithdraw}; rendered
+     *        as a decimal string using `ASSET_DECIMALS`.
+     * @return The sentence the wallet displays at signing time, e.g.
+     *         `"Withdraw 100.5 USDC of settled redemptions"`. Its `keccak256` is the `description` field of the
+     *         signed `Action` struct, so the string must be reproduced byte-for-byte in
+     *         `message.action.description`.
      */
     function describeWithdraw(bytes32 lang, uint256 assets) public view returns (string memory) {
         return _withdrawDescription(lang, assets);

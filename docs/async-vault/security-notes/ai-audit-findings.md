@@ -1,5 +1,7 @@
 # 🔐 Security Review — Async Vault Setup
 
+> **Internal AI-assisted security review — not a third-party audit.** This document was produced in-house (AI-assisted review / fuzzing) as pre-audit preparation and is published for transparency. It is a point-in-time snapshot (2026-07-03, pre-`VIRTUAL_SHARES`); findings marked *Status* below have been reconciled against the current code, everything else may be stale (line numbers in particular). It has not been reviewed by an independent security firm. See [`SECURITY.md`](../../../SECURITY.md).
+
 **Contracts:** `StableYieldAsyncVault` · `AsyncFundManager` · `FundManagerBase`
 **Date:** 2026-07-03
 **Method:** 8 parallel specialist agents (attack-vector, math/precision, access-control, economic, execution-trace, invariant, periphery, first-principles), deduplicated and gate-validated against source.
@@ -23,6 +25,8 @@ The shared `FundManagerBase.sol` engine is included because the async family inh
 ### [85] 1. First-depositor / donation inflation attack — no virtual-shares or decimals-offset protection on the epoch rate
 
 `StableYieldAsyncVault.onCloseEpoch` / `AsyncFundManager.closeEpoch` · **Confidence: 85**
+
+> **Status: fixed.** `onCloseEpoch` now prices the epoch OZ-style with virtual shares — `epochRate = (_totalAssets + 1).mulDiv(ASSETS_PER_SHARE_SCALE, effectiveSupply + VIRTUAL_SHARES)` with `VIRTUAL_SHARES = 1e12` — so a donation-inflated NAV dilutes mostly into the virtual holder and rounding a victim's shares to zero costs the attacker ~`1e12` × the victim's loss. The description below is kept as written at review time.
 
 **Description**
 

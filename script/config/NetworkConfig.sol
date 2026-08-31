@@ -39,8 +39,8 @@ library NetworkConfig {
             fundAdmin: 0xdc36265ca4505021250F02d3b711Dd9e9F23aD3D,
             initialEraStableYieldRate: 500,
             guaranteedFlowDuration: 7 days,
-            shareName: "PT Share v0.2",
-            shareSymbol: "Polytheme Share v0.2"
+            shareName: "Polytheme Share v0.2",
+            shareSymbol: "PTS"
         });
     }
 
@@ -60,10 +60,6 @@ library NetworkConfig {
             shareName: "SuperVault Technical Demo Share",
             shareSymbol: "SVTD"
         });
-    }
-
-    function getLocalConfig() internal pure returns (DeploymentConfig memory) {
-        return getPolygonMainnetConfig();
     }
 
 }

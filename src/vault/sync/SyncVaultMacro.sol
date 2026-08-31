@@ -94,7 +94,23 @@ contract SyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice Format action params for the deposit-and-connect action.
-     * @param assets Gross underlying amount (fee-inclusive) the permit authorizes and the vault pulls.
+     * @dev Produces `Payload.action.params` in the {ClearMacroBase} wire format
+     *      `abi.encode(uint8 actionId, bytes32 lang, abi.encode(assets, deadline, v, r, s))`. Only
+     *      `description`, `assets` and `deadline` are bound into the EIP-712 action digest the signer
+     *      approves in their wallet; `v, r, s` ride along *outside* the digest and are verified by the
+     *      underlying token's EIP-2612 `permit` when `VAULT.depositWithPermit` consumes them.
+     * @param lang Description language tag (e.g. `bytes32("en")`). Only English is supported — any other
+     *        value makes the description/digest helpers revert `UnsupportedLanguage`.
+     * @param assets Gross underlying amount (fee-inclusive) the permit authorizes and the vault pulls, in
+     *        the underlying's smallest unit (`ASSET_DECIMALS`, e.g. 6-dec USDC atoms). The vault skims its
+     *        flat deposit fee from it and deposits the net.
+     * @param deadline EIP-2612 permit deadline (unix timestamp) the signer put in the underlying's `permit`
+     *        message; forwarded verbatim to `VAULT.depositWithPermit` and also bound into the action digest.
+     * @param v `v` of the EIP-2612 permit signature, signed by the depositor over
+     *        `Permit(owner = signer, spender = VAULT, value = assets, nonce, deadline)` on the underlying token.
+     * @param r `r` of the same EIP-2612 permit signature.
+     * @param s `s` of the same EIP-2612 permit signature.
+     * @return ABI-encoded action params to hand to the Clear forwarder as `Payload.action.params`.
      */
     function encodeDepositAndConnect(bytes32 lang, uint256 assets, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         public
@@ -107,6 +123,13 @@ contract SyncVaultMacro is ClearMacroBase {
     /**
      * @notice The human-readable description bound into the EIP-712 digest.
      * @dev The UI reads this back to assemble `message.action` so the wallet prompt matches the on-chain digest.
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param assets Gross underlying amount (fee-inclusive) in underlying atoms — the same value passed to
+     *        {encodeDepositAndConnect}; rendered as a decimal string using `ASSET_DECIMALS`.
+     * @return The sentence the wallet displays at signing time, e.g.
+     *         `"Deposit 100.5 USDC (incl. fee) and connect to the yield pool"`. Its `keccak256` is the
+     *         `description` field of the signed `Action` struct, so the string must be reproduced byte-for-byte
+     *         in `message.action.description`.
      */
     function describeDepositAndConnect(bytes32 lang, uint256 assets) public view returns (string memory) {
         return _depositDescription(lang, assets);
@@ -114,7 +137,18 @@ contract SyncVaultMacro is ClearMacroBase {
 
     /**
      * @notice Format action params for the redeem action.
-     * @param shares Vault shares the signer burns; proceeds (OZ pro-rata NAV) are paid to the signer.
+     * @dev Produces `Payload.action.params` in the {ClearMacroBase} wire format
+     *      `abi.encode(uint8 actionId, bytes32 lang, abi.encode(shares, deadline))`. Executes as a single
+     *      `ERC2771_FORWARD_CALL` → `VAULT.redeem(shares, signer, signer)`: the signer's own shares are burnt
+     *      (no allowance needed) and the proceeds are paid to the signer.
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param shares Vault shares the signer burns, in share atoms (`SHARE_DECIMALS`, 18-dec for the USDC
+     *        deployment); proceeds (OZ pro-rata NAV, `shares · totalAssets / totalSupply`, floor) are paid to
+     *        the signer in underlying.
+     * @param deadline Unix timestamp bound into the EIP-712 digest for wallet display only; consumed by no op
+     *        (the redeem carries no permit) and NOT enforced on-chain by this macro. Use the forwarder's
+     *        `Security.validBefore` for an enforced expiry.
+     * @return ABI-encoded action params to hand to the Clear forwarder as `Payload.action.params`.
      */
     function encodeRedeem(bytes32 lang, uint256 shares, uint256 deadline) public pure returns (bytes memory) {
         return abi.encode(uint8(ActionId.Redeem), lang, abi.encode(shares, deadline));
@@ -123,6 +157,12 @@ contract SyncVaultMacro is ClearMacroBase {
     /**
      * @notice The human-readable redeem description bound into the EIP-712 digest
      * @dev The UI reads this back to assemble `message.action` so the wallet prompt matches the on-chain digest.
+     * @param lang Description language tag (`bytes32("en")` only; otherwise reverts `UnsupportedLanguage`).
+     * @param shares Share amount in share atoms — the same value passed to {encodeRedeem}; rendered as a
+     *        decimal string using `SHARE_DECIMALS`.
+     * @return The sentence the wallet displays at signing time, `"Redeem <amount> <share symbol> shares"` (the
+     *         vault's own ERC-20 symbol). Its `keccak256` is the `description` field of the signed `Action`
+     *         struct, so the string must be reproduced byte-for-byte in `message.action.description`.
      */
     function describeRedeem(bytes32 lang, uint256 shares) public view returns (string memory) {
         return _redeemDescription(lang, shares);

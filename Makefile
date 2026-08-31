@@ -1,6 +1,6 @@
 .PHONY: echidna-async-smoke echidna-async-long echidna-sync-smoke echidna-sync-long echidna-clean fork-test
 
-# Base-mainnet fork suite (override the RPC with BASE_RPC_URL, pin with BASE_FORK_BLOCK_NUMBER)
+# Base-mainnet fork suite (override the RPC with BASE_MAINNET_RPC_URL, pin with BASE_FORK_BLOCK_NUMBER)
 fork-test:
 	SKIP_FORK_TESTS=false forge test --match-contract BaseSyncVaultForkTest -vvv
 

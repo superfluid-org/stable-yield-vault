@@ -1,6 +1,8 @@
 # Echidna findings
 
-Running notes from the Echidna fuzzing harness in `test/echidna/EchidnaStableYieldVault.sol`. Each entry: minimum reproducer, what the harness asserted, why it fired, and the disposition.
+> **Internal fuzzing notes — not a third-party audit.** This document was produced in-house (AI-assisted review / fuzzing) as pre-audit preparation and is published for transparency. It is a point-in-time snapshot (June 2026, pre-`FundManager` split); findings marked *Status* below have been reconciled against the current code, everything else may be stale (line numbers in particular). It has not been reviewed by an independent security firm. See [`SECURITY.md`](../../../SECURITY.md).
+
+Running notes from the Echidna fuzzing harness in `test/echidna/EchidnaStableYieldAsyncVault.sol` (called `EchidnaStableYieldVault` at the time; `FundManager` below is today's `FundManagerBase` + `AsyncFundManager`). Each entry: minimum reproducer, what the harness asserted, why it fired, and the disposition.
 
 ---
 
@@ -23,7 +25,7 @@ Net effect: immediately after a successful `settleEpoch`, `yieldAssetsBalance()`
 
 **Why this matters.**
 
-- `docs/invariants.md` D.5 states `yieldAssetsBalance() ≥ _targetFlowRate · guaranteedFlowDuration` and claims "`canSettleEpoch` enforces the post-settlement version of this inequality before settlement runs." Both are true *up to the buffer*.
+- [`../invariants.md`](../invariants.md) D.5 states `yieldAssetsBalance() ≥ _targetFlowRate · guaranteedFlowDuration` and claims "`canSettleEpoch` enforces the post-settlement version of this inequality before settlement runs." Both are true *up to the buffer*.
 - `canSettleEpoch` checks the inequality using a balance read **before** the stream is started, so it passes. The harness checks **after**, and it fails.
 - This is not a fund-loss bug — the buffer is FM's own super-token collateral that gets refunded when the stream is reduced or stopped. But the spec wording is misleading, and any future code that takes D.5 at face value (e.g. a downstream contract that calls `evaluateYieldAssetsDeficit()` and reverts on positive values) would break by design.
 
@@ -56,7 +58,7 @@ POOL.decreaseMemberUnits(address(this), units);   // FM: N → N-1
 POOL.increaseMemberUnits(shareholder, units);     // receiver: 0 → 1
 ```
 
-When FM is the sole unit holder (common at low scale, and *always* true after the very first epoch's settlement before any other deposits exist), the decrement drops `pool.getTotalUnits()` to 0 between the two calls. Superfluid's GDA reacts to that transient zero by snapping its internal `flowRatePerUnit` accounting; when units return to the original count one call later, `pool.getTotalFlowRate()` does not exactly equal its pre-call value. The drift is rounding-level (small int96 truncation on per-unit rate computation), but the literal claim in `docs/invariants.md` D.3 — "Total pool units and `_targetFlowRate()` are unchanged" — is violated bit-exactly.
+When FM is the sole unit holder (common at low scale, and *always* true after the very first epoch's settlement before any other deposits exist), the decrement drops `pool.getTotalUnits()` to 0 between the two calls. Superfluid's GDA reacts to that transient zero by snapping its internal `flowRatePerUnit` accounting; when units return to the original count one call later, `pool.getTotalFlowRate()` does not exactly equal its pre-call value. The drift is rounding-level (small int96 truncation on per-unit rate computation), but the literal claim in [`../invariants.md`](../invariants.md) D.3 — "Total pool units and `_targetFlowRate()` are unchanged" — is violated bit-exactly.
 
 `getTotalUnits()` itself *is* conserved (the harness still asserts D.3a — that one passes).
 
@@ -75,12 +77,12 @@ POOL.decreaseMemberUnits(address(this), units);
 
 This keeps `totalUnits ∈ {N, N+1}` across the call rather than `{N, N-1, N}`. The intermediate state has `totalUnits = N+1` for one instruction, which the GDA handles cleanly.
 
-After the fix, the harness's D.3b assertion can be re-enabled (currently commented out — see `claim_deposit` in `EchidnaStableYieldVault.sol`).
+After the fix, the harness's D.3b assertion can be re-enabled (currently commented out — see `claim_deposit` in `EchidnaStableYieldAsyncVault.sol`).
 
 **Disposition.**
 
 1. The Echidna harness asserts D.3a (totalUnits conservation) but **not** D.3b (flow-rate conservation), with an inline comment cross-referencing this finding.
-2. Spec wording in `docs/invariants.md` D.3 should either tighten the wording or wait on the code fix.
+2. Spec wording in [`../invariants.md`](../invariants.md) D.3 should either tighten the wording or wait on the code fix.
 
 ---
 
@@ -113,7 +115,7 @@ The **`setStableYieldRate` rate-raise path** is a related but distinct trigger: 
 
 **Why this matters.**
 
-- `docs/invariants.md` D.5 states `yieldAssetsBalance() ≥ targetFlowRate · guaranteedFlowDuration` and claims `canSettleEpoch` enforces a post-settlement form before settlement. The pre-settlement check passes (it uses `balanceOf` consistently with the rebalance), but the **post-maintenance state can violate D.5**, breaking any downstream assumption that "after a maintenance op, FM is forward-solvent for `guaranteedFlowDuration`."
+- [`../invariants.md`](../invariants.md) D.5 states `yieldAssetsBalance() ≥ targetFlowRate · guaranteedFlowDuration` and claims `canSettleEpoch` enforces a post-settlement form before settlement. The pre-settlement check passes (it uses `balanceOf` consistently with the rebalance), but the **post-maintenance state can violate D.5**, breaking any downstream assumption that "after a maintenance op, FM is forward-solvent for `guaranteedFlowDuration`."
 - Known-gap **I.1** (`INVARIANT_VIOLATED` declared but never raised) is a *symptom* of this same issue: the interface NatSpec at `IAsyncFundManager.sol:126,136` claims `setStableYieldRate` and `setGuaranteedFlowDuration` revert on D.5 violations, but no preflight check exists. They rely on `_rebalanceYieldAssets` succeeding — which it does, just by under-upgrading rather than reverting.
 - Critical-state recovery is silent: there is no operator-visible signal that the FM is critical or that the last rebalance under-upgraded. `evaluateFunding()` and `evaluateYieldAssetsDeficit()` both read the clamped `balanceOf`, so they hide it.
 
@@ -135,7 +137,7 @@ The **`setStableYieldRate` rate-raise path** is a related but distinct trigger: 
 
 3. **Add the preflight check.** `setStableYieldRate` and `setGuaranteedFlowDuration` should compute the post-call required reserve, verify the rebalance can achieve it, and revert with `INVARIANT_VIOLATED` otherwise — matching the interface NatSpec. This closes gap I.1.
 
-4. **Restate D.5.** Until the contract is fixed, `docs/invariants.md` should weaken D.5 to "between maintenance operations the deficit is bounded by the GDA buffer plus accrued out-flow," and explicitly note that critical-state recovery requires multiple rebalance calls.
+4. **Restate D.5.** Until the contract is fixed, [`../invariants.md`](../invariants.md) should weaken D.5 to "between maintenance operations the deficit is bounded by the GDA buffer plus accrued out-flow," and explicitly note that critical-state recovery requires multiple rebalance calls.
 
 **Disposition.**
 

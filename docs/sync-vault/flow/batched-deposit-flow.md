@@ -3,8 +3,8 @@
 How a new depositor's onboarding — **EIP-2612 permit → deposit → connect to the GDA yield pool** —
 is collapsed into a single user-signed transaction via a Superfluid macro. This is an *optional
 periphery* path; the plain [deposit flow](./deposit-flow.md) is unchanged and remains the base case.
-See [`../design.md`](../design.md) for the model and the implementation plan at
-[`../plan/eip2771-batched-deposit.md`](../plan/eip2771-batched-deposit.md).
+See [`../design.md`](../design.md) for the model; the batching contract is
+`SyncVaultMacro` (`src/vault/sync/SyncVaultMacro.sol`).
 
 ## Contracts involved
 

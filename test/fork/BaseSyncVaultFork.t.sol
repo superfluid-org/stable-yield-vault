@@ -29,7 +29,7 @@ import { SyncFundManager } from "src/vault/sync/SyncFundManager.sol";
  *         maintenance (`ensureYieldFlowDuration`) at most every 12 hours.
  *
  *         Run with:    forge test --match-contract BaseSyncVaultForkTest -vvv
- *         Env knobs:   BASE_RPC_URL          (default: https://mainnet.base.org)
+ *         Env knobs:   BASE_MAINNET_RPC_URL  (default: https://mainnet.base.org)
  *                      BASE_FORK_BLOCK_NUMBER (default: 0 = latest; pin for determinism/caching)
  *                      SKIP_FORK_TESTS=true   (skip the whole suite, e.g. offline CI)
  */

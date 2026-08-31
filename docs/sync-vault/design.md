@@ -125,6 +125,7 @@ any value left to pull (`previewRedeem(balanceOf(FM)) > 0`). It only stops at
 | 10 | **First-deposit inflation** | Mitigated by OZ virtual shares: `_decimalsOffset()` returns a hardcoded `12`. |
 | 11 | **Capital custody hazard** | Principal never rests in the FundManager as raw underlying across calls. |
 | 12 | **External integration surface** | Morpho Vault V2: the external's `max*` (hardcoded 0) are never consulted. NAV via `previewRedeem(balanceOf)`; deposit/withdraw eligibility via the `can*` gate views; **no liquidity view** — the vault's own `maxWithdraw/maxRedeem` overestimate under an external liquidity crunch (a within-`max*` request can revert at the external leg; accepted, `forceDeallocate` is the unstick path). |
+| 13 | **Fees** | A 1% fee leg streams to `TREASURY` from the fee pool (shared engine) plus a flat `DEPOSIT_FEE` (0.2 USDC) per deposit, sent to `TREASURY` at entry. No withdrawal fee, no performance fee — the external surplus belongs to holders. |
 
 ---
 
@@ -142,8 +143,14 @@ the FundManager is meaningless in isolation.
 - **`_decimalsOffset()`** returns `12`, giving 18-decimal shares for the 6-decimal USDC
   deployment and a `10 ** 12` first-deposit-inflation attack-cost multiplier. Revisit
   this value for a non-6-decimal underlying.
-- **`_deposit`** pulls underlying from the caller straight to the FundManager, mints
-  shares, then calls `FUND_MANAGER.onDeposit(receiver, assets)`.
+- **`_deposit`** charges the flat **`DEPOSIT_FEE`** (`0.2e6` = 0.2 USDC, sent from the
+  caller to `TREASURY`), pulls the net underlying from the caller straight to the
+  FundManager, mints shares priced on the net, then calls
+  `FUND_MANAGER.onDeposit(receiver, net)`. `deposit(assets)` is gross (reverts
+  `DEPOSIT_BELOW_FEE` when `assets <= DEPOSIT_FEE`); `mint(shares)` adds the fee on top of
+  the assets required for `shares`; `previewDeposit`/`previewMint` include the fee,
+  `convertTo*` do not (ERC-4626 convention). `depositWithPermit` folds an EIP-2612 permit
+  in front of the same path.
 - **`_withdraw`** spends the allowance, snapshots the owner's balance and total supply
   *before* the burn, burns the shares, then calls
   `FUND_MANAGER.onWithdraw(owner, shares, totalSharesOwned, supplyBeforeBurn, receiver, assets)`.
@@ -161,14 +168,21 @@ the FundManager is meaningless in isolation.
 - **`deposit`/`mint`/`withdraw`/`redeem`** are `nonReentrant`. `preview*` functions
   use the OZ defaults and work synchronously — they do **not** revert (unlike the async
   vault).
-- **Admin lifecycle — `terminate()` only.** The sole admin control is the one-way
+- **Admin lifecycle — `terminate()` on the vault, `emergencyWithdraw` on the FM.** The
+  vault-level admin control is the one-way
   `terminate()` latch (authorized against the FM's `DEFAULT_ADMIN_ROLE`): it permanently
   closes the deposit leg (`maxDeposit`/`maxMint` → 0, `deposit`/`mint` revert
   `VAULT_TERMINATED` via `whenDepositable`) while leaving withdrawals open so holders can
   always exit. It is irreversible and a redundant call is a no-op. **There is no admin
   pause** — the withdraw leg is *never* blocked by an admin switch; the only thing that
   gates withdrawals is the automatic external pause below (external vault
-  failure / blocked exit gates).
+  failure / blocked exit gates). Separately, the inherited
+  `FundManagerBase.emergencyWithdraw(token, amount)` lets `DEFAULT_ADMIN_ROLE` move
+  `amount` of *any* ERC-20 held by the FM — the external-vault shares and the super-token
+  reserve included — to the immutable `TREASURY`. It is an escape hatch with no accounting
+  hook: NAV is a live balance read, so using it drops `totalAssets` for every holder. The
+  admin role must therefore be a multisig/timelock in any deployment holding third-party
+  funds (see Security).
 
 #### External pause
 
@@ -411,12 +425,20 @@ Morpho V2 specifics the integration relies on (vendored interface:
   appending a spoofed sender is ignored (`_msgSender()` stays `msg.sender`). The
   `depositWithPermit` entrypoint folds an EIP-2612 permit in (front-run tolerant via
   `try/catch`; `transferFrom`'s allowance check is the real gate). See
-  [`flow/batched-deposit-flow.md`](./flow/batched-deposit-flow.md) and
-  [`plan/eip2771-batched-deposit.md`](./plan/eip2771-batched-deposit.md).
+  [`flow/batched-deposit-flow.md`](./flow/batched-deposit-flow.md); the batching
+  contract is `SyncVaultMacro` (`src/vault/sync/SyncVaultMacro.sol`).
 
-- **Decimals.** Supported underlying decimals are `[6, 18]`. The hard-coded
-  `1e12 = SCALING_FACTOR · RAW_PER_UNIT` and the share offset assume the 6-decimal USDC
-  deployment; a non-6-decimal underlying needs the offset and scaling revisited.
+- **Decimals.** The vault constructor pins the underlying to **exactly 6 decimals**
+  (`INVALID_CONFIGURATION` otherwise). `FundManagerBase` computes `SCALING_FACTOR` /
+  `RAW_PER_UNIT` generically for `[6, 18]`, but the hard-coded
+  `1e12 = SCALING_FACTOR · RAW_PER_UNIT` and the share offset of `12` are only correct for
+  6 decimals, so the pin is what makes the deployment safe.
+
+- **Privileged roles.** `DEFAULT_ADMIN_ROLE` can `terminate()` the deposit leg and
+  `emergencyWithdraw` every asset the FM custodies to `TREASURY`; `FUND_OPERATOR_ROLE`
+  can set the promised rate every block (no era floor on-chain). Neither
+  is timelocked at the contract level. Holders are trusting the key-holders; deploy both
+  roles behind a multisig/timelock.
 
 ---
 
