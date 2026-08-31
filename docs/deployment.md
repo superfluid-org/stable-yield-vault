@@ -57,7 +57,7 @@ The library behind both scripts is
 
 ## 3. Post-deployment
 
-1. Record the addresses in [`deployments.md`](./deployments.md).
+1. Record the addresses in [`reference-deployments.md`](./reference-deployments.md).
 2. The FM's GDA pools exist and the FM is connected to its yield pool — nothing to do.
 3. **Sync:** the stream starts with the first deposit (which also pre-funds the reserve). Make a
    first deposit of at least a few USDC yourself so the vault is live and the empty-vault edge

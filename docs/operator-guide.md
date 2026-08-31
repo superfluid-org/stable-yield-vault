@@ -39,7 +39,7 @@ per-unit flow, rebalances the reserve, recalibrates the GDA flow. Constraints:
   `INSUFFICIENT_UNUTILIZED_ASSETS` if there isn't enough — `give` first).
 - `setStableYieldRate(0)` always succeeds (a zero flow needs no reserve). It is the emergency
   lever under impairment.
-- There is no minimum era duration on-chain (open question in both families). Keep a policy:
+- There is no minimum era duration on-chain (a known, accepted gap in both families). Keep a policy:
   announce rate changes, change at fixed boundaries.
 
 ### `setGuaranteedFlowDuration(uint256 seconds)` — admin
@@ -115,7 +115,7 @@ requests accumulate ──► closeEpoch(workingAssets) ──► canSettleEpoch
 Pitfalls:
 
 - A zero-NAV close with shares outstanding locks a rate of 0 and settlement of pending deposits
-  then reverts (division by zero) — see `async-vault/open-questions.md`. Never report
+  then reverts (division by zero). Never report
   `workingAssets` such that NAV is 0 while supply > 0.
 - Units are granted at claim, so a depositor who never claims never streams — the FM holds their
   units and the reserve target includes them. Encourage claiming (the macro can do it gaslessly).

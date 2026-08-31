@@ -57,7 +57,7 @@ Both share the streaming engine in [`src/common/FundManagerBase.sol`](src/common
 | Async | Polygon (137) | [`0x0cEE806c01F9F261808CdEbc125818Dd7af3e887`](https://polygonscan.com/address/0x0cEE806c01F9F261808CdEbc125818Dd7af3e887) | pUSD -> Polytheme |
 
 Full address tables (FundManagers, macros, superseded release candidates) in
-[`docs/deployments.md`](docs/deployments.md).
+[`docs/reference-deployments.md`](docs/reference-deployments.md).
 
 ## Quick start
 

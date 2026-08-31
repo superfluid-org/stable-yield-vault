@@ -38,7 +38,7 @@ it as `FUND_MANAGER()`. You will mostly talk to the vault, and read a few views 
 
 ## 2. Addresses and ABIs
 
-Live addresses: [`deployments.md`](./deployments.md). ABIs come out of `forge build`
+Live addresses: [`reference-deployments.md`](./reference-deployments.md). ABIs come out of `forge build`
 (`out/<Contract>.sol/<Contract>.json`); the interfaces you want are:
 
 | Contract | Interface |

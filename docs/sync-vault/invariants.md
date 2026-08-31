@@ -258,8 +258,7 @@ and (b) the external has instant liquidity for the leg. The harness gates the no
 assertion on both: solvency via `_assertNonNegativeYieldReserve` (under a live stream
 the FM never sits at `availableBalance < 0` because Superfluid sentinels liquidate at
 the zero-crossing — the harness models no liquidator, so a revert from an
-already-insolvent FM is the missing-sentinel artifact, not an E.1 violation; see
-[`security-notes/echidna-smoke-report-2026-06-08.md`](./security-notes/echidna-smoke-report-2026-06-08.md)), and liquidity via
+already-insolvent FM is the missing-sentinel artifact, not an E.1 violation), and liquidity via
 `_externalLiquidityCapped()` (the assertion is suspended while the mock's per-call
 liquidity cap is active, since within-`max*` liquidity reverts are the accepted
 deviation).

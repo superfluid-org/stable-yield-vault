@@ -436,7 +436,7 @@ Morpho V2 specifics the integration relies on (vendored interface:
 
 - **Privileged roles.** `DEFAULT_ADMIN_ROLE` can `terminate()` the deposit leg and
   `emergencyWithdraw` every asset the FM custodies to `TREASURY`; `FUND_OPERATOR_ROLE`
-  can set the promised rate every block (no era floor, see `open-questions.md`). Neither
+  can set the promised rate every block (no era floor on-chain). Neither
   is timelocked at the contract level. Holders are trusting the key-holders; deploy both
   roles behind a multisig/timelock.
 

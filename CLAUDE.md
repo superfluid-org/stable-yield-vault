@@ -29,8 +29,7 @@ Foundry project; `solc 0.8.34`, optimizer on (200 runs).
 | Terms | `docs/glossary.md` |
 | Operator / admin behaviour | `docs/operator-guide.md` |
 | Deploy scripts + per-network config | `docs/deployment.md`, `script/config/NetworkConfig.sol` |
-| Live addresses | `docs/deployments.md` |
-| Open policy questions | `docs/*/open-questions.md` |
+| Live addresses | `docs/reference-deployments.md` |
 
 ## Repo conventions and gotchas
 

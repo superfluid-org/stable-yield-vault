@@ -6,7 +6,7 @@
 | [`integration-guide.md`](./integration-guide.md) | For front-end and contract developers: deposit / withdraw / receive the stream / gasless macros / error catalogue. |
 | [`operator-guide.md`](./operator-guide.md) | For whoever holds `FUND_OPERATOR_ROLE` / `DEFAULT_ADMIN_ROLE`: cadence, epoch lifecycle, reserve upkeep, incidents. |
 | [`deployment.md`](./deployment.md) | Deploying your own instance with `NetworkConfig` and the forge scripts. |
-| [`deployments.md`](./deployments.md) | Addresses of the live and superseded deployments. |
+| [`reference-deployments.md`](./reference-deployments.md) | Addresses of the live and superseded deployments. |
 | [`glossary.md`](./glossary.md) | Every term used across the docs (epoch, era, units, reserve-inclusive NAV, ClearMacro, …). |
 
 ## Sync vault (`StableYieldSyncVault` + `SyncFundManager`)
@@ -18,7 +18,6 @@
 | [`sync-vault/flow/deposit-flow.md`](./sync-vault/flow/deposit-flow.md) | Step-by-step deposit, including the fee and the pre-funded stream. |
 | [`sync-vault/flow/withdraw-flow.md`](./sync-vault/flow/withdraw-flow.md) | Step-by-step withdraw / redeem and payout sourcing. |
 | [`sync-vault/flow/batched-deposit-flow.md`](./sync-vault/flow/batched-deposit-flow.md) | One-signature onboarding through `SyncVaultMacro` (permit + deposit + pool connect). |
-| [`sync-vault/open-questions.md`](./sync-vault/open-questions.md) | Policy questions still open, and the record of those resolved. |
 | [`sync-vault/security-notes/`](./sync-vault/security-notes/) | Internal AI-assisted review and Echidna reports (not a third-party audit). |
 
 ## Async vault (`StableYieldAsyncVault` + `AsyncFundManager`)
@@ -30,6 +29,4 @@
 | [`async-vault/flow/settlement-flow.md`](./async-vault/flow/settlement-flow.md) | `closeEpoch` / `settleEpoch`: NAV, effective supply, netting, unit grants. |
 | [`async-vault/flow/batched-request-flow.md`](./async-vault/flow/batched-request-flow.md) | Gasless requests and claims through `AsyncVaultMacro` (Permit2 witness + EIP-2771). |
 | [`async-vault/invariants.md`](./async-vault/invariants.md) | Property catalogue with the code that enforces each. |
-| [`async-vault/adoption/erc7540-adoption.md`](./async-vault/adoption/erc7540-adoption.md) | Why ERC-7540, and how the vault maps onto it. |
-| [`async-vault/open-questions.md`](./async-vault/open-questions.md) | Policy questions still open, and the record of those resolved. |
-| [`async-vault/security-notes/`](./async-vault/security-notes/) | Internal AI-assisted review, x-ray readiness report and Echidna reports (not a third-party audit). |
+| [`async-vault/security-notes/`](./async-vault/security-notes/) | Internal AI-assisted review and Echidna fuzzing notes (not a third-party audit). |
